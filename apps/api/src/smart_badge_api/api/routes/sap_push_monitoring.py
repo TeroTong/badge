@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time as monotonic_time
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -15,6 +17,11 @@ from smart_badge_api.schemas.pagination import PaginatedResponse, make_page_resp
 from smart_badge_api.schemas.sap_push_monitoring import SapPushMonitoringLogOut, SapPushMonitoringOverviewOut
 
 router = APIRouter(prefix="/sap-push-monitoring", tags=["SAP回传监控"])
+
+
+_OVERVIEW_CACHE_TTL_SECONDS = 30.0
+_overview_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+_overview_cache_lock = asyncio.Lock()
 
 
 def _split_visit_order_ref(raw_ref: str | None) -> tuple[str | None, str | None]:
@@ -52,6 +59,99 @@ def _normalize_response_attempt_groups(response_items: list[dict[str, Any]] | No
     for attempts in grouped.values():
         attempts.sort(key=lambda item: int(item.get("attempt") or 1))
     return grouped
+
+
+def _log_overview_statuses(
+    *,
+    status: str | None,
+    request_payloads: list[dict[str, Any]] | None,
+    response_items: list[dict[str, Any]] | None,
+) -> list[str]:
+    response_attempt_groups = _normalize_response_attempt_groups(list(response_items or []))
+    payload_count = sum(1 for item in list(request_payloads or []) if isinstance(item, dict))
+    target_count = max(payload_count, max(response_attempt_groups.keys(), default=0), 1)
+    base_result_status = str(status or "prepared")
+    result_statuses: list[str] = []
+    for target_index in range(1, target_count + 1):
+        attempts = list(response_attempt_groups.get(target_index, []))
+        final_attempt = attempts[-1] if attempts else None
+        if final_attempt is not None:
+            result_statuses.append("succeeded" if bool(final_attempt.get("success")) else "failed")
+        else:
+            result_statuses.append(base_result_status)
+    return result_statuses
+
+
+async def _build_sap_push_monitoring_overview(db: AsyncSession) -> SapPushMonitoringOverviewOut:
+    rows = (
+        await db.execute(
+            select(
+                SapPushLog.trigger_mode,
+                SapPushLog.status,
+                SapPushLog.request_payloads,
+                SapPushLog.response_items,
+                SapPushLog.sent_at,
+            )
+            .order_by(desc(SapPushLog.created_at))
+        )
+    ).all()
+
+    total_count = 0
+    succeeded_count = 0
+    failed_count = 0
+    pending_count = 0
+    auto_count = 0
+    manual_count = 0
+    latest_sent_at = None
+
+    for trigger_mode, status, request_payloads, response_items, sent_at in rows:
+        result_statuses = _log_overview_statuses(
+            status=status,
+            request_payloads=request_payloads,
+            response_items=response_items,
+        )
+        target_count = len(result_statuses)
+        total_count += target_count
+        if str(trigger_mode or "").strip() == "manual":
+            manual_count += target_count
+        else:
+            auto_count += target_count
+        for result_status in result_statuses:
+            if result_status == "succeeded":
+                succeeded_count += 1
+            elif result_status == "failed":
+                failed_count += 1
+            else:
+                pending_count += 1
+        if sent_at and latest_sent_at is None:
+            latest_sent_at = sent_at.isoformat()
+
+    return SapPushMonitoringOverviewOut(
+        total_count=total_count,
+        succeeded_count=succeeded_count,
+        failed_count=failed_count,
+        pending_count=pending_count,
+        auto_count=auto_count,
+        manual_count=manual_count,
+        latest_sent_at=latest_sent_at,
+    )
+
+
+async def _cached_sap_push_monitoring_overview(db: AsyncSession) -> SapPushMonitoringOverviewOut:
+    now = monotonic_time.monotonic()
+    cached_value = _overview_cache.get("value")
+    if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+        return cached_value
+
+    async with _overview_cache_lock:
+        now = monotonic_time.monotonic()
+        cached_value = _overview_cache.get("value")
+        if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+            return cached_value
+        value = await _build_sap_push_monitoring_overview(db)
+        _overview_cache["value"] = value
+        _overview_cache["expires_at"] = now + _OVERVIEW_CACHE_TTL_SECONDS
+        return value
 
 
 def _iter_monitoring_target_refs(log: SapPushLog) -> list[tuple[str, str | None]]:
@@ -233,10 +333,107 @@ def _matches_keyword(row: SapPushMonitoringLogOut, keyword: str) -> bool:
     )
 
 
+def _status_matches_filter(result_status: str, status_filter: str) -> bool:
+    return not status_filter or status_filter == "all" or result_status == status_filter
+
+
+def _sap_push_log_date_filters(date_from: date | None, date_to: date | None) -> list[Any]:
+    filters: list[Any] = []
+    effective_date_from = date_from or (datetime.now(timezone.utc).date() - timedelta(days=90))
+    filters.append(SapPushLog.created_at >= datetime.combine(effective_date_from, time.min, tzinfo=timezone.utc))
+    if date_to:
+        filters.append(SapPushLog.created_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    return filters
+
+
+async def _count_sap_push_monitoring_targets(
+    db: AsyncSession,
+    *,
+    status_filter: str,
+    trigger_mode: str,
+    date_from: date | None,
+    date_to: date | None,
+) -> int:
+    stmt = select(
+        SapPushLog.status,
+        SapPushLog.request_payloads,
+        SapPushLog.response_items,
+    ).where(*_sap_push_log_date_filters(date_from, date_to))
+    if trigger_mode and trigger_mode != "all":
+        stmt = stmt.where(SapPushLog.trigger_mode == trigger_mode)
+    rows = (await db.execute(stmt)).all()
+    total = 0
+    for status, request_payloads, response_items in rows:
+        total += sum(
+            1
+            for result_status in _log_overview_statuses(
+                status=status,
+                request_payloads=request_payloads,
+                response_items=response_items,
+            )
+            if _status_matches_filter(result_status, status_filter)
+        )
+    return total
+
+
+async def _load_sap_push_monitoring_page_rows(
+    db: AsyncSession,
+    *,
+    status_filter: str,
+    trigger_mode: str,
+    date_from: date | None,
+    date_to: date | None,
+    page: int,
+    page_size: int,
+) -> list[SapPushMonitoringLogOut]:
+    target_start = (page - 1) * page_size
+    target_end = target_start + page_size
+    matched_seen = 0
+    collected: list[SapPushMonitoringLogOut] = []
+    log_offset = 0
+    chunk_size = max(50, min(500, page_size * 5))
+    base_filters = _sap_push_log_date_filters(date_from, date_to)
+
+    while len(collected) < page_size:
+        stmt = (
+            select(SapPushLog)
+            .options(selectinload(SapPushLog.recording))
+            .where(*base_filters)
+            .order_by(desc(SapPushLog.created_at))
+            .offset(log_offset)
+            .limit(chunk_size)
+        )
+        if trigger_mode and trigger_mode != "all":
+            stmt = stmt.where(SapPushLog.trigger_mode == trigger_mode)
+        logs = (await db.execute(stmt)).scalars().all()
+        if not logs:
+            break
+
+        visit_order_lookup = await _load_visit_order_lookup(db, logs)
+        for log in logs:
+            for row in _to_monitoring_log_rows(log, visit_order_lookup=visit_order_lookup):
+                if not _status_matches_filter(row.result_status, status_filter):
+                    continue
+                if matched_seen >= target_start and matched_seen < target_end:
+                    collected.append(row)
+                    if len(collected) >= page_size:
+                        break
+                matched_seen += 1
+            if len(collected) >= page_size:
+                break
+        log_offset += len(logs)
+        if len(logs) < chunk_size:
+            break
+
+    return collected
+
+
 @router.get("/overview", response_model=SapPushMonitoringOverviewOut)
 async def get_sap_push_monitoring_overview(
     db: AsyncSession = Depends(get_db),
 ):
+    return await _cached_sap_push_monitoring_overview(db)
+
     logs = (
         await db.execute(
             select(SapPushLog)
@@ -299,6 +496,25 @@ async def list_sap_push_monitoring_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ):
+    if not (keyword and keyword.strip()):
+        total = await _count_sap_push_monitoring_targets(
+            db,
+            status_filter=status,
+            trigger_mode=trigger_mode,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        rows = await _load_sap_push_monitoring_page_rows(
+            db,
+            status_filter=status,
+            trigger_mode=trigger_mode,
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            page_size=page_size,
+        )
+        return make_page_response(rows, total, page, page_size)
+
     stmt = select(SapPushLog).options(selectinload(SapPushLog.recording)).order_by(desc(SapPushLog.created_at))
     if trigger_mode and trigger_mode != "all":
         stmt = stmt.where(SapPushLog.trigger_mode == trigger_mode)

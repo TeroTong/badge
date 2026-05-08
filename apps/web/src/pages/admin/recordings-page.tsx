@@ -666,6 +666,7 @@ export function RecordingsPage() {
         date_to: queryFilters.dateRange?.[1]?.format('YYYY-MM-DD'),
         page,
         page_size: pageSize,
+        fast_page: true,
       }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,

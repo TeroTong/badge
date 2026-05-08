@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, distinct, exists, false, func, or_, select, true, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import load_only, selectinload
 
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result, normalize_profile_themes
 from smart_badge_api.api.archive_candidates import build_pending_archive_recordings_by_visit_id
@@ -29,6 +29,7 @@ from smart_badge_api.db.models import (
     Staff,
     StaffManagementRelation,
     TagCategory,
+    Transcript,
     Visit,
     VisitOrder,
 )
@@ -273,6 +274,173 @@ def _recording_customer_fast_id_stmt(
             Customer.id.asc(),
         )
     )
+
+
+def _fast_customer_visible_visit_rows(
+    *,
+    customer_ids: list[str],
+    visible_staff_ids: set[str] | None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    recording_scope = _recording_staff_scope_condition(visible_staff_ids)
+    visit_filters = [Visit.customer_id.in_(customer_ids)]
+    if date_from:
+        visit_filters.append(Visit.visit_date >= date_from)
+    if date_to:
+        visit_filters.append(Visit.visit_date <= date_to)
+
+    direct_recording_visits = (
+        select(
+            Visit.customer_id.label("customer_id"),
+            Visit.id.label("visit_id"),
+            Visit.status.label("status"),
+            Visit.deposit_principal.label("deposit_principal"),
+            Visit.visit_date.label("visit_date"),
+            Visit.visit_time.label("visit_time"),
+            Visit.created_at.label("created_at"),
+        )
+        .join(Recording, Recording.visit_id == Visit.id)
+        .where(recording_scope, *visit_filters)
+    )
+    linked_recording_visits = (
+        select(
+            Visit.customer_id.label("customer_id"),
+            Visit.id.label("visit_id"),
+            Visit.status.label("status"),
+            Visit.deposit_principal.label("deposit_principal"),
+            Visit.visit_date.label("visit_date"),
+            Visit.visit_time.label("visit_time"),
+            Visit.created_at.label("created_at"),
+        )
+        .select_from(RecordingVisitLink)
+        .join(Visit, Visit.id == RecordingVisitLink.visit_id)
+        .join(Recording, Recording.id == RecordingVisitLink.recording_id)
+        .where(recording_scope, *visit_filters)
+    )
+    return union_all(direct_recording_visits, linked_recording_visits).subquery()
+
+
+async def _fast_customer_visit_stats_map(
+    db: AsyncSession,
+    customer_ids: list[str],
+    visible_staff_ids: set[str] | None,
+) -> dict[str, dict[str, int | float | None]]:
+    if not customer_ids:
+        return {}
+
+    visible_visit_rows = _fast_customer_visible_visit_rows(
+        customer_ids=customer_ids,
+        visible_staff_ids=visible_staff_ids,
+    )
+    dedup_visits = (
+        select(
+            visible_visit_rows.c.customer_id,
+            visible_visit_rows.c.visit_id,
+            func.max(visible_visit_rows.c.status).label("status"),
+            func.max(visible_visit_rows.c.deposit_principal).label("deposit_principal"),
+        )
+        .group_by(visible_visit_rows.c.customer_id, visible_visit_rows.c.visit_id)
+        .subquery()
+    )
+    rows = (
+        await db.execute(
+            select(
+                dedup_visits.c.customer_id,
+                func.count(dedup_visits.c.visit_id).label("visit_count"),
+                func.sum(case((dedup_visits.c.status == "closed_won", 1), else_=0)).label("closed_won_count"),
+                func.sum(dedup_visits.c.deposit_principal).label("total_deposit_principal"),
+            )
+            .group_by(dedup_visits.c.customer_id)
+        )
+    ).all()
+    return {
+        customer_id: {
+            "visit_count": int(visit_count or 0),
+            "closed_won_count": int(closed_won_count or 0),
+            "total_deposit_principal": float(total_deposit_principal)
+            if total_deposit_principal is not None
+            else None,
+        }
+        for customer_id, visit_count, closed_won_count, total_deposit_principal in rows
+    }
+
+
+async def _fast_customer_latest_visit_map(
+    db: AsyncSession,
+    customer_ids: list[str],
+    visible_staff_ids: set[str] | None,
+    *,
+    date_from: date | None,
+    date_to: date | None,
+) -> dict[str, datetime]:
+    if not customer_ids:
+        return {}
+
+    visible_visit_rows = _fast_customer_visible_visit_rows(
+        customer_ids=customer_ids,
+        visible_staff_ids=visible_staff_ids,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    rows = (
+        await db.execute(
+            select(
+                visible_visit_rows.c.customer_id,
+                visible_visit_rows.c.visit_date,
+                visible_visit_rows.c.visit_time,
+                visible_visit_rows.c.created_at,
+            )
+        )
+    ).all()
+    latest_visit_map: dict[str, datetime] = {}
+    for customer_id, visit_date, visit_time, created_at in rows:
+        resolved_at = _resolve_visit_display_datetime(visit_date, visit_time, created_at)
+        if resolved_at is None:
+            continue
+        current = latest_visit_map.get(customer_id)
+        if current is None or _timestamp_key(resolved_at) > _timestamp_key(current):
+            latest_visit_map[customer_id] = resolved_at
+    return latest_visit_map
+
+
+async def _fast_customer_recording_count_map(
+    db: AsyncSession,
+    customer_ids: list[str],
+    visible_staff_ids: set[str] | None,
+) -> dict[str, int]:
+    if not customer_ids:
+        return {}
+
+    recording_scope = _recording_staff_scope_condition(visible_staff_ids)
+    direct_recordings = (
+        select(
+            Visit.customer_id.label("customer_id"),
+            Recording.id.label("recording_id"),
+        )
+        .join(Visit, Visit.id == Recording.visit_id)
+        .where(Visit.customer_id.in_(customer_ids), recording_scope)
+    )
+    linked_recordings = (
+        select(
+            Visit.customer_id.label("customer_id"),
+            RecordingVisitLink.recording_id.label("recording_id"),
+        )
+        .join(Visit, Visit.id == RecordingVisitLink.visit_id)
+        .join(Recording, Recording.id == RecordingVisitLink.recording_id)
+        .where(Visit.customer_id.in_(customer_ids), recording_scope)
+    )
+    recording_rows = union_all(direct_recordings, linked_recordings).subquery()
+    rows = (
+        await db.execute(
+            select(
+                recording_rows.c.customer_id,
+                func.count(distinct(recording_rows.c.recording_id)).label("recording_count"),
+            )
+            .group_by(recording_rows.c.customer_id)
+        )
+    ).all()
+    return {customer_id: int(recording_count or 0) for customer_id, recording_count in rows}
 
 
 async def _customer_type_map(
@@ -1081,22 +1249,23 @@ async def list_customers(
     current_user=Depends(get_current_user),
 ):
     scope = await build_permission_scope(current_user)
-    include_summaries = include_date_summaries is not False
     use_fast_page = fast_page is True
+    include_summaries = include_date_summaries is not False and not use_fast_page
     has_date_filter = bool(date_from or date_to)
 
     use_recording_fast_path = (
         use_fast_page
         and not include_summaries
-        and has_recordings is True
+        and has_recordings is not False
         and has_visits is None
         and has_positive_recharge is None
     )
 
+    fast_visible_staff_ids: set[str] | None = None
     if use_recording_fast_path:
-        visible_staff_ids = await _managed_staff_ids_for_user(db, current_user)
+        fast_visible_staff_ids = await _managed_staff_ids_for_user(db, current_user)
         id_stmt = _recording_customer_fast_id_stmt(
-            visible_staff_ids=visible_staff_ids,
+            visible_staff_ids=fast_visible_staff_ids,
             consultant_id=consultant_id,
             date_from=date_from,
             date_to=date_to,
@@ -1194,32 +1363,43 @@ async def list_customers(
             await db.execute(select(Customer).where(Customer.id.in_(customer_ids)))
         ).scalars().all()
         customers_by_id = {customer.id: customer for customer in customers}
-        visit_stats_map = await _customer_visit_stats_map(db, customer_ids, scope)
-        latest_visit_conditions = [
-            Visit.customer_id.in_(customer_ids),
-            visit_scope_condition(scope),
-            _visit_has_visible_recordings_condition(scope),
-        ]
-        if date_from:
-            latest_visit_conditions.append(Visit.visit_date >= date_from)
-        if date_to:
-            latest_visit_conditions.append(Visit.visit_date <= date_to)
-        latest_visits = (
-            await db.execute(
-                select(Visit.customer_id, Visit.visit_date, Visit.visit_time, Visit.created_at).where(
-                    *latest_visit_conditions,
-                )
+        if use_recording_fast_path:
+            visit_stats_map = await _fast_customer_visit_stats_map(db, customer_ids, fast_visible_staff_ids)
+            latest_visit_map = await _fast_customer_latest_visit_map(
+                db,
+                customer_ids,
+                fast_visible_staff_ids,
+                date_from=date_from,
+                date_to=date_to,
             )
-        ).all()
-        for customer_id, visit_date, visit_time, created_at in latest_visits:
-            resolved_at = _resolve_visit_display_datetime(visit_date, visit_time, created_at)
-            if resolved_at is None:
-                continue
-            current = latest_visit_map.get(customer_id)
-            if current is None or _timestamp_key(resolved_at) > _timestamp_key(current):
-                latest_visit_map[customer_id] = resolved_at
-        recording_count_map = await _customer_recording_count_map(db, customer_ids, scope)
-    customer_type_map = await _customer_type_map(db, customer_ids, scope)
+            recording_count_map = await _fast_customer_recording_count_map(db, customer_ids, fast_visible_staff_ids)
+        else:
+            visit_stats_map = await _customer_visit_stats_map(db, customer_ids, scope)
+            latest_visit_conditions = [
+                Visit.customer_id.in_(customer_ids),
+                visit_scope_condition(scope),
+                _visit_has_visible_recordings_condition(scope),
+            ]
+            if date_from:
+                latest_visit_conditions.append(Visit.visit_date >= date_from)
+            if date_to:
+                latest_visit_conditions.append(Visit.visit_date <= date_to)
+            latest_visits = (
+                await db.execute(
+                    select(Visit.customer_id, Visit.visit_date, Visit.visit_time, Visit.created_at).where(
+                        *latest_visit_conditions,
+                    )
+                )
+            ).all()
+            for customer_id, visit_date, visit_time, created_at in latest_visits:
+                resolved_at = _resolve_visit_display_datetime(visit_date, visit_time, created_at)
+                if resolved_at is None:
+                    continue
+                current = latest_visit_map.get(customer_id)
+                if current is None or _timestamp_key(resolved_at) > _timestamp_key(current):
+                    latest_visit_map[customer_id] = resolved_at
+            recording_count_map = await _customer_recording_count_map(db, customer_ids, scope)
+    customer_type_map = {} if use_fast_page else await _customer_type_map(db, customer_ids, scope)
 
     results = []
     for customer_id in customer_ids:
@@ -1270,57 +1450,28 @@ async def get_customer(
     if not customer:
         raise HTTPException(404, "客户不存在")
 
-    visit_count = (
-        await db.execute(
-            select(func.count(Visit.id)).where(
-                Visit.customer_id == customer_id,
-                visit_scope_condition(scope),
-                _visit_has_visible_recordings_condition(scope),
-            )
+    visible_staff_ids = await _managed_staff_ids_for_user(db, current_user)
+    stats = (
+        await _fast_customer_visit_stats_map(
+            db,
+            [customer_id],
+            visible_staff_ids,
         )
-    ).scalar_one()
-    closed_won_count = (
-        await db.execute(
-            select(func.count(Visit.id)).where(
-                Visit.customer_id == customer_id,
-                Visit.status == "closed_won",
-                visit_scope_condition(scope),
-                _visit_has_visible_recordings_condition(scope),
-            )
-        )
-    ).scalar_one()
-    latest_visit = (
-        await db.execute(
-            select(Visit.visit_date, Visit.visit_time, Visit.created_at)
-            .where(
-                Visit.customer_id == customer_id,
-                visit_scope_condition(scope),
-                _visit_has_visible_recordings_condition(scope),
-            )
-            .order_by(Visit.visit_date.desc(), Visit.visit_time.desc(), Visit.created_at.desc())
-            .limit(1)
-        )
-    ).first()
-    last_visit_at = (
-        _resolve_visit_display_datetime(latest_visit[0], latest_visit[1], latest_visit[2])
-        if latest_visit
-        else None
+    ).get(customer_id, {})
+    latest_visit_map = await _fast_customer_latest_visit_map(
+        db,
+        [customer_id],
+        visible_staff_ids,
+        date_from=None,
+        date_to=None,
     )
-    total_deposit_principal = (
-        await db.execute(
-            select(func.sum(Visit.deposit_principal)).where(
-                Visit.customer_id == customer_id,
-                visit_scope_condition(scope),
-                _visit_has_visible_recordings_condition(scope),
-            )
-        )
-    ).scalar_one()
+    last_visit_at = latest_visit_map.get(customer_id)
 
     return _to_out(
         customer,
-        visit_count=int(visit_count or 0),
-        closed_won_count=int(closed_won_count or 0),
-        total_deposit_principal=float(total_deposit_principal) if total_deposit_principal is not None else None,
+        visit_count=int(stats.get("visit_count") or 0),
+        closed_won_count=int(stats.get("closed_won_count") or 0),
+        total_deposit_principal=stats.get("total_deposit_principal"),  # type: ignore[arg-type]
         customer_type=await _resolve_customer_type(db, customer_id, scope),
         last_visit_at=last_visit_at.isoformat() if last_visit_at else None,
     )
@@ -1350,9 +1501,19 @@ async def get_customer_detail(
                 .options(
                     selectinload(Visit.consultant),
                     selectinload(Visit.doctor),
-                    selectinload(Visit.recordings).selectinload(Recording.transcript),
+                    selectinload(Visit.recordings).selectinload(Recording.transcript).load_only(
+                        Transcript.id,
+                        Transcript.status,
+                        Transcript.asr_provider,
+                        Transcript.full_text,
+                    ),
                     selectinload(Visit.recordings).selectinload(Recording.staff),
-                    selectinload(Visit.recording_links).selectinload(RecordingVisitLink.recording).selectinload(Recording.transcript),
+                    selectinload(Visit.recording_links).selectinload(RecordingVisitLink.recording).selectinload(Recording.transcript).load_only(
+                        Transcript.id,
+                        Transcript.status,
+                        Transcript.asr_provider,
+                        Transcript.full_text,
+                    ),
                     selectinload(Visit.recording_links).selectinload(RecordingVisitLink.recording).selectinload(Recording.staff),
                 )
             )

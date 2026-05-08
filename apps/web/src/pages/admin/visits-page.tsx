@@ -25,11 +25,9 @@ import dayjs, { type Dayjs } from 'dayjs'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import * as adminApi from '@/api/admin'
-import * as recordingsApi from '@/api/recordings'
 import type { Visit } from '@/api/visits'
 import { VISIT_STATUS_MAP } from '@/api/visits'
 import * as visitsApi from '@/api/visits'
-import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { beijingNow } from '@/utils/time'
 
 const { RangePicker } = DatePicker
@@ -78,19 +76,6 @@ function resolveDateRange(
       return { from: today.subtract(89, 'day').format('YYYY-MM-DD'), to: today.format('YYYY-MM-DD') }
     default:
       return {}
-  }
-}
-
-function getVisitSummary(
-  visit: Visit,
-  recordings: Awaited<ReturnType<typeof recordingsApi.fetchRecordings>>['items'],
-) {
-  const relatedRecordings = recordings
-    .filter((recording) => recording.visit_id === visit.id)
-    .sort((left, right) => dayjs(right.created_at).valueOf() - dayjs(left.created_at).valueOf())
-
-  return {
-    relatedRecordings,
   }
 }
 
@@ -196,6 +181,7 @@ export function VisitsPage() {
         date_from: dateRange.from,
         date_to: dateRange.to,
         include_date_summaries: false,
+        fast_page: true,
         page,
         page_size: pageSize,
       }),
@@ -236,33 +222,12 @@ export function VisitsPage() {
   const staff = staffData?.items ?? []
   const consultants = staff.filter((member) => member.role === 'consultant' || member.role === 'manager')
 
-  const { data: recordingsData } = useQuery({
-    queryKey: ['recordings', 'visit-workbench'],
-    queryFn: () => recordingsApi.fetchRecordings({ page_size: 100 }),
-  })
-  const recordings = recordingsData?.items ?? []
-
-  const summaryCountParams = useMemo(() => ({
-    keyword: keyword || undefined,
-    consultant_id: consultantFilter,
-    date_from: dateRange.from,
-    date_to: dateRange.to,
-    include_date_summaries: false,
-    page: 1,
-    page_size: 1,
-  }), [consultantFilter, dateRange.from, dateRange.to, keyword])
-
-  const { data: linkedVisitsStats } = useQuery({
-    queryKey: ['visits-workbench', 'stats', 'linked', summaryCountParams],
-    queryFn: () => visitsApi.fetchVisits({ ...summaryCountParams, has_recordings: true }),
-    staleTime: 30_000,
-  })
-
   const visits = data?.items ?? []
   const total = data?.total ?? 0
 
   const pendingLinkCount = visits.filter((visit) => visit.recording_count === 0).length
-  const linkedRecordingCount = linkedVisitsStats?.total ?? 0
+  const linkedVisitCount = visits.filter((visit) => visit.recording_count > 0).length
+  const hasNextPage = total > page * pageSize
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['visits'] })
@@ -346,12 +311,12 @@ export function VisitsPage() {
 
         <div className="visit-page__hero-stats">
           <div className="visit-stat-chip">
-            <span>当前接诊</span>
-            <strong>{total}</strong>
+            <span>当前页接诊</span>
+            <strong>{visits.length}</strong>
           </div>
           <div className="visit-stat-chip">
-            <span>已关联录音</span>
-            <strong>{linkedRecordingCount}</strong>
+            <span>当前页已关联</span>
+            <strong>{linkedVisitCount}</strong>
           </div>
         </div>
       </div>
@@ -492,7 +457,7 @@ export function VisitsPage() {
                 </div>
                 <div className="visit-card-grid">
                   {group.items.map((visit) => {
-            const summary = getVisitSummary(visit, recordings)
+            const recordingCount = visit.recording_count ?? 0
             return (
               <article key={visit.id} className="visit-card visit-card--interactive" onClick={() => openVisitDetail(visit.id)}>
                 <header className="visit-card__header">
@@ -539,32 +504,15 @@ export function VisitsPage() {
                     <div className="visit-card__recordings-panel">
                       <div className="visit-card__recordings-title">
                         <AudioOutlined style={{ marginRight: 4 }} />
-                        关联录音 ({summary.relatedRecordings.length})
+                        关联录音 ({recordingCount})
                       </div>
-                      {summary.relatedRecordings.length === 0 ? (
+                      {recordingCount === 0 ? (
                         <div className="visit-card__recordings-empty">暂无关联录音</div>
                       ) : (
                         <div className="visit-card__recordings-list">
-                          {summary.relatedRecordings.slice(0, 3).map((rec) => (
-                            <div key={rec.id} className="visit-card__recording-item">
-                              <div className="visit-card__recording-info">
-                                <span className="visit-card__recording-name" title={formatRecordingDisplayName(rec.file_name, rec.created_at)}>
-                                  {formatRecordingDisplayName(rec.file_name, rec.created_at)}
-                                </span>
-                                <span className="visit-card__recording-meta">
-                                  {rec.duration_seconds != null
-                                    ? `${Math.floor(rec.duration_seconds / 60)}分${Math.round(rec.duration_seconds % 60)}秒`
-                                    : '时长未知'}
-                                  {rec.staff_name ? ` · ${rec.staff_name}` : ''}
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                          {summary.relatedRecordings.length > 3 && (
-                            <div className="visit-card__recordings-more">
-                              还有 {summary.relatedRecordings.length - 3} 条录音...
-                            </div>
-                          )}
+                          <div className="visit-card__recordings-more">
+                            已关联 {recordingCount} 条录音，打开详情查看录音与分析。
+                          </div>
                         </div>
                       )}
                     </div>
@@ -623,7 +571,7 @@ export function VisitsPage() {
       )}
 
       <div className="visit-pagination">
-        <span>共 {total} 条</span>
+        <span>{hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`}</span>
         <Pagination
           current={page}
           pageSize={pageSize}

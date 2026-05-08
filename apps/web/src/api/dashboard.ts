@@ -203,12 +203,14 @@ export const fetchDashboard = (
         hospital_code?: string | null
         scope_mode?: 'all' | 'mine'
         staff_id?: string | null
+        detail_level?: 'summary' | 'full'
         date_from?: string
         date_to?: string
       },
   params?: {
     scope_mode?: 'all' | 'mine'
     staff_id?: string | null
+    detail_level?: 'summary' | 'full'
     date_from?: string
     date_to?: string
   },
@@ -220,6 +222,7 @@ export const fetchDashboard = (
           hospital_code: input ?? undefined,
           scope_mode: params?.scope_mode,
           staff_id: params?.staff_id,
+          detail_level: params?.detail_level,
           date_from: params?.date_from,
           date_to: params?.date_to,
         }
@@ -227,6 +230,7 @@ export const fetchDashboard = (
   if (options.hospital_code) searchParams.set('hospital_code', options.hospital_code)
   if (options.scope_mode) searchParams.set('scope_mode', options.scope_mode)
   if (options.staff_id) searchParams.set('staff_id', options.staff_id)
+  if (options.detail_level) searchParams.set('detail_level', options.detail_level)
   if (options.date_from) searchParams.set('date_from', options.date_from)
   if (options.date_to) searchParams.set('date_to', options.date_to)
 

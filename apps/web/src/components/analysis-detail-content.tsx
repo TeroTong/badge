@@ -28,6 +28,15 @@ function formatChiefIndicationLine(item: StandardizedIndicationItem): string {
   return [departmentPart, indicationPart, bodyPart].filter(Boolean).join('｜')
 }
 
+function sapPreviewValue(value: unknown): string {
+  return String(value ?? '').trim()
+}
+
+function sapPreviewText(value: AnalysisDetail['sap_consultation_preview']): string {
+  const firstPayload = value?.payloads?.find((item) => Boolean(item && typeof item === 'object'))
+  return sapPreviewValue(firstPayload?.text)
+}
+
 function normalizeEvidenceKey(value: string | null | undefined): string {
   return String(value ?? '')
     .trim()
@@ -759,6 +768,7 @@ export function AnalysisDetailContent({
   const profile = data.customer_profile
   const consultationResult = data.consultation_result
   const processEvaluation = data.consultation_process_evaluation
+  const primarySapText = sapPreviewText(data.sap_consultation_preview)
   const processTotalScore = processEvaluation.total_score
     ?? processEvaluation.sections.reduce((sum, section) => sum + (getProcessPointScore(section) ?? 0), 0)
   const chiefDemandItems = (primaryDemands?.items?.length ?? 0) > 0
@@ -1337,6 +1347,27 @@ export function AnalysisDetailContent({
             </div>
           </div>
         </AnalysisSection>
+
+        {!embeddedSimplified ? (
+          <AnalysisSection
+            title="SAP预回写内容"
+            embedded={embedded}
+            defaultOpen={embeddedSectionDefaultOpen}
+          >
+            <div className="ad-sap-preview">
+              <div className="ad-sap-preview__panel ad-sap-preview__panel--text">
+                <h3 className="ad-sap-preview__title">咨询备注</h3>
+                {primarySapText ? (
+                  <pre className="ad-sap-preview__text">{primarySapText}</pre>
+                ) : (
+                  <p className="ad-sap-preview__empty">
+                    暂未生成SAP预回写内容。录音完成LLM分析后会在这里展示预回写给SAP的咨询备注。
+                  </p>
+                )}
+              </div>
+            </div>
+          </AnalysisSection>
+        ) : null}
 
         <AnalysisSection
           title="面诊过程评价"

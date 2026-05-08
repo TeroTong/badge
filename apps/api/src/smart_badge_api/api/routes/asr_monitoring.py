@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time as monotonic_time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,9 @@ from smart_badge_api.schemas.pagination import PaginatedResponse, make_page_resp
 router = APIRouter(prefix="/asr-monitoring", tags=["ASR监控"])
 
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
+_OVERVIEW_CACHE_TTL_SECONDS = 60.0
+_overview_cache: dict[str, object] = {"expires_at": 0.0, "value": None}
+_overview_cache_lock = asyncio.Lock()
 
 
 def _to_request_event_out(item: dict) -> AsrRequestEventOut:
@@ -47,8 +51,29 @@ def _to_request_event_out(item: dict) -> AsrRequestEventOut:
     )
 
 
+async def _cached_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
+    now = monotonic_time.monotonic()
+    cached_value = _overview_cache.get("value")
+    if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+        return cached_value  # type: ignore[return-value]
+
+    async with _overview_cache_lock:
+        now = monotonic_time.monotonic()
+        cached_value = _overview_cache.get("value")
+        if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+            return cached_value  # type: ignore[return-value]
+        value = await _build_asr_monitoring_overview()
+        _overview_cache["value"] = value
+        _overview_cache["expires_at"] = now + _OVERVIEW_CACHE_TTL_SECONDS
+        return value
+
+
 @router.get("/overview", response_model=AsrMonitoringOverviewOut)
 async def get_asr_monitoring_overview():
+    return await _cached_asr_monitoring_overview()
+
+
+async def _build_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
     settings = get_settings()
     summary = summarize_tencent_request_events()
     request_log_path = settings.resolved_tencent_asr_request_audit_log_path

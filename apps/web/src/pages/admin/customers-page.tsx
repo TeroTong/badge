@@ -41,6 +41,8 @@ const DATE_PRESETS: Array<{ value: DatePreset; label: string }> = [
   { value: '90d', label: '近90日' },
 ]
 
+const CUSTOMER_VISIT_PREVIEW_LIMIT = 3
+
 const GENDERS = [
   { label: '男', value: 'male' },
   { label: '女', value: 'female' },
@@ -133,6 +135,7 @@ export function CustomersPage() {
         date_from: dateRange.from,
         date_to: dateRange.to,
         include_date_summaries: false,
+        fast_page: true,
         page,
         page_size: pageSize,
       }),
@@ -152,13 +155,14 @@ export function CustomersPage() {
 
   const customerIds = customers.map((customer) => customer.id)
   const { data: customerVisitsData, isLoading: customerVisitsLoading } = useQuery({
-    queryKey: ['customer-visits-batch', customerIds, 20],
-    queryFn: () => visitsApi.fetchVisitsByCustomers(customerIds, 20),
+    queryKey: ['customer-visits-batch', customerIds, CUSTOMER_VISIT_PREVIEW_LIMIT],
+    queryFn: () => visitsApi.fetchVisitsByCustomers(customerIds, CUSTOMER_VISIT_PREVIEW_LIMIT),
     enabled: customerIds.length > 0,
     staleTime: 60_000,
   })
 
   const customerVisitsMap = new Map((customerVisitsData ?? []).map((item) => [item.customer_id, item.visits]))
+  const hasNextPage = total > page * pageSize
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['customers'] })
     qc.invalidateQueries({ queryKey: ['customers-workbench'] })
@@ -217,8 +221,8 @@ export function CustomersPage() {
 
         <div className="visit-page__hero-stats">
           <div className="visit-stat-chip">
-            <span>当前结果</span>
-            <strong>{total}</strong>
+            <span>当前页客户</span>
+            <strong>{customers.length}</strong>
           </div>
         </div>
       </div>
@@ -351,6 +355,7 @@ export function CustomersPage() {
             const visitsLoading = customerVisitsLoading
             const latestVisit = visits[0]
             const latestConsultant = latestVisit?.consultant_name ?? '待归属'
+            const hiddenVisitCount = Math.max((customer.visit_count ?? 0) - visits.length, 0)
 
             return (
               <article
@@ -471,8 +476,10 @@ export function CustomersPage() {
                             </div>
                           ))}
                         </div>
-                        {visits.length > 8 && (
-                          <div className="customer-timeline__fade" />
+                        {hiddenVisitCount > 0 && (
+                          <div className="customer-timeline__fade">
+                            还有 {hiddenVisitCount} 次来访，进入详情查看
+                          </div>
                         )}
                       </div>
                     )}
@@ -516,7 +523,7 @@ export function CustomersPage() {
       )}
 
       <div className="visit-pagination">
-        <span>共 {total} 条</span>
+        <span>{hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`}</span>
         <Pagination
           current={page}
           pageSize={pageSize}

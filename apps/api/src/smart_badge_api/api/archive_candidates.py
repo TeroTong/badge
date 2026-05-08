@@ -193,6 +193,10 @@ async def build_pending_archive_recordings_by_visit_id(
     if not visits:
         return {}
 
+    pending_visits = [visit for visit in visits if not _visit_recording_ids(visit)]
+    if not pending_visits:
+        return {}
+
     archive_index = _load_archive_recording_index()
     if not archive_index:
         return {}
@@ -202,9 +206,7 @@ async def build_pending_archive_recordings_by_visit_id(
     visible_items = [item for item in summaries if archive_item_visible_to_scope(item, scope)]
 
     pending_by_visit_id: dict[str, list[PendingArchiveRecordingOut]] = {}
-    for visit in visits:
-        if _visit_recording_ids(visit):
-            continue
+    for visit in pending_visits:
         candidates = [
             candidate
             for candidate in (

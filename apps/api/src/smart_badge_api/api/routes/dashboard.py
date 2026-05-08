@@ -10,24 +10,41 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, exists, false, func, or_, select
+from sqlalchemy import and_, case, exists, false, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from smart_badge_api.api.data_scope import (
     build_permission_scope,
-    customer_scope_condition,
     managed_staff_scope_condition,
-    recording_scope_condition,
-    visit_scope_condition,
 )
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.analysis.consultation_evaluation import normalize_consultation_dimension_name
 from smart_badge_api.analysis.schemas import CONSULTATION_PROCESS_EVALUATION_BLUEPRINT
 from smart_badge_api.api.deps import get_current_user
-from smart_badge_api.core.permissions import PERMISSION_ROLE_LABELS, PermissionScope, is_global_role, normalize_permission_role
+from smart_badge_api.core.permissions import (
+    LEGACY_STAFF_PERMISSION_ROLE_MAP,
+    PERMISSION_ROLE_LABELS,
+    PERMISSION_ROLE_LEVELS,
+    PermissionScope,
+    is_global_role,
+    normalize_permission_role,
+)
 from smart_badge_api.db.default_data import ensure_tag_categories
-from smart_badge_api.db.models import AnalysisTask, Customer, Device, DeviceStaffBinding, Recording, RecordingVisitLink, Segment, Staff, TagCategory, Transcript, Visit, VisitOrder
+from smart_badge_api.db.models import (
+    AnalysisTask,
+    Device,
+    DeviceStaffBinding,
+    Recording,
+    RecordingVisitLink,
+    Segment,
+    Staff,
+    StaffManagementRelation,
+    TagCategory,
+    Transcript,
+    Visit,
+    VisitOrder,
+)
 from smart_badge_api.db.models import User
 from smart_badge_api.db.session import get_db
 from smart_badge_api.tag_catalog_reference import (
@@ -270,6 +287,8 @@ class DashboardStats(BaseModel):
 # Simple in-memory cache keyed by permission scope.
 _cache: dict[str, tuple[float, DashboardStats]] = {}
 _CACHE_TTL = 60  # seconds
+_SUMMARY_ANALYSIS_SAMPLE_LIMIT = 300
+_SUMMARY_PROCESS_ISSUE_LIMIT = 80
 _IGNORED_TAG_VALUES = {"未明确", "未提及", "未知", "无", "N/A", "-"}
 _MAX_OPEN_TAG_VALUE_ITEMS = 8
 _CONSULTATION_TOTAL_SCORE_MAX = 6.0
@@ -783,6 +802,106 @@ def _staff_stats_scope(scope) -> PermissionScope:
     return scope
 
 
+async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: PermissionScope) -> list[str]:
+    if not scope.staff_id:
+        return []
+    if scope.role == "single_staff":
+        return [scope.staff_id]
+
+    role = normalize_permission_role(scope.role)
+    actor_level = PERMISSION_ROLE_LEVELS.get(role, PERMISSION_ROLE_LEVELS["staff"])
+    role_levels = {
+        **PERMISSION_ROLE_LEVELS,
+        **{
+            legacy_role: PERMISSION_ROLE_LEVELS[normalized_role]
+            for legacy_role, normalized_role in LEGACY_STAFF_PERMISSION_ROLE_MAP.items()
+        },
+    }
+    rows = (
+        await db.execute(
+            select(StaffManagementRelation.subordinate_staff_id, Staff.permission_role)
+            .join(Staff, Staff.id == StaffManagementRelation.subordinate_staff_id)
+            .where(
+                StaffManagementRelation.manager_staff_id == scope.staff_id,
+                Staff.is_active.is_(True),
+            )
+        )
+    ).all()
+    ids: set[str] = {scope.staff_id}
+    for subordinate_id, subordinate_role in rows:
+        subordinate_level = role_levels.get(subordinate_role, PERMISSION_ROLE_LEVELS["staff"])
+        if role == "super_admin" or subordinate_level <= actor_level:
+            ids.add(subordinate_id)
+    return list(ids)
+
+
+def _dashboard_recording_scope_condition(managed_staff_ids: list[str]):
+    if not managed_staff_ids:
+        return false()
+    return Recording.staff_id.in_(managed_staff_ids)
+
+
+def _dashboard_visit_scope_condition(visible_visit_ids: list[str]):
+    if not visible_visit_ids:
+        return false()
+    return Visit.id.in_(visible_visit_ids)
+
+
+async def _resolve_dashboard_visible_visit_ids(db: AsyncSession, managed_staff_ids: list[str]) -> list[str]:
+    if not managed_staff_ids:
+        return []
+
+    parts = [
+        select(Visit.id.label("visit_id")).where(Visit.consultant_id.in_(managed_staff_ids)),
+        select(Visit.id.label("visit_id")).where(Visit.doctor_id.in_(managed_staff_ids)),
+        select(Visit.id.label("visit_id"))
+        .join(Recording, Recording.visit_id == Visit.id)
+        .where(Recording.staff_id.in_(managed_staff_ids)),
+        select(Visit.id.label("visit_id"))
+        .join(RecordingVisitLink, RecordingVisitLink.visit_id == Visit.id)
+        .join(Recording, Recording.id == RecordingVisitLink.recording_id)
+        .where(Recording.staff_id.in_(managed_staff_ids)),
+    ]
+    staff_meta = (
+        await db.execute(
+            select(Staff.external_account, Staff.hospital_code).where(
+                Staff.id.in_(managed_staff_ids),
+                Staff.external_account.is_not(None),
+                Staff.hospital_code.is_not(None),
+            )
+        )
+    ).all()
+    if staff_meta:
+        staff_by_hospital: dict[str, list[str]] = {}
+        for external_account, hospital_code in staff_meta:
+            if not external_account or not hospital_code:
+                continue
+            staff_by_hospital.setdefault(str(hospital_code), []).append(str(external_account))
+        for hospital_code, external_accounts in staff_by_hospital.items():
+            parts.append(
+                select(Visit.id.label("visit_id"))
+                .join(VisitOrder, VisitOrder.dzdh == Visit.external_visit_order_no)
+                .where(
+                    Visit.external_visit_order_no.is_not(None),
+                    VisitOrder.jgbm == hospital_code,
+                    or_(
+                        VisitOrder.fzuer.in_(external_accounts),
+                        VisitOrder.d_fzuer.in_(external_accounts),
+                        VisitOrder.fzr_id_dq.in_(external_accounts),
+                        VisitOrder.advxc.in_(external_accounts),
+                        VisitOrder.assxc.in_(external_accounts),
+                        VisitOrder.advyq.in_(external_accounts),
+                        VisitOrder.yyuer.in_(external_accounts),
+                        VisitOrder.vipkf.in_(external_accounts),
+                        VisitOrder.d_vipkf.in_(external_accounts),
+                    ),
+                )
+            )
+
+    rows = (await db.execute(union(*parts))).all()
+    return [row[0] for row in rows if row[0]]
+
+
 def _staff_job_label(staff: Staff) -> str:
     if staff.is_doctor:
         return "医生"
@@ -965,6 +1084,10 @@ def _normalize_dashboard_staff_id(raw_staff_id: str | None) -> str | None:
     return normalized or None
 
 
+def _normalize_dashboard_detail_level(raw_detail_level: str | None) -> str:
+    return "full" if (raw_detail_level or "").strip().lower() == "full" else "summary"
+
+
 async def _load_dashboard_staff_options(
     db: AsyncSession,
     *,
@@ -1032,16 +1155,27 @@ async def _build_staff_stats(
     date_from: date | None,
     date_to: date | None,
     sort_mode: str = "business",
+    managed_staff_ids: list[str] | None = None,
+    visible_visit_ids: list[str] | None = None,
 ) -> list[StaffStatsItem]:
+    if managed_staff_ids is None:
+        managed_staff_ids = await _resolve_dashboard_managed_staff_ids(db, scope)
+    if not managed_staff_ids:
+        return []
+    recording_scope_filter = _dashboard_recording_scope_condition(managed_staff_ids)
+    if visible_visit_ids is None:
+        visible_visit_ids = await _resolve_dashboard_visible_visit_ids(db, managed_staff_ids)
+    visit_scope_filter = _dashboard_visit_scope_condition(visible_visit_ids)
     scoped_staff = (
         await db.execute(
             select(Staff)
-            .where(*_staff_scope_filters(scope))
+            .where(Staff.is_active.is_(True), Staff.id.in_(managed_staff_ids))
             .order_by(Staff.hospital_code.asc(), Staff.name.asc())
         )
     ).scalars().all()
     recording_date_filters = _recording_date_filters(date_from, date_to)
     visit_date_filters = _visit_date_filters(date_from, date_to)
+    recording_not_filtered = func.lower(func.coalesce(Recording.status, "")) != "filtered"
 
     staff_stats_map: dict[str, dict[str, Any]] = {
         staff.id: {
@@ -1062,6 +1196,42 @@ async def _build_staff_stats(
         for staff in scoped_staff
     }
 
+    recording_count_rows = (
+        await db.execute(
+            select(Recording.staff_id, func.count(Recording.id))
+            .where(
+                recording_scope_filter,
+                recording_not_filtered,
+                Recording.staff_id.is_not(None),
+                *recording_date_filters,
+            )
+            .group_by(Recording.staff_id)
+        )
+    ).all()
+    for staff_id, recording_count in recording_count_rows:
+        bucket = staff_stats_map.get(staff_id)
+        if bucket:
+            bucket["recording_count"] = int(recording_count or 0)
+
+    analyzed_count_rows = (
+        await db.execute(
+            select(Recording.staff_id, func.count(func.distinct(Recording.id)))
+            .join(AnalysisTask, AnalysisTask.file_name == func.concat("recording_", Recording.id, ".json"))
+            .where(
+                recording_scope_filter,
+                Recording.staff_id.is_not(None),
+                AnalysisTask.status == "done",
+                AnalysisTask.result.isnot(None),
+                *recording_date_filters,
+            )
+            .group_by(Recording.staff_id)
+        )
+    ).all()
+    for staff_id, analyzed_count in analyzed_count_rows:
+        bucket = staff_stats_map.get(staff_id)
+        if bucket:
+            bucket["analyzed_count"] = int(analyzed_count or 0)
+
     visit_staff_rows = (
         await db.execute(
             select(
@@ -1069,7 +1239,7 @@ async def _build_staff_stats(
                 Visit.doctor_id,
                 Visit.status,
                 Visit.deposit_principal,
-            ).where(visit_scope_condition(scope), *_visit_date_filters(date_from, date_to))
+            ).where(visit_scope_filter, *_visit_date_filters(date_from, date_to))
         )
     ).all()
 
@@ -1084,24 +1254,13 @@ async def _build_staff_stats(
                 bucket["closed_won_count"] += 1
                 bucket["principal_amount"] += float(deposit_principal or 0)
 
-    for recording_id, meta in recording_meta_map.items():
-        if _clean_text(meta.get("status")).lower() == "filtered":
-            continue
-        staff_id = meta.get("staff_id")
-        if not staff_id:
-            continue
-        bucket = staff_stats_map.get(staff_id)
-        if bucket:
-            bucket["recording_count"] += 1
-
-    recording_not_filtered = func.lower(func.coalesce(Recording.status, "")) != "filtered"
     linked_visit_rows = (
         await db.execute(
             select(Recording.staff_id, RecordingVisitLink.visit_id)
             .join(Recording, Recording.id == RecordingVisitLink.recording_id)
             .join(Visit, Visit.id == RecordingVisitLink.visit_id)
             .where(
-                recording_scope_condition(scope),
+                recording_scope_filter,
                 recording_not_filtered,
                 Recording.staff_id.is_not(None),
                 RecordingVisitLink.visit_id.is_not(None),
@@ -1115,7 +1274,7 @@ async def _build_staff_stats(
             select(Recording.staff_id, Recording.visit_id)
             .join(Visit, Visit.id == Recording.visit_id)
             .where(
-                recording_scope_condition(scope),
+                recording_scope_filter,
                 recording_not_filtered,
                 Recording.staff_id.is_not(None),
                 Recording.visit_id.is_not(None),
@@ -1140,7 +1299,6 @@ async def _build_staff_stats(
         bucket = staff_stats_map.get(staff_id)
         if not bucket:
             continue
-        bucket["analyzed_count"] += 1
         result = normalize_analysis_result(task.result) if isinstance(task.result, dict) else None
         score_value = _consultation_total_score(result) if isinstance(result, dict) else None
         if score_value is not None:
@@ -1209,6 +1367,7 @@ async def get_dashboard(
     hospital_code: str | None = Query(default=None),
     scope_mode: str | None = Query(default=None),
     staff_id: str | None = Query(default=None),
+    detail_level: str | None = Query(default=None),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
@@ -1222,6 +1381,7 @@ async def get_dashboard(
     requested_hospital_code = (hospital_code or "").strip() or None
     requested_scope_mode = _normalize_dashboard_scope_mode(scope_mode)
     requested_staff_id = _normalize_dashboard_staff_id(staff_id)
+    requested_detail_level = _normalize_dashboard_detail_level(detail_level)
     hospital_options = await _load_visible_hospitals(db, base_scope, current_user)
     hospital_option_map = {item.hospital_code: item for item in hospital_options}
     effective_scope_mode = requested_scope_mode if requested_scope_mode != "mine" or base_scope.staff_id else "all"
@@ -1254,6 +1414,7 @@ async def get_dashboard(
             effective_scope_mode,
             requested_hospital_code or "",
             requested_staff_id or "",
+            requested_detail_level,
             date_from.isoformat() if date_from else "",
             date_to.isoformat() if date_to else "",
         ]
@@ -1265,13 +1426,17 @@ async def get_dashboard(
 
     recording_date_filters = _recording_date_filters(date_from, date_to)
     visit_date_filters = _visit_date_filters(date_from, date_to)
+    managed_staff_ids = await _resolve_dashboard_managed_staff_ids(db, scope)
+    recording_scope_filter = _dashboard_recording_scope_condition(managed_staff_ids)
+    visible_visit_ids = await _resolve_dashboard_visible_visit_ids(db, managed_staff_ids)
+    visit_scope_filter = _dashboard_visit_scope_condition(visible_visit_ids)
 
     allowed_recordings_subquery = (
         select(
             Recording.id.label("recording_id"),
             func.concat("recording_", Recording.id, ".json").label("analysis_file_name"),
         )
-        .where(recording_scope_condition(scope), *recording_date_filters)
+        .where(recording_scope_filter, *recording_date_filters)
         .subquery()
     )
 
@@ -1309,11 +1474,43 @@ async def get_dashboard(
         for category in tag_categories
         if str(category.name).strip()
     }
+    done_tasks_stmt = (
+        select(AnalysisTask)
+        .join(
+            allowed_recordings_subquery,
+            allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
+        )
+        .where(AnalysisTask.status == "done", AnalysisTask.result.isnot(None))
+        .order_by(
+            AnalysisTask.completed_at.desc().nullslast(),
+            AnalysisTask.updated_at.desc(),
+            AnalysisTask.created_at.desc(),
+        )
+    )
+    if requested_detail_level == "summary":
+        done_tasks_stmt = done_tasks_stmt.limit(_SUMMARY_ANALYSIS_SAMPLE_LIMIT * 2)
+    done_tasks = (await db.execute(done_tasks_stmt)).scalars().all()
+    unique_done_tasks = _dedupe_done_tasks_by_file_name(done_tasks)
+    if requested_detail_level == "summary":
+        unique_done_tasks = unique_done_tasks[:_SUMMARY_ANALYSIS_SAMPLE_LIMIT]
+
+    sampled_recording_ids = [
+        recording_id
+        for recording_id in (_extract_recording_id(task.file_name) for task in unique_done_tasks)
+        if recording_id
+    ]
+    metadata_recordings_subquery = (
+        select(Recording.id.label("recording_id"))
+        .where(Recording.id.in_(sampled_recording_ids))
+        .subquery()
+        if requested_detail_level == "summary"
+        else allowed_recordings_subquery
+    )
     recording_customer_map: dict[str, set[str]] = {}
     primary_customer_rows = (
         await db.execute(
             select(Recording.id, Visit.customer_id)
-            .join(allowed_recordings_subquery, allowed_recordings_subquery.c.recording_id == Recording.id)
+            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
             .join(Visit, Visit.id == Recording.visit_id)
             .where(Visit.customer_id.is_not(None))
         )
@@ -1325,7 +1522,7 @@ async def get_dashboard(
         await db.execute(
             select(RecordingVisitLink.recording_id, Visit.customer_id)
             .join(Visit, Visit.id == RecordingVisitLink.visit_id)
-            .join(allowed_recordings_subquery, allowed_recordings_subquery.c.recording_id == RecordingVisitLink.recording_id)
+            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == RecordingVisitLink.recording_id)
             .where(Visit.customer_id.is_not(None))
         )
     ).all()
@@ -1344,7 +1541,7 @@ async def get_dashboard(
                 Recording.duration_seconds,
                 Recording.status,
             )
-            .join(allowed_recordings_subquery, allowed_recordings_subquery.c.recording_id == Recording.id)
+            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
             .outerjoin(Staff, Staff.id == Recording.staff_id)
         )
     ).all()
@@ -1360,23 +1557,6 @@ async def get_dashboard(
         for recording_id, staff_id, staff_name, file_name, created_at, duration_seconds, status in recording_meta_rows
         if recording_id
     }
-
-    done_tasks = (
-        await db.execute(
-            select(AnalysisTask)
-            .join(
-                allowed_recordings_subquery,
-                allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
-            )
-            .where(AnalysisTask.status == "done", AnalysisTask.result.isnot(None))
-            .order_by(
-                AnalysisTask.completed_at.desc().nullslast(),
-                AnalysisTask.updated_at.desc(),
-                AnalysisTask.created_at.desc(),
-            )
-        )
-    ).scalars().all()
-    unique_done_tasks = _dedupe_done_tasks_by_file_name(done_tasks)
 
     dim_scores: dict[str, list[float]] = {}
     scores: list[float] = []
@@ -1429,6 +1609,7 @@ async def get_dashboard(
     process_section_evaluation_count = 0
     process_issue_count = 0
     process_issue_items: list[ProcessEvaluationIssueItem] = []
+    process_issue_item_limit = None if requested_detail_level == "full" else _SUMMARY_PROCESS_ISSUE_LIMIT
 
     for task in unique_done_tasks:
         result = normalize_analysis_result(task.result) if isinstance(task.result, dict) else None
@@ -1493,6 +1674,8 @@ async def get_dashboard(
                 process_issue_count += issue_count
                 process_section_evaluation_count += 1
                 for issue in _iter_process_section_issues(section):
+                    if process_issue_item_limit is not None and len(process_issue_items) >= process_issue_item_limit:
+                        continue
                     process_issue_items.append(
                         ProcessEvaluationIssueItem(
                             recording_id=recording_id,
@@ -1885,7 +2068,7 @@ async def get_dashboard(
                 ),
                 func.count(Visit.id),
                 func.count(func.distinct(Visit.customer_id)),
-            ).where(Visit.status == "closed_won", visit_scope_condition(scope), *visit_date_filters)
+            ).where(Visit.status == "closed_won", visit_scope_filter, *visit_date_filters)
         )
     ).one()
     total_deal_amount = float(deal_row[0] or 0)
@@ -1898,26 +2081,20 @@ async def get_dashboard(
             Visit.customer_id.label("customer_id"),
             func.max(_visit_activity_date_expr()).label("last_visit_at"),
         )
-        .where(visit_scope_condition(scope), Visit.customer_id.is_not(None))
+        .where(visit_scope_filter, Visit.customer_id.is_not(None))
         .group_by(Visit.customer_id)
         .subquery()
     )
-    customer_activity_date = func.coalesce(last_visit_sub.c.last_visit_at, func.date(Customer.created_at))
-    total_customers_stmt = (
-        select(func.count(Customer.id))
-        .select_from(Customer)
-        .outerjoin(last_visit_sub, Customer.id == last_visit_sub.c.customer_id)
-        .where(customer_scope_condition(scope))
-    )
+    total_customers_stmt = select(func.count(last_visit_sub.c.customer_id)).select_from(last_visit_sub)
     if date_from:
-        total_customers_stmt = total_customers_stmt.where(customer_activity_date >= date_from)
+        total_customers_stmt = total_customers_stmt.where(last_visit_sub.c.last_visit_at >= date_from)
     if date_to:
-        total_customers_stmt = total_customers_stmt.where(customer_activity_date <= date_to)
+        total_customers_stmt = total_customers_stmt.where(last_visit_sub.c.last_visit_at <= date_to)
     total_customers = (await db.execute(total_customers_stmt)).scalar() or 0
     # 合并 total_visits 与 visit_status_rows：通过对 GROUP BY 的结果求和得到总数，省一次扫表。
     visit_status_rows = (await db.execute(
         select(Visit.status, func.count(Visit.id))
-        .where(visit_scope_condition(scope), *visit_date_filters)
+        .where(visit_scope_filter, *visit_date_filters)
         .group_by(Visit.status)
     )).all()
     total_visits = sum(int(row[1] or 0) for row in visit_status_rows)
@@ -1965,7 +2142,7 @@ async def get_dashboard(
             or selected_trend_hospital_code
         )
 
-    trend_conditions: list[Any] = [visit_scope_condition(scope), *visit_date_filters]
+    trend_conditions: list[Any] = [visit_scope_filter, *visit_date_filters]
     if selected_trend_hospital_code:
         trend_conditions.append(_visit_hospital_condition(selected_trend_hospital_code))
 
@@ -2025,6 +2202,8 @@ async def get_dashboard(
         date_from=date_from,
         date_to=date_to,
         sort_mode="business",
+        managed_staff_ids=managed_staff_ids,
+        visible_visit_ids=visible_visit_ids,
     )
     score_staff_stats = await _build_staff_stats(
         db,
@@ -2034,6 +2213,8 @@ async def get_dashboard(
         date_from=date_from,
         date_to=date_to,
         sort_mode="score",
+        managed_staff_ids=managed_staff_ids,
+        visible_visit_ids=visible_visit_ids,
     )
 
     # ── Recording counts (1 query) ──
@@ -2044,7 +2225,7 @@ async def get_dashboard(
             func.count(case((Recording.status == "uploaded", 1))),
             func.count(case((Recording.status.in_(["transcribed", "analyzing", "analyzed"]), 1))),
         )
-        .where(recording_scope_condition(scope), *recording_date_filters)
+        .where(recording_scope_filter, *recording_date_filters)
     )).one()
     total_recordings = int(rec_row[1])
     quality_passed_recordings = int(rec_row[1])
@@ -2072,7 +2253,7 @@ async def get_dashboard(
             func.count(case((Transcript.status == "failed", 1))),
         )
         .join(Recording, Recording.id == Transcript.recording_id)
-        .where(recording_scope_condition(scope), *recording_date_filters)
+        .where(recording_scope_filter, *recording_date_filters)
     )).one()
     total_transcripts = int(ts_row[0])
     transcripts_completed = int(ts_row[1])
@@ -2084,7 +2265,7 @@ async def get_dashboard(
             func.count(case((Segment.visit_id.isnot(None), 1))),
         )
         .join(Recording, Recording.id == Segment.recording_id)
-        .where(recording_scope_condition(scope), *recording_date_filters)
+        .where(recording_scope_filter, *recording_date_filters)
     )).one()
     total_segments = int(seg_row[0])
     segments_with_visit = int(seg_row[1])

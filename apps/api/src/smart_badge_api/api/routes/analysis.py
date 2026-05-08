@@ -31,10 +31,10 @@ _analysis_result_list_cache: dict[str, object] = {
     "expires_at": 0.0,
     "items": None,
 }
+_SAP_CONSULTATION_PREVIEW_RESULT_KEY = "sap_consultation_preview"
 # Per-file summary memo, keyed by (path_str, mtime_ns, size). Survives the
 # coarse list-cache expiry so a cache miss only re-processes files that
-# actually changed on disk. sanitize_analysis_result_with_raw is ~90ms/file
-# and was previously the dominant cost (see profiling notes).
+# actually changed on disk.
 _analysis_summary_memo: dict[tuple[str, int, int], dict] = {}
 _analysis_result_list_lock = asyncio.Lock()
 
@@ -326,11 +326,8 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
 
                 with open(fp, encoding="utf-8") as f:
                     result_data = json.load(f)
-                raw_data = _load_raw_data(file_id)
-                if raw_data:
-                    sanitize_analysis_result_with_raw(result_data, raw=raw_data)
                 result_data = normalize_analysis_result(result_data) or {}
-                summary = _build_summary(file_id, result_data, raw_data, meta)
+                summary = _build_summary(file_id, result_data, None, meta)
                 _analysis_summary_memo[full_key] = summary  # type: ignore[index]
                 items.append(summary)
             except Exception as e:
@@ -437,4 +434,5 @@ async def get_result(
         "consultation_evaluation": result_data.get("consultation_evaluation"),
         "consultation_result": result_data.get("consultation_result"),
         "consultation_process_evaluation": result_data.get("consultation_process_evaluation"),
+        _SAP_CONSULTATION_PREVIEW_RESULT_KEY: result_data.get(_SAP_CONSULTATION_PREVIEW_RESULT_KEY),
     }

@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     dingtalk_audio_backlog_sync_workers: int = 2
     dingtalk_audio_backlog_retry_failed_enabled: bool = True
     dingtalk_audio_backlog_sync_limit_per_run: int = 0
+    archive_recording_index_refresh_interval_seconds: int = 45
     dingtalk_audio_pipeline_workers: int = 2
     dingtalk_audio_stale_processing_timeout_seconds: int = 900
     dingtalk_audio_stage_dir: str = "dingtalk_staging"
@@ -68,6 +69,13 @@ class Settings(BaseSettings):
     database_pool_timeout_seconds: float = 10.0
     database_pool_recycle_seconds: int = 1800
     database_pool_pre_ping: bool = True
+    hot_read_cache_enabled: bool = True
+    hot_read_cache_ttl_seconds: float = 5.0
+    hot_read_cache_badge_ttl_seconds: float = 2.0
+    hot_read_cache_max_items: int = 512
+    hot_read_cache_max_body_bytes: int = 2_000_000
+    auth_user_cache_ttl_seconds: float = 15.0
+    auth_user_cache_max_items: int = 2048
     redis_url: str = "redis://127.0.0.1:6379/0"
     staff_directory_dsn: str = ""
     pg_host: str = ""

@@ -16,7 +16,7 @@ import aiofiles
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, false, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
@@ -94,6 +94,7 @@ from smart_badge_api.api.routes.dingtalk import (
     _coerce_datetime as _archive_coerce_datetime,
     _ensure_archive_recording_entry,
     _load_archive_recording_index,
+    _load_archive_recording_payload,
     _resolve_archive_analysis_result,
     _resolve_archive_recording_audio_path,
     _resolve_archive_transcript,
@@ -138,6 +139,10 @@ _archive_recording_list_cache: dict[str, object] = {
     "source_key": None,
     "items": None,
 }
+_ARCHIVE_RECORDING_DETAIL_CACHE_TTL_SECONDS = 120.0
+_ARCHIVE_RECORDING_DETAIL_CACHE_MAX_ENTRIES = 128
+_archive_recording_detail_cache_lock = asyncio.Lock()
+_archive_recording_detail_cache: dict[str, tuple[float, ArchiveRecordingDetailOut]] = {}
 logger = logging.getLogger("smart_badge.recordings")
 
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".amr"}
@@ -307,6 +312,29 @@ def _load_opts():
         selectinload(Recording.visit_analyses).selectinload(RecordingVisitAnalysis.customer_segment),
         selectinload(Recording.visit_analyses).selectinload(RecordingVisitAnalysis.analysis_task),
         selectinload(Recording.visit_analyses).selectinload(RecordingVisitAnalysis.visit).selectinload(Visit.customer),
+    ]
+
+
+def _list_load_opts():
+    return [
+        selectinload(Recording.staff).load_only(Staff.id, Staff.name, Staff.badge_id, Staff.role),
+        selectinload(Recording.transcript).load_only(Transcript.id, Transcript.recording_id),
+        selectinload(Recording.visit)
+        .load_only(Visit.id, Visit.status, Visit.customer_id)
+        .selectinload(Visit.customer)
+        .load_only(Customer.id, Customer.name),
+        selectinload(Recording.visit_links)
+        .load_only(
+            RecordingVisitLink.id,
+            RecordingVisitLink.recording_id,
+            RecordingVisitLink.visit_id,
+            RecordingVisitLink.is_primary,
+            RecordingVisitLink.created_at,
+        )
+        .selectinload(RecordingVisitLink.visit)
+        .load_only(Visit.id, Visit.external_visit_order_no, Visit.external_visit_order_seg, Visit.customer_id)
+        .selectinload(Visit.customer)
+        .load_only(Customer.id, Customer.name),
     ]
 
 
@@ -951,11 +979,49 @@ def clear_archive_recording_list_cache() -> None:
     _archive_recording_list_cache["expires_at"] = 0.0
     _archive_recording_list_cache["source_key"] = None
     _archive_recording_list_cache["items"] = None
+    _archive_recording_detail_cache.clear()
 
 
 def _archive_recording_list_source_key() -> tuple[int, int | None]:
     mocked_return_value = getattr(_load_archive_recording_index, "return_value", None)
     return (id(_load_archive_recording_index), id(mocked_return_value) if mocked_return_value is not None else None)
+
+
+def _archive_recording_detail_cache_key(item_id: str, summary: dict[str, object]) -> str:
+    return "|".join(
+        [
+            item_id,
+            _archive_clean_text(summary.get("recording_id")) or "",
+            _archive_clean_text(summary.get("pipeline_stage_key")) or "",
+            _archive_clean_text(summary.get("pipeline_status")) or "",
+            str(summary.get("has_transcript") or False),
+            str(summary.get("has_analysis") or False),
+            _archive_clean_text(summary.get("updated_at")) or "",
+            _archive_clean_text(summary.get("completed_at")) or "",
+        ]
+    )
+
+
+async def _get_archive_recording_detail_cache(cache_key: str) -> ArchiveRecordingDetailOut | None:
+    now = time.monotonic()
+    async with _archive_recording_detail_cache_lock:
+        cached = _archive_recording_detail_cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, value = cached
+        if expires_at <= now:
+            _archive_recording_detail_cache.pop(cache_key, None)
+            return None
+        return value.model_copy(deep=True)
+
+
+async def _set_archive_recording_detail_cache(cache_key: str, value: ArchiveRecordingDetailOut) -> None:
+    expires_at = time.monotonic() + _ARCHIVE_RECORDING_DETAIL_CACHE_TTL_SECONDS
+    async with _archive_recording_detail_cache_lock:
+        _archive_recording_detail_cache[cache_key] = (expires_at, value.model_copy(deep=True))
+        while len(_archive_recording_detail_cache) > _ARCHIVE_RECORDING_DETAIL_CACHE_MAX_ENTRIES:
+            oldest_key = next(iter(_archive_recording_detail_cache))
+            _archive_recording_detail_cache.pop(oldest_key, None)
 
 
 def _load_archive_recording_raw_list_items() -> list[dict[str, object]]:
@@ -1264,19 +1330,22 @@ async def get_archive_recording_detail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    archive_index = _load_archive_recording_index()
-    payload = archive_index.get(item_id)
+    payload = _load_archive_recording_payload(item_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Archive recording not found")
 
     summary = dict(payload["summary"])
-    [summary] = await _attach_archive_recording_bindings(db, [summary])
+    [summary] = await _attach_archive_recording_bindings(db, [summary], lightweight=True)
     visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
     if not _archive_item_visible_to_staff_ids(summary, visible_staff_ids):
         raise HTTPException(status_code=404, detail="Archive recording not found")
 
     manifest = payload.get("manifest")
     archive_metadata = payload.get("archive_metadata")
+    cache_key = _archive_recording_detail_cache_key(item_id, summary)
+    cached_detail = await _get_archive_recording_detail_cache(cache_key)
+    if cached_detail is not None:
+        return cached_detail
 
     transcript = await _resolve_archive_transcript(db, summary=summary, manifest=manifest)
 
@@ -1286,7 +1355,7 @@ async def get_archive_recording_detail(
         manifest=manifest,
     )
 
-    return ArchiveRecordingDetailOut.model_validate(
+    detail = ArchiveRecordingDetailOut.model_validate(
         {
             **summary,
             "manifest": manifest,
@@ -1296,6 +1365,8 @@ async def get_archive_recording_detail(
             "analysis_summary": _build_archive_analysis_summary(summary, transcript, analysis_result),
         }
     )
+    await _set_archive_recording_detail_cache(cache_key, detail)
+    return detail
 
 
 @router.post("/archive/{item_id}/ensure-recording", response_model=ArchiveRecordingEnsureOut)
@@ -1304,13 +1375,12 @@ async def ensure_archive_recording(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    archive_index = _load_archive_recording_index()
-    payload = archive_index.get(item_id)
+    payload = _load_archive_recording_payload(item_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Archive recording not found")
 
     summary = dict(payload["summary"])
-    [summary] = await _attach_archive_recording_bindings(db, [summary])
+    [summary] = await _attach_archive_recording_bindings(db, [summary], lightweight=True)
     visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
     if not _archive_item_visible_to_staff_ids(summary, visible_staff_ids):
         raise HTTPException(status_code=404, detail="Archive recording not found")
@@ -1340,13 +1410,12 @@ async def get_archive_recording_media(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    archive_index = _load_archive_recording_index()
-    payload = archive_index.get(item_id)
+    payload = _load_archive_recording_payload(item_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Archive recording not found")
 
     summary = dict(payload["summary"])
-    [summary] = await _attach_archive_recording_bindings(db, [summary])
+    [summary] = await _attach_archive_recording_bindings(db, [summary], lightweight=True)
     visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
     if not _archive_item_visible_to_staff_ids(summary, visible_staff_ids):
         raise HTTPException(status_code=404, detail="Archive recording not found")
@@ -1372,13 +1441,12 @@ async def get_archive_recording_media_url(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    archive_index = _load_archive_recording_index()
-    payload = archive_index.get(item_id)
+    payload = _load_archive_recording_payload(item_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Archive recording not found")
 
     summary = dict(payload["summary"])
-    [summary] = await _attach_archive_recording_bindings(db, [summary])
+    [summary] = await _attach_archive_recording_bindings(db, [summary], lightweight=True)
     visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
     if not _archive_item_visible_to_staff_ids(summary, visible_staff_ids):
         raise HTTPException(status_code=404, detail="Archive recording not found")
@@ -1412,10 +1480,20 @@ async def list_recordings(
     date_to: date | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    fast_page: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     scope = await build_permission_scope(current_user)
+    scope_filter = recording_scope_condition(scope)
+    if fast_page:
+        visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
+        if visible_staff_ids is None:
+            scope_filter = true()
+        elif visible_staff_ids:
+            scope_filter = Recording.staff_id.in_(visible_staff_ids)
+        else:
+            scope_filter = false()
     _legacy_prefix_filter = ~Recording.file_name.regexp_match(r'^audio_\d+$')
     stmt = (
         select(Recording)
@@ -1423,7 +1501,7 @@ async def list_recordings(
         .outerjoin(Device, Recording.device_id == Device.id)
         .outerjoin(Visit, Recording.visit_id == Visit.id)
         .outerjoin(Customer, Visit.customer_id == Customer.id)
-        .where(recording_scope_condition(scope))
+        .where(scope_filter)
         .where(_legacy_prefix_filter)
         .order_by(Recording.created_at.desc())
     )
@@ -1434,7 +1512,7 @@ async def list_recordings(
         .outerjoin(Device, Recording.device_id == Device.id)
         .outerjoin(Visit, Recording.visit_id == Visit.id)
         .outerjoin(Customer, Visit.customer_id == Customer.id)
-        .where(recording_scope_condition(scope))
+        .where(scope_filter)
         .where(_legacy_prefix_filter)
     )
     if visit_id:
@@ -1509,10 +1587,19 @@ async def list_recordings(
         _, end_dt = _display_date_utc_bounds(date_to)
         stmt = stmt.where(Recording.created_at < end_dt)
         count_stmt = count_stmt.where(Recording.created_at < end_dt)
-    total: int = (await db.execute(count_stmt)).scalar_one()
-    rows = (
-        await db.execute(stmt.options(*_load_opts()).offset((page - 1) * page_size).limit(page_size))
-    ).scalars().all()
+    offset = (page - 1) * page_size
+    if fast_page:
+        rows_with_probe = (
+            await db.execute(stmt.options(*_list_load_opts()).offset(offset).limit(page_size + 1))
+        ).scalars().all()
+        has_more = len(rows_with_probe) > page_size
+        rows = rows_with_probe[:page_size]
+        total = page * page_size + 1 if has_more else offset + len(rows)
+    else:
+        total = (await db.execute(count_stmt)).scalar_one()
+        rows = (
+            await db.execute(stmt.options(*_list_load_opts()).offset(offset).limit(page_size))
+        ).scalars().all()
     device_ids = {row.device_id for row in rows if row.device_id}
     device_code_map: dict[str, str] = {}
     if device_ids:

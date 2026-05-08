@@ -1288,6 +1288,56 @@ a {
   font-size: 0.92rem;
 }
 
+.ad-sap-preview {
+  display: grid;
+  gap: 12px;
+}
+
+.ad-sap-preview__panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(203, 213, 225, 0.82);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.ad-sap-preview__panel--text {
+  background: linear-gradient(135deg, rgba(240, 249, 255, 0.88), rgba(255, 255, 255, 0.98));
+}
+
+.ad-sap-preview__title {
+  margin: 0;
+  color: #1e293b;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.ad-sap-preview__text {
+  margin: 0;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.92);
+  color: #334155;
+  font-family: inherit;
+  font-size: 0.86rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ad-sap-preview__empty {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.94);
+  color: #64748b;
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
 .ad-deal-summary {
   display: grid;
   gap: 8px;
@@ -5332,7 +5382,14 @@ a {
   position: sticky;
   bottom: 0;
   height: 32px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 2px;
   background: linear-gradient(to bottom, transparent, rgba(255, 255, 255, 0.95));
+  color: #64748b;
+  font-size: 0.76rem;
+  line-height: 1.2;
   pointer-events: none;
 }
 

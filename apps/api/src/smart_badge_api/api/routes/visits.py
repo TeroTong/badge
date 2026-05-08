@@ -499,6 +499,7 @@ async def list_visits(
     date_to: date | None = Query(None),
     has_recordings: bool | None = Query(None),
     include_date_summaries: bool = Query(False),
+    fast_page: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -587,19 +588,28 @@ async def list_visits(
             )
         )
 
-    filtered_subquery = stmt.order_by(None).subquery()
-    total: int = (await db.execute(select(func.count()).select_from(filtered_subquery))).scalar_one()
-    if include_date_summaries:
-        date_summary_rows = (
-            await db.execute(
-                select(filtered_subquery.c.visit_date, func.count())
-                .group_by(filtered_subquery.c.visit_date)
-            )
+    if fast_page and not include_date_summaries:
+        rows_with_probe = (
+            await db.execute(stmt.offset((page - 1) * page_size).limit(page_size + 1))
         ).all()
-        date_summaries = _build_visit_date_summaries(date_summary_rows)
-    else:
+        has_more = len(rows_with_probe) > page_size
+        rows = rows_with_probe[:page_size]
+        total = page * page_size + 1 if has_more else (page - 1) * page_size + len(rows)
         date_summaries = []
-    rows = (await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))).all()
+    else:
+        filtered_subquery = stmt.order_by(None).subquery()
+        total: int = (await db.execute(select(func.count()).select_from(filtered_subquery))).scalar_one()
+        if include_date_summaries:
+            date_summary_rows = (
+                await db.execute(
+                    select(filtered_subquery.c.visit_date, func.count())
+                    .group_by(filtered_subquery.c.visit_date)
+                )
+            ).all()
+            date_summaries = _build_visit_date_summaries(date_summary_rows)
+        else:
+            date_summaries = []
+        rows = (await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))).all()
     visits = [visit for visit, *_ in rows]
     # NOTE: previously called `_build_visit_card_snapshot_map` here, which loaded
     # all RecordingVisitLink + AnalysisTask rows for the page just to surface
@@ -661,6 +671,20 @@ async def list_visits_by_customers(
     visit_order_summary_sub = _visit_order_summary_subquery()
     recording_count = func.coalesce(recording_count_sub.c.recording_count, 0)
 
+    ranked_visits = (
+        select(
+            Visit.id.label("visit_id"),
+            func.row_number()
+            .over(partition_by=Visit.customer_id, order_by=_visit_ordering())
+            .label("visit_rank"),
+        )
+        .where(
+            visit_scope_condition(scope),
+            Visit.customer_id.in_(customer_ids),
+        )
+        .subquery()
+    )
+
     stmt = (
         select(
             Visit,
@@ -672,12 +696,12 @@ async def list_visits_by_customers(
             visit_order_summary_sub.c.customer_type_code.label("customer_type_code"),
             visit_order_summary_sub.c.customer_type_text.label("customer_type_text"),
         )
+        .join(ranked_visits, ranked_visits.c.visit_id == Visit.id)
         .join(Customer, Visit.customer_id == Customer.id)
         .outerjoin(recording_count_sub, Visit.id == recording_count_sub.c.visit_id)
         .outerjoin(visit_order_summary_sub, Visit.external_visit_order_no == visit_order_summary_sub.c.dzdh)
         .where(
-            visit_scope_condition(scope),
-            Visit.customer_id.in_(customer_ids),
+            ranked_visits.c.visit_rank <= per_customer_limit,
         )
         .order_by(Visit.customer_id.asc(), *_visit_ordering())
         .options(*_load_opts())
@@ -685,7 +709,6 @@ async def list_visits_by_customers(
 
     rows = (await db.execute(stmt)).all()
     grouped_rows: dict[str, list[tuple]] = {item: [] for item in customer_ids}
-    selected_visits: list[Visit] = []
 
     for row in rows:
         visit = row[0]
@@ -693,9 +716,10 @@ async def list_visits_by_customers(
         if len(bucket) >= per_customer_limit:
             continue
         bucket.append(row)
-        selected_visits.append(visit)
 
-    snapshot_map = await _build_visit_card_snapshot_map(db, selected_visits, scope)
+    # Customer list cards only need timeline summaries; detailed analysis snapshots
+    # are loaded by the customer/visit detail pages.
+    snapshot_map: dict[str, dict[str, Any]] = {}
 
     return [
         CustomerVisitBatchOut(

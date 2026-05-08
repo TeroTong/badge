@@ -148,6 +148,31 @@ export type ConsultationProcessEvaluation = {
   sections: ConsultationProcessEvaluationSection[]
 }
 
+export type SapConsultationPreviewPayload = {
+  text?: string
+  user?: string
+  zxxx?: Record<string, string | number | null | undefined>
+  TAB_SYZ?: {
+    CCKS?: string
+    CCSYZ?: string
+    CCBW?: string
+  }[]
+}
+
+export type SapConsultationPreview = {
+  recording_id?: string
+  visit_order_no?: string
+  visit_order_seg?: string | number | null
+  customer_name?: string
+  customer_code?: string
+  advisor_name?: string
+  indication_count?: number
+  recording_count?: number
+  target_count?: number
+  targets?: unknown[]
+  payloads?: SapConsultationPreviewPayload[]
+}
+
 export type ConsumptionIntent = {
   budget: string | null
   willingness: string
@@ -214,6 +239,7 @@ export type AnalysisDetail = AnalysisSummary & {
   }
   consultation_result: ConsultationResult
   consultation_process_evaluation: ConsultationProcessEvaluation
+  sap_consultation_preview?: SapConsultationPreview | null
 }
 
 export async function fetchAnalysisResults(

@@ -185,6 +185,7 @@ export default function VisitOrdersPage() {
         fzuer: fzuer || undefined,
         sjrq_start: dateRange?.[0] || undefined,
         sjrq_end: dateRange?.[1] || undefined,
+        fast_page: true,
       }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
@@ -210,6 +211,7 @@ export default function VisitOrdersPage() {
   })
 
   const visibleMatchCandidates = getVisibleRecordingCandidates(matchData?.candidates ?? [])
+  const hasNextPage = (data?.total ?? 0) > page * PAGE_SIZE
 
   const adoptMatchMutation = useMutation({
     mutationFn: ({ recordingId, visitId }: { recordingId: string; visitId: string }) =>
@@ -421,7 +423,7 @@ export default function VisitOrdersPage() {
             current: page,
             pageSize: PAGE_SIZE,
             total: data?.total ?? 0,
-            showTotal: (total) => `共 ${total} 条`,
+            showTotal: () => (hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`),
             onChange: (p) => setPage(p),
           }}
           size="small"

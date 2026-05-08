@@ -59,8 +59,8 @@ function IotCapabilityEditor({ state }: { state: IotCapabilityState }) {
     <div className="iot-capability-page">
       <div className="preference-page__header">
         <div>
-          <p className="visit-page__eyebrow">规则配置 / IOT 能力配置</p>
-          <h1>IOT 能力配置</h1>
+          <p className="visit-page__eyebrow">规则配置 / IOT配置</p>
+          <h1>IOT配置</h1>
           <p className="visit-page__summary">
             长沙雅美工牌已使用的基础链路保持不变；这里管理额外 IOT 控制、任务和回调能力，拨动开关后会自动保存。
           </p>
@@ -149,7 +149,7 @@ export function IotCapabilitiesPage() {
   if (error || !data) {
     return (
       <Card bordered={false}>
-        <Empty description="IOT 能力配置暂时加载失败，请稍后重试。" />
+        <Empty description="IOT配置暂时加载失败，请稍后重试。" />
       </Card>
     )
   }

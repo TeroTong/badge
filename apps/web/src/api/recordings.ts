@@ -209,6 +209,7 @@ export const fetchRecordings = (params?: {
   date_to?: string
   page?: number
   page_size?: number
+  fast_page?: boolean
 }) => {
   const sp = new URLSearchParams()
   if (params?.visit_id) sp.set('visit_id', params.visit_id)
@@ -223,6 +224,7 @@ export const fetchRecordings = (params?: {
   if (params?.date_to) sp.set('date_to', params.date_to)
   if (params?.page) sp.set('page', String(params.page))
   if (params?.page_size) sp.set('page_size', String(params.page_size))
+  if (params?.fast_page !== undefined) sp.set('fast_page', String(params.fast_page))
   const qs = sp.toString()
   return api.get(`recordings${qs ? `?${qs}` : ''}`).json<PaginatedResponse<Recording>>()
 }

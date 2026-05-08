@@ -78,7 +78,7 @@ export const adminPages: ModulePageDefinition[] = [
   },
   {
     path: 'iot-capabilities',
-    title: 'IOT能力配置',
+    title: 'IOT配置',
     subtitle: '管理设备管理平台额外控制、任务和回调能力。',
     summary: '统一开关 IOT 附加接口，默认关闭后按需启用。',
     focusLabel: '配置对象',
@@ -258,7 +258,7 @@ export const adminSidebarSections: SidebarSectionDefinition[] = [
       },
       {
         path: 'iot-capabilities',
-        label: 'IOT能力配置',
+        label: 'IOT配置',
         description: '额外 IOT 接口和回调开关',
         minRole: 'system_admin',
       },

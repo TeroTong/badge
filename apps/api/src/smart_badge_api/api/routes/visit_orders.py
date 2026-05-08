@@ -321,6 +321,7 @@ async def list_visit_orders(
     sjrq_start: str | None = None,
     sjrq_end: str | None = None,
     jcsta_txt: str | None = None,
+    fast_page: bool = Query(False),
     current_user: User = Depends(get_current_user),
 ):
     scope = await build_permission_scope(current_user)
@@ -358,11 +359,19 @@ async def list_visit_orders(
         stmt = stmt.where(VisitOrder.jcsta_txt == jcsta_txt)
         count_stmt = count_stmt.where(VisitOrder.jcsta_txt == jcsta_txt)
 
-    total = (await db.execute(count_stmt)).scalar() or 0
-
     stmt = stmt.order_by(VisitOrder.sjrq.desc(), VisitOrder.fzsj.desc())
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    items = (await db.execute(stmt)).scalars().all()
+    if fast_page:
+        page_items_with_probe = (
+            await db.execute(stmt.offset((page - 1) * page_size).limit(page_size + 1))
+        ).scalars().all()
+        has_more = len(page_items_with_probe) > page_size
+        items = page_items_with_probe[:page_size]
+        total = page * page_size + 1 if has_more else (page - 1) * page_size + len(items)
+    else:
+        total = (await db.execute(count_stmt)).scalar() or 0
+        items = (
+            await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
+        ).scalars().all()
 
     return {
         "items": [_to_out(vo) for vo in items],

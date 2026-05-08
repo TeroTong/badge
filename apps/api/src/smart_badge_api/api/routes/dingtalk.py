@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import shutil
+import threading
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -104,12 +105,18 @@ router = APIRouter(prefix="/dingtalk", tags=["朗姿工牌"])
 _TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 _DINGTALK_DEVICE_REMOTE_TIMEOUT_SECONDS = 10.0
 logger = logging.getLogger(__name__)
-_ARCHIVE_RECORDING_INDEX_CACHE_TTL_SECONDS = 15.0
+_ARCHIVE_RECORDING_INDEX_CACHE_TTL_SECONDS = 60.0
+_ARCHIVE_RECORDING_INDEX_STALE_TTL_SECONDS = 600.0
+_ARCHIVE_RECORDING_PAYLOAD_CACHE_TTL_SECONDS = 120.0
+_ARCHIVE_RECORDING_PAYLOAD_CACHE_MAX_ENTRIES = 512
 _archive_recording_index_cache: dict[str, Any] = {
     "expires_at": 0.0,
+    "stale_expires_at": 0.0,
     "cache_key": None,
     "value": None,
 }
+_archive_recording_index_cache_lock = threading.RLock()
+_archive_recording_payload_cache: dict[str, tuple[float, str, dict[str, Any]]] = {}
 _CANONICAL_SPLIT_RECORDING_FILE_RE = re.compile(r"^\d{4}_\d{6}_\d{6}(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
 
 
@@ -726,9 +733,12 @@ def _build_staged_archive_recording_summary(manifest: dict[str, Any]) -> dict[st
 
 
 def clear_archive_recording_index_cache() -> None:
-    _archive_recording_index_cache["expires_at"] = 0.0
-    _archive_recording_index_cache["cache_key"] = None
-    _archive_recording_index_cache["value"] = None
+    with _archive_recording_index_cache_lock:
+        _archive_recording_index_cache["expires_at"] = 0.0
+        _archive_recording_index_cache["stale_expires_at"] = 0.0
+        _archive_recording_index_cache["cache_key"] = None
+        _archive_recording_index_cache["value"] = None
+        _archive_recording_payload_cache.clear()
 
 
 def _build_archive_recording_index_uncached() -> dict[str, dict[str, Any]]:
@@ -815,24 +825,69 @@ def _build_archive_recording_index_uncached() -> dict[str, dict[str, Any]]:
     return index
 
 
-def _load_archive_recording_index(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+def _archive_recording_index_cache_key() -> str:
+    return f"{_dingtalk_stage_root().resolve()}::{get_archive_root().resolve()}"
+
+
+def _load_archive_recording_index_cached(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
     now = time.monotonic()
-    cache_key = f"{_dingtalk_stage_root().resolve()}::{get_archive_root().resolve()}"
-    cached_value = _archive_recording_index_cache.get("value")
-    cached_expires_at = float(_archive_recording_index_cache.get("expires_at") or 0.0)
-    if (
-        not force_refresh
-        and cached_value is not None
-        and cached_expires_at > now
-        and _archive_recording_index_cache.get("cache_key") == cache_key
-    ):
-        return deepcopy(cached_value)
+    cache_key = _archive_recording_index_cache_key()
+    with _archive_recording_index_cache_lock:
+        cached_value = _archive_recording_index_cache.get("value")
+        cached_expires_at = float(_archive_recording_index_cache.get("expires_at") or 0.0)
+        stale_expires_at = float(_archive_recording_index_cache.get("stale_expires_at") or 0.0)
+        if (
+            not force_refresh
+            and cached_value is not None
+            and _archive_recording_index_cache.get("cache_key") == cache_key
+            and (cached_expires_at > now or stale_expires_at > now)
+        ):
+            return cached_value
 
     index = _build_archive_recording_index_uncached()
-    _archive_recording_index_cache["value"] = index
-    _archive_recording_index_cache["cache_key"] = cache_key
-    _archive_recording_index_cache["expires_at"] = now + _ARCHIVE_RECORDING_INDEX_CACHE_TTL_SECONDS
-    return deepcopy(index)
+    now = time.monotonic()
+    with _archive_recording_index_cache_lock:
+        _archive_recording_index_cache["value"] = index
+        _archive_recording_index_cache["cache_key"] = cache_key
+        _archive_recording_index_cache["expires_at"] = now + _ARCHIVE_RECORDING_INDEX_CACHE_TTL_SECONDS
+        _archive_recording_index_cache["stale_expires_at"] = now + _ARCHIVE_RECORDING_INDEX_STALE_TTL_SECONDS
+    return index
+
+
+def _load_archive_recording_index(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    return deepcopy(_load_archive_recording_index_cached(force_refresh=force_refresh))
+
+
+def _load_archive_recording_payload(item_id: str, *, force_refresh: bool = False) -> dict[str, Any] | None:
+    now = time.monotonic()
+    cache_key = _archive_recording_index_cache_key()
+    if not force_refresh:
+        with _archive_recording_index_cache_lock:
+            cached = _archive_recording_payload_cache.get(item_id)
+            if cached is not None:
+                expires_at, cached_cache_key, cached_payload = cached
+                if expires_at > now and cached_cache_key == cache_key:
+                    return deepcopy(cached_payload)
+                _archive_recording_payload_cache.pop(item_id, None)
+
+    payload = _load_archive_recording_index_cached(force_refresh=force_refresh).get(item_id)
+    if payload is None:
+        return None
+
+    with _archive_recording_index_cache_lock:
+        _archive_recording_payload_cache[item_id] = (
+            time.monotonic() + _ARCHIVE_RECORDING_PAYLOAD_CACHE_TTL_SECONDS,
+            cache_key,
+            deepcopy(payload),
+        )
+        while len(_archive_recording_payload_cache) > _ARCHIVE_RECORDING_PAYLOAD_CACHE_MAX_ENTRIES:
+            oldest_key = next(iter(_archive_recording_payload_cache))
+            _archive_recording_payload_cache.pop(oldest_key, None)
+    return deepcopy(payload)
+
+
+def warm_archive_recording_index_cache(*, force_refresh: bool = False) -> int:
+    return len(_load_archive_recording_index_cached(force_refresh=force_refresh))
 
 
 def _build_archive_analysis_summary(
@@ -2171,37 +2226,40 @@ async def list_devices(
     iot_hospital_short_name = _iot_hospital_short_name(iot_hospital_code, current_user)
     all_devices: list[dict] = []
     next_token = ""
-    remote_devices_available = True
+    remote_devices_available = False
+    should_query_remote_devices = sync_status or bool(sn)
     try:
-        if iot_hospital_code:
-            all_devices = await asyncio.wait_for(
-                iot_list_devices(device_no=sn),
-                timeout=_DINGTALK_DEVICE_REMOTE_TIMEOUT_SECONDS,
-            )
-            await _sync_local_device_cache_from_remote(
-                db,
-                all_devices,
-                hospital_code=iot_hospital_code,
-                hospital_short_name=iot_hospital_short_name,
-                update_dingtalk_binding=False,
-            )
-        else:
-            for _ in range(20):  # safety cap
-                page = await asyncio.wait_for(
-                    dvi_list_devices(
-                        max_results=20,
-                        next_token=next_token,
-                        sn=sn,
-                        team_code=team_code,
-                        user_id=user_id,
-                    ),
+        if should_query_remote_devices:
+            if iot_hospital_code:
+                all_devices = await asyncio.wait_for(
+                    iot_list_devices(device_no=sn),
                     timeout=_DINGTALK_DEVICE_REMOTE_TIMEOUT_SECONDS,
                 )
-                all_devices.extend(page.get("result") or [])
-                next_token = page.get("nextToken") or ""
-                if not next_token:
-                    break
-            await _sync_local_device_cache_from_remote(db, all_devices)
+                await _sync_local_device_cache_from_remote(
+                    db,
+                    all_devices,
+                    hospital_code=iot_hospital_code,
+                    hospital_short_name=iot_hospital_short_name,
+                    update_dingtalk_binding=False,
+                )
+            else:
+                for _ in range(20):  # safety cap
+                    page = await asyncio.wait_for(
+                        dvi_list_devices(
+                            max_results=20,
+                            next_token=next_token,
+                            sn=sn,
+                            team_code=team_code,
+                            user_id=user_id,
+                        ),
+                        timeout=_DINGTALK_DEVICE_REMOTE_TIMEOUT_SECONDS,
+                    )
+                    all_devices.extend(page.get("result") or [])
+                    next_token = page.get("nextToken") or ""
+                    if not next_token:
+                        break
+                await _sync_local_device_cache_from_remote(db, all_devices)
+            remote_devices_available = True
     except (DingTalkConfigError, DingTalkApiError, TimeoutError) as exc:
         logger.warning("failed to list DingTalk remote devices; using local device cache: %r", exc)
         all_devices = []

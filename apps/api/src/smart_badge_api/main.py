@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from smart_badge_api.api.hot_read_cache import HotReadCacheMiddleware
 from smart_badge_api.api.router import api_router
 from smart_badge_api.api.routes.ws import router as ws_router
 from smart_badge_api.asr.hotword_sync import periodic_asr_hotword_sync
@@ -82,20 +84,58 @@ def create_app() -> FastAPI:
         # 注意：故意不预热 /analysis/results 缓存——它的冷启动需要 ~85s，会
         # 阻塞事件循环导致其它接口在此期间响应缓慢。改为依靠 in-route 的
         # 文件级 memo + single-flight lock，把首次访问成本摊到第一个用户。
-        async def _warm_archive_recording_list_cache() -> None:
+        async def _warm_archive_recording_caches() -> None:
             try:
+                from smart_badge_api.api.routes.dingtalk import warm_archive_recording_index_cache
                 from smart_badge_api.api.routes.recordings import (
                     _load_archive_recording_list_items,
                 )
                 from smart_badge_api.db.session import _session_factory
 
+                started_at = time.perf_counter()
+                index_count = await asyncio.to_thread(warm_archive_recording_index_cache)
                 async with _session_factory() as session:
-                    await _load_archive_recording_list_items(session)
-                logger.info("archive recording list cache warmed up")
+                    list_items = await _load_archive_recording_list_items(session)
+                logger.info(
+                    "archive recording caches warmed up index_count=%d list_count=%d elapsed_ms=%.1f",
+                    index_count,
+                    len(list_items),
+                    (time.perf_counter() - started_at) * 1000,
+                )
             except Exception:
-                logger.exception("failed to warm up archive recording list cache")
+                logger.exception("failed to warm up archive recording caches")
 
-        asyncio.create_task(_warm_archive_recording_list_cache())
+        async def _periodic_archive_recording_index_refresh() -> None:
+            from smart_badge_api.api.routes.dingtalk import warm_archive_recording_index_cache
+
+            interval_seconds = max(10, settings.archive_recording_index_refresh_interval_seconds)
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+
+                started_at = time.perf_counter()
+                try:
+                    index_count = await asyncio.to_thread(
+                        warm_archive_recording_index_cache,
+                        force_refresh=True,
+                    )
+                    logger.info(
+                        "archive recording index cache refreshed index_count=%d elapsed_ms=%.1f",
+                        index_count,
+                        (time.perf_counter() - started_at) * 1000,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("failed to refresh archive recording index cache")
+
+        archive_cache_warmup_task = asyncio.create_task(_warm_archive_recording_caches())
+        archive_index_refresh_task: asyncio.Task | None = None
+        if settings.archive_recording_index_refresh_interval_seconds > 0:
+            archive_index_refresh_task = asyncio.create_task(_periodic_archive_recording_index_refresh())
         sync_task: asyncio.Task | None = None
         dingtalk_audio_task: asyncio.Task | None = None
         dingtalk_archive_task: asyncio.Task | None = None
@@ -357,6 +397,8 @@ def create_app() -> FastAPI:
         stop_event.set()
 
         for task, name in [
+            (archive_cache_warmup_task, "archive cache warmup"),
+            (archive_index_refresh_task, "archive index refresh"),
             (sync_task, "staff sync"),
             (dingtalk_audio_task, "dingtalk audio sync"),
             (dingtalk_archive_task, "dingtalk archive sync"),
@@ -416,6 +458,16 @@ def create_app() -> FastAPI:
         docs_url=f"{settings.api_v1_prefix}/docs",
         openapi_url=f"{settings.api_v1_prefix}/openapi.json",
         lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        HotReadCacheMiddleware,
+        api_prefix=settings.api_v1_prefix,
+        enabled=settings.hot_read_cache_enabled,
+        ttl_seconds=settings.hot_read_cache_ttl_seconds,
+        badge_ttl_seconds=settings.hot_read_cache_badge_ttl_seconds,
+        max_items=settings.hot_read_cache_max_items,
+        max_body_bytes=settings.hot_read_cache_max_body_bytes,
     )
 
     app.add_middleware(

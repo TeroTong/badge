@@ -148,6 +148,7 @@ export const fetchVisits = (params?: {
   date_to?: string
   has_recordings?: boolean
   include_date_summaries?: boolean
+  fast_page?: boolean
   page?: number
   page_size?: number
 }) => {
@@ -163,6 +164,7 @@ export const fetchVisits = (params?: {
   if (params?.date_to) sp.set('date_to', params.date_to)
   if (params?.has_recordings !== undefined) sp.set('has_recordings', String(params.has_recordings))
   if (params?.include_date_summaries !== undefined) sp.set('include_date_summaries', String(params.include_date_summaries))
+  if (params?.fast_page !== undefined) sp.set('fast_page', String(params.fast_page))
   if (params?.page) sp.set('page', String(params.page))
   if (params?.page_size) sp.set('page_size', String(params.page_size))
   const qs = sp.toString()

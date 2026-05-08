@@ -769,6 +769,7 @@ export const fetchVisitOrders = (params?: {
   sjrq_start?: string
   sjrq_end?: string
   jcsta_txt?: string
+  fast_page?: boolean
 }) => {
   const sp = new URLSearchParams()
   if (params?.page) sp.set('page', String(params.page))
@@ -778,6 +779,7 @@ export const fetchVisitOrders = (params?: {
   if (params?.sjrq_start) sp.set('sjrq_start', params.sjrq_start)
   if (params?.sjrq_end) sp.set('sjrq_end', params.sjrq_end)
   if (params?.jcsta_txt) sp.set('jcsta_txt', params.jcsta_txt)
+  if (params?.fast_page !== undefined) sp.set('fast_page', String(params.fast_page))
   const qs = sp.toString()
   return api.get(`visit-orders${qs ? `?${qs}` : ''}`).json<PaginatedResponse<VisitOrder>>()
 }

@@ -596,6 +596,7 @@ export function WecomHomePage() {
         hospital_code: requestedHospitalCode,
         scope_mode: requestedScope,
         staff_id: requestedStaffId,
+        detail_level: 'summary',
         ...dateRange,
       }),
   })
