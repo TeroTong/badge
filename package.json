@@ -1,0 +1,17 @@
+{
+  "name": "smart-badge",
+  "private": true,
+  "packageManager": "pnpm@10.6.3",
+  "scripts": {
+    "start:dev": "powershell -ExecutionPolicy Bypass -File ./start-dev.ps1",
+    "dev:api": "cd apps/api && uv run uvicorn smart_badge_api.main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:worker": "cd apps/api && uv run dramatiq smart_badge_api.task_queue",
+    "dev:infra": "docker compose up -d postgres redis minio",
+    "dev:stack": "docker compose up --build api worker",
+    "dev:web": "pnpm --dir apps/web dev",
+    "lint:api": "cd apps/api && uv run ruff check src/smart_badge_api tests",
+    "build:web": "pnpm --dir apps/web build",
+    "lint:web": "pnpm --dir apps/web lint",
+    "test:api": "cd apps/api && uv run pytest"
+  }
+}

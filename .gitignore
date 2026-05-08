@@ -1,0 +1,47 @@
+.idea/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+node_modules/
+.DS_Store
+
+apps/api/.venv/
+apps/web/node_modules/
+apps/web/dist/
+
+# Audio / recordings / binary data
+apps/api/uploads/
+audio_raw/
+raw/
+validated/
+rejected/
+*.mp3
+*.wav
+*.ogg
+*.flac
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Results / exports (regenerable)
+results/
+apps/api/results/
+qc_models/
+
+*.log
+*.tmp
+*_check.txt
+*_output.txt
+segmentation_results/
+apps/api/asr_export/
+apps/api/asr_export_log.txt
+apps/api/asr_run.log
+apps/api/asr_v2_test.log
+.env
+apps/api/.env
+apps/web/.env

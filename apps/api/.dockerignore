@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+uploads/
+results/
+asr_export/
+.venv
+.pytest_cache
+.ruff_cache
+uploads
+results
+smart_badge.db
+__pycache__
+*.pyc

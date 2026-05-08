@@ -1,0 +1,225 @@
+services:
+  redis:
+    image: redis:7.4
+    container_name: smart-badge-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: smart-badge-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+
+  api:
+    build:
+      context: ./apps/api
+    container_name: smart-badge-api
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      APP_ENV: compose
+      PYTHONPATH: /app/src:/app/uploads/asr_runtime/python_site
+      FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:8080}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_AGENT_SECRET: ${WECOM_AGENT_SECRET:-}
+      WECOM_DEFAULT_REDIRECT_PATH: ${WECOM_DEFAULT_REDIRECT_PATH:-/wecom/badge}
+      DATABASE_URL: postgresql+psycopg://badge_user:Badge_123456@192.168.5.6:5432/badge
+      REDIS_URL: redis://redis:6379/0
+      STAFF_DIRECTORY_DSN: ${STAFF_DIRECTORY_DSN:-}
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_ACCESS_KEY: minioadmin
+      STORAGE_SECRET_KEY: minioadmin
+      STORAGE_BUCKET: smart-badge
+      UPLOAD_DIR: /app/uploads
+      RESULTS_DIR: /app/results
+      TASK_DISPATCH_MODE: dramatiq
+      SECRET_KEY: ${SECRET_KEY:-CHANGE-ME-IN-PRODUCTION}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.2-chat-latest}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      ASR_PROVIDER: ${ASR_PROVIDER:-high_precision_3dspeaker}
+      ASR_RUNTIME_DIR: /app/uploads/asr_runtime
+      TENCENT_ASR_SECRET_ID: ${TENCENT_ASR_SECRET_ID:-}
+      TENCENT_ASR_SECRET_KEY: ${TENCENT_ASR_SECRET_KEY:-}
+      TENCENT_ASR_SESSION_TOKEN: ${TENCENT_ASR_SESSION_TOKEN:-}
+      TENCENT_ASR_REGION: ${TENCENT_ASR_REGION:-ap-shanghai}
+      TENCENT_ASR_ENDPOINT: ${TENCENT_ASR_ENDPOINT:-asr.tencentcloudapi.com}
+      TENCENT_ASR_ENGINE_MODEL_TYPE: ${TENCENT_ASR_ENGINE_MODEL_TYPE:-16k_zh}
+      TENCENT_ASR_CHANNEL_NUM: ${TENCENT_ASR_CHANNEL_NUM:-1}
+      TENCENT_ASR_RES_TEXT_FORMAT: ${TENCENT_ASR_RES_TEXT_FORMAT:-2}
+      TENCENT_ASR_SPEAKER_DIARIZATION: ${TENCENT_ASR_SPEAKER_DIARIZATION:-0}
+      TENCENT_ASR_SPEAKER_NUMBER: ${TENCENT_ASR_SPEAKER_NUMBER:-0}
+      TENCENT_ASR_POLL_INTERVAL_SECONDS: ${TENCENT_ASR_POLL_INTERVAL_SECONDS:-5}
+      TENCENT_ASR_TIMEOUT_SECONDS: ${TENCENT_ASR_TIMEOUT_SECONDS:-3600}
+      TENCENT_ASR_PUBLIC_MEDIA_TTL_SECONDS: ${TENCENT_ASR_PUBLIC_MEDIA_TTL_SECONDS:-14400}
+      TENCENT_ASR_MAX_CONCURRENCY: ${TENCENT_ASR_MAX_CONCURRENCY:-8}
+      TENCENT_ASR_HOTWORD_LIST: ${TENCENT_ASR_HOTWORD_LIST:-}
+      TENCENT_ASR_DIRECT_UPLOAD_MAX_BYTES: ${TENCENT_ASR_DIRECT_UPLOAD_MAX_BYTES:-5000000}
+      TENCENT_ASR_DIRECT_UPLOAD_SEGMENT_SECONDS: ${TENCENT_ASR_DIRECT_UPLOAD_SEGMENT_SECONDS:-1200}
+      TENCENT_ASR_DIRECT_UPLOAD_BITRATE_KBPS: ${TENCENT_ASR_DIRECT_UPLOAD_BITRATE_KBPS:-16}
+      WHISPER_CACHE_DIR: /app/uploads/asr_runtime/whisper
+      WHISPER_VAD_MIN_SILENCE_DURATION_MS: ${WHISPER_VAD_MIN_SILENCE_DURATION_MS:-300}
+      SENSEVOICE_LANGUAGE: ${SENSEVOICE_LANGUAGE:-zh}
+      SENSEVOICE_SPEAKER_MERGE_GAP_SECONDS: ${SENSEVOICE_SPEAKER_MERGE_GAP_SECONDS:-0.45}
+      SENSEVOICE_SPEAKER_PADDING_MS: ${SENSEVOICE_SPEAKER_PADDING_MS:-120}
+      SENSEVOICE_UTTERANCE_GAP_SECONDS: ${SENSEVOICE_UTTERANCE_GAP_SECONDS:-0.7}
+      SENSEVOICE_PUNCTUATION_PAUSE_SECONDS: ${SENSEVOICE_PUNCTUATION_PAUSE_SECONDS:-0.35}
+      THREED_SPEAKER_REPO_PATH: /app/uploads/asr_runtime/3D-Speaker
+      THREED_SPEAKER_MODEL_CACHE_DIR: /app/uploads/asr_runtime/modelscope
+      WHISPER_LOCAL_FILES_ONLY: ${WHISPER_LOCAL_FILES_ONLY:-true}
+      SPEAKER_VOICEPRINT_ENABLED: ${SPEAKER_VOICEPRINT_ENABLED:-true}
+      SPEAKER_VOICEPRINT_AUTO_ENROLL_ENABLED: ${SPEAKER_VOICEPRINT_AUTO_ENROLL_ENABLED:-true}
+      SPEAKER_VOICEPRINT_AUTO_ENROLL_THRESHOLD: ${SPEAKER_VOICEPRINT_AUTO_ENROLL_THRESHOLD:-0.82}
+      SPEAKER_VOICEPRINT_MIN_DURATION_MS: ${SPEAKER_VOICEPRINT_MIN_DURATION_MS:-12000}
+      SPEAKER_VOICEPRINT_MATCH_THRESHOLD: ${SPEAKER_VOICEPRINT_MATCH_THRESHOLD:-0.68}
+      SPEAKER_VOICEPRINT_MATCH_MARGIN: ${SPEAKER_VOICEPRINT_MATCH_MARGIN:-0.05}
+      SPEAKER_VOICEPRINT_REVIEW_QUEUE_PATH: /app/uploads/asr_runtime/voiceprints/review_queue.json
+      # ── DingTalk ──
+      DINGTALK_CORP_ID: ${DINGTALK_CORP_ID:-}
+      DINGTALK_APP_KEY: ${DINGTALK_APP_KEY:-}
+      DINGTALK_APP_SECRET: ${DINGTALK_APP_SECRET:-}
+      DINGTALK_IOT_ENABLED: ${DINGTALK_IOT_ENABLED:-true}
+      DINGTALK_IOT_APP_ID: ${DINGTALK_IOT_APP_ID:-}
+      DINGTALK_IOT_APP_SECRET: ${DINGTALK_IOT_APP_SECRET:-}
+      DINGTALK_IOT_BASE_URL: ${DINGTALK_IOT_BASE_URL:-https://ecard-api-141770.eapps.dingtalkcloud.com/iot-cloud-open/v2}
+      DINGTALK_IOT_HOSPITAL_CODES: ${DINGTALK_IOT_HOSPITAL_CODES:-6501}
+      DINGTALK_IOT_AUDIO_DEFAULT_LOOKBACK_DAYS: ${DINGTALK_IOT_AUDIO_DEFAULT_LOOKBACK_DAYS:-7}
+    volumes:
+      - app-uploads:/app/uploads
+      - app-results:/app/results
+      - ./智慧工牌功能设计.xlsx:/app/智慧工牌功能设计.xlsx:ro
+      - ./适应症.xlsx:/app/适应症.xlsx:ro
+      - ./label.xlsx:/app/label.xlsx:ro
+    command: >
+      sh -c "alembic upgrade heads &&
+      python -m smart_badge_api.db.seed &&
+      uvicorn smart_badge_api.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: ./apps/api
+    container_name: smart-badge-worker
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      APP_ENV: compose
+      PYTHONPATH: /app/src:/app/uploads/asr_runtime/python_site
+      FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:8080}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_AGENT_SECRET: ${WECOM_AGENT_SECRET:-}
+      WECOM_DEFAULT_REDIRECT_PATH: ${WECOM_DEFAULT_REDIRECT_PATH:-/wecom/badge}
+      DATABASE_URL: postgresql+psycopg://badge_user:Badge_123456@192.168.5.6:5432/badge
+      REDIS_URL: redis://redis:6379/0
+      STAFF_DIRECTORY_DSN: ${STAFF_DIRECTORY_DSN:-}
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_ACCESS_KEY: minioadmin
+      STORAGE_SECRET_KEY: minioadmin
+      STORAGE_BUCKET: smart-badge
+      UPLOAD_DIR: /app/uploads
+      RESULTS_DIR: /app/results
+      TASK_DISPATCH_MODE: dramatiq
+      SECRET_KEY: ${SECRET_KEY:-CHANGE-ME-IN-PRODUCTION}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.2-chat-latest}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      ASR_PROVIDER: ${ASR_PROVIDER:-high_precision_3dspeaker}
+      ASR_RUNTIME_DIR: /app/uploads/asr_runtime
+      TENCENT_ASR_SECRET_ID: ${TENCENT_ASR_SECRET_ID:-}
+      TENCENT_ASR_SECRET_KEY: ${TENCENT_ASR_SECRET_KEY:-}
+      TENCENT_ASR_SESSION_TOKEN: ${TENCENT_ASR_SESSION_TOKEN:-}
+      TENCENT_ASR_REGION: ${TENCENT_ASR_REGION:-ap-shanghai}
+      TENCENT_ASR_ENDPOINT: ${TENCENT_ASR_ENDPOINT:-asr.tencentcloudapi.com}
+      TENCENT_ASR_ENGINE_MODEL_TYPE: ${TENCENT_ASR_ENGINE_MODEL_TYPE:-16k_zh}
+      TENCENT_ASR_CHANNEL_NUM: ${TENCENT_ASR_CHANNEL_NUM:-1}
+      TENCENT_ASR_RES_TEXT_FORMAT: ${TENCENT_ASR_RES_TEXT_FORMAT:-2}
+      TENCENT_ASR_SPEAKER_DIARIZATION: ${TENCENT_ASR_SPEAKER_DIARIZATION:-0}
+      TENCENT_ASR_SPEAKER_NUMBER: ${TENCENT_ASR_SPEAKER_NUMBER:-0}
+      TENCENT_ASR_POLL_INTERVAL_SECONDS: ${TENCENT_ASR_POLL_INTERVAL_SECONDS:-5}
+      TENCENT_ASR_TIMEOUT_SECONDS: ${TENCENT_ASR_TIMEOUT_SECONDS:-3600}
+      TENCENT_ASR_PUBLIC_MEDIA_TTL_SECONDS: ${TENCENT_ASR_PUBLIC_MEDIA_TTL_SECONDS:-14400}
+      TENCENT_ASR_MAX_CONCURRENCY: ${TENCENT_ASR_MAX_CONCURRENCY:-8}
+      TENCENT_ASR_HOTWORD_LIST: ${TENCENT_ASR_HOTWORD_LIST:-}
+      TENCENT_ASR_DIRECT_UPLOAD_MAX_BYTES: ${TENCENT_ASR_DIRECT_UPLOAD_MAX_BYTES:-5000000}
+      TENCENT_ASR_DIRECT_UPLOAD_SEGMENT_SECONDS: ${TENCENT_ASR_DIRECT_UPLOAD_SEGMENT_SECONDS:-1200}
+      TENCENT_ASR_DIRECT_UPLOAD_BITRATE_KBPS: ${TENCENT_ASR_DIRECT_UPLOAD_BITRATE_KBPS:-16}
+      WHISPER_CACHE_DIR: /app/uploads/asr_runtime/whisper
+      WHISPER_VAD_MIN_SILENCE_DURATION_MS: ${WHISPER_VAD_MIN_SILENCE_DURATION_MS:-300}
+      SENSEVOICE_LANGUAGE: ${SENSEVOICE_LANGUAGE:-zh}
+      SENSEVOICE_SPEAKER_MERGE_GAP_SECONDS: ${SENSEVOICE_SPEAKER_MERGE_GAP_SECONDS:-0.45}
+      SENSEVOICE_SPEAKER_PADDING_MS: ${SENSEVOICE_SPEAKER_PADDING_MS:-120}
+      SENSEVOICE_UTTERANCE_GAP_SECONDS: ${SENSEVOICE_UTTERANCE_GAP_SECONDS:-0.7}
+      SENSEVOICE_PUNCTUATION_PAUSE_SECONDS: ${SENSEVOICE_PUNCTUATION_PAUSE_SECONDS:-0.35}
+      THREED_SPEAKER_REPO_PATH: /app/uploads/asr_runtime/3D-Speaker
+      THREED_SPEAKER_MODEL_CACHE_DIR: /app/uploads/asr_runtime/modelscope
+      WHISPER_LOCAL_FILES_ONLY: ${WHISPER_LOCAL_FILES_ONLY:-true}
+      SPEAKER_VOICEPRINT_ENABLED: ${SPEAKER_VOICEPRINT_ENABLED:-true}
+      SPEAKER_VOICEPRINT_AUTO_ENROLL_ENABLED: ${SPEAKER_VOICEPRINT_AUTO_ENROLL_ENABLED:-true}
+      SPEAKER_VOICEPRINT_AUTO_ENROLL_THRESHOLD: ${SPEAKER_VOICEPRINT_AUTO_ENROLL_THRESHOLD:-0.82}
+      SPEAKER_VOICEPRINT_MIN_DURATION_MS: ${SPEAKER_VOICEPRINT_MIN_DURATION_MS:-12000}
+      SPEAKER_VOICEPRINT_MATCH_THRESHOLD: ${SPEAKER_VOICEPRINT_MATCH_THRESHOLD:-0.68}
+      SPEAKER_VOICEPRINT_MATCH_MARGIN: ${SPEAKER_VOICEPRINT_MATCH_MARGIN:-0.05}
+      SPEAKER_VOICEPRINT_REVIEW_QUEUE_PATH: /app/uploads/asr_runtime/voiceprints/review_queue.json
+    volumes:
+      - app-uploads:/app/uploads
+      - app-results:/app/results
+      - ./智慧工牌功能设计.xlsx:/app/智慧工牌功能设计.xlsx:ro
+      - ./适应症.xlsx:/app/适应症.xlsx:ro
+      - ./label.xlsx:/app/label.xlsx:ro
+    command: ["dramatiq", "smart_badge_api.task_queue"]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: smart-badge-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./wecom_verify:/var/www/wecom_verify:ro
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  redis-data:
+  minio-data:
+  app-uploads:
+  app-results:

@@ -1,0 +1,12 @@
+services:
+  api:
+    gpus: all
+    environment:
+      SENSEVOICE_DEVICE: ${SENSEVOICE_DEVICE:-cuda:0}
+      THREED_SPEAKER_DEVICE: ${THREED_SPEAKER_DEVICE:-cuda:0}
+
+  worker:
+    gpus: all
+    environment:
+      SENSEVOICE_DEVICE: ${SENSEVOICE_DEVICE:-cuda:0}
+      THREED_SPEAKER_DEVICE: ${THREED_SPEAKER_DEVICE:-cuda:0}
