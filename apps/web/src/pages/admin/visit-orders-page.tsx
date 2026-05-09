@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, DatePicker, Descriptions, Input, message, Modal, Table, Tag, type TableProps } from 'antd'
+import { Button, DatePicker, Descriptions, Input, message, Modal, Select, Spin, Table, Tag, type TableProps } from 'antd'
 import { DownloadOutlined, SyncOutlined } from '@ant-design/icons'
 
 import type { RecordingMatchCandidate, VisitOrder, VisitOrderRecordingMatch } from '@/api/admin'
@@ -11,6 +11,8 @@ import { getDisplayMatchEvidenceLines } from '@/utils/match-evidence'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { buildRecordingVisitLinkRiskLines } from '@/utils/recording-visit-link-confirmation'
 import { beijingNow, formatBeijingTime } from '@/utils/time'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
+import { usePageTransition } from '@/hooks/use-page-transition'
 
 const PAGE_SIZE = 20
 
@@ -47,7 +49,7 @@ function exportVisitOrders(rows: VisitOrder[]) {
   const lines = rows.map((r) => [
     r.dzdh, r.dzseg ?? '', r.sjrq ?? '', r.jgbm ?? '',
     r.kunr ?? '', r.ninam ?? '', r.yydh ?? '', r.yyuer ?? '', r.kulvl_dq ?? '',
-    r.kusex_txt ?? '', r.kutyp_dq_txt ?? '', r.kut30_dq_txt ?? '', r.kusta_dq_txt ?? '',
+    r.kusex_txt ?? '', r.kut30_dq_txt ?? '', r.kutyp_dq_txt ?? '', r.kusta_dq_txt ?? '',
     r.fzuer ?? '', r.fzuer_long ?? '', r.advxc ?? '', r.advxc_long ?? '',
     r.vipkf ?? '', r.d_fzuer ?? '', r.d_vipkf ?? '',
     r.fzdh ?? '', r.fzsj ?? '', r.fzsta_txt ?? '', r.ddsc ?? '', r.bhkx ?? '', r.assxc ?? '',
@@ -168,6 +170,9 @@ function renderEvidenceBlock(candidate: RecordingMatchCandidate) {
 
 export default function VisitOrdersPage() {
   const queryClient = useQueryClient()
+  const resultsRef = useRef<HTMLDivElement | null>(null)
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
   const [page, setPage] = useState(1)
   const [keyword, setKeyword] = useState('')
   const [fzuer, setFzuer] = useState('')
@@ -175,12 +180,13 @@ export default function VisitOrdersPage() {
   const [matchOpen, setMatchOpen] = useState(false)
   const [matchingVisitOrder, setMatchingVisitOrder] = useState<VisitOrder | null>(null)
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['visit-orders', page, keyword, fzuer, dateRange],
+  const { data, isLoading, isFetching, isError } = useQuery({
+    queryKey: ['visit-orders', activeHospitalCode ?? '', page, keyword, fzuer, dateRange],
     queryFn: () =>
       adminApi.fetchVisitOrders({
         page,
         page_size: PAGE_SIZE,
+        hospital_code: activeHospitalCode,
         keyword: keyword || undefined,
         fzuer: fzuer || undefined,
         sjrq_start: dateRange?.[0] || undefined,
@@ -189,6 +195,7 @@ export default function VisitOrdersPage() {
       }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
 
   const syncMutation = useMutation({
@@ -212,6 +219,20 @@ export default function VisitOrdersPage() {
 
   const visibleMatchCandidates = getVisibleRecordingCandidates(matchData?.candidates ?? [])
   const hasNextPage = (data?.total ?? 0) > page * PAGE_SIZE
+  const {
+    beginPageTransition,
+    displayedPage,
+    isPageFetching,
+    isPageTransitionVisible,
+    isShowingStalePage,
+    transitionPage,
+  } = usePageTransition({
+    page,
+    loadedPage: data?.page,
+    isFetching,
+    isInitialLoading: isLoading,
+    isError,
+  })
 
   const adoptMatchMutation = useMutation({
     mutationFn: ({ recordingId, visitId }: { recordingId: string; visitId: string }) =>
@@ -286,7 +307,7 @@ export default function VisitOrdersPage() {
         <div className="visit-order-cell">
           <strong className="visit-order-cell__title" title={row.ninam || '-'}>{row.ninam || '-'}</strong>
           <VisitOrderInfoRow label="客户编码" value={row.kunr || '-'} />
-          <VisitOrderInfoRow label="客户分层" value={row.kutyp_dq_txt || row.kut30_dq_txt || row.kusta_dq_txt || '-'} />
+          <VisitOrderInfoRow label="客户分层" value={row.kut30_dq_txt || row.kusta_dq_txt || '-'} />
         </div>
       ),
     },
@@ -364,6 +385,25 @@ export default function VisitOrdersPage() {
 
       <div className="operation-card visit-orders-toolbar">
         <div className="visit-orders-toolbar__filters">
+          {hospitalScope.canSelectHospital ? (
+            <Select
+              showSearch
+              placeholder="机构范围"
+              optionFilterProp="label"
+              options={hospitalScope.selectOptions}
+              value={activeHospitalCode}
+              loading={hospitalScope.isLoading}
+              className="visit-orders-toolbar__advisor"
+              onChange={(value) => {
+                hospitalScope.setHospitalCode(value)
+                setPage(1)
+              }}
+            />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
+          ) : null}
           <Input.Search
             placeholder="搜索单号 / 客户 / 顾问"
             allowClear
@@ -409,7 +449,28 @@ export default function VisitOrdersPage() {
         </div>
       </div>
 
-      <div className="operation-card visit-orders-table-card">
+      <div
+        ref={resultsRef}
+        className={`operation-card visit-orders-table-card paged-results-shell${isPageTransitionVisible || isPageFetching ? ' paged-results-shell--updating' : ''}`}
+        aria-busy={isPageTransitionVisible || isPageFetching}
+      >
+        {isPageFetching && (
+          <div className="paged-results-shell__overlay">
+            <Spin size="small" />
+            <span>正在加载第 {page} 页</span>
+          </div>
+        )}
+
+        {isPageTransitionVisible && (
+          <div className="paged-results-toast">
+            <Spin size="small" />
+            <span>
+              正在加载第 {transitionPage} 页到诊单据
+              {isShowingStalePage ? `，当前仍显示第 ${displayedPage} 页` : ''}
+            </span>
+          </div>
+        )}
+
         <Table<VisitOrder>
           rowKey="id"
           columns={columns}
@@ -423,8 +484,21 @@ export default function VisitOrdersPage() {
             current: page,
             pageSize: PAGE_SIZE,
             total: data?.total ?? 0,
-            showTotal: () => (hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`),
-            onChange: (p) => setPage(p),
+            disabled: isPageTransitionVisible,
+            showTotal: () => (
+              isPageTransitionVisible
+                ? `正在加载第 ${transitionPage} 页...`
+                : hasNextPage
+                  ? `第 ${page} 页，可继续翻页加载更多`
+                  : `第 ${page} 页，已到当前结果末页`
+            ),
+            onChange: (p) => {
+              beginPageTransition(p)
+              window.setTimeout(() => {
+                resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }, 0)
+              setPage(p)
+            },
           }}
           size="small"
         />

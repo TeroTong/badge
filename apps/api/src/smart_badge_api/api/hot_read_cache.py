@@ -10,7 +10,7 @@ from typing import Awaitable, Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 
 logger = logging.getLogger("smart_badge.hot_read_cache")
@@ -85,9 +85,28 @@ class HotReadResponseCache:
                         body += chunk
                         if len(body) > self._max_body_bytes:
                             too_large = True
+                            break
 
                     if too_large:
-                        return _clone_response(response, body, hit=False)
+                        # Don't accumulate any further; stream the rest of the
+                        # body without buffering and skip caching.
+                        buffered = body
+                        remaining_iter = response.body_iterator
+
+                        async def _passthrough_stream():
+                            if buffered:
+                                yield buffered
+                            async for chunk in remaining_iter:
+                                yield chunk
+
+                        headers = _cacheable_headers(response)
+                        headers["x-badge-hot-cache"] = "skip"
+                        return StreamingResponse(
+                            _passthrough_stream(),
+                            status_code=response.status_code,
+                            headers=headers,
+                            media_type=response.media_type,
+                        )
 
                     cached = _CachedHttpResponse(
                         body=body,

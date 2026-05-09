@@ -28,6 +28,8 @@ import * as adminApi from '@/api/admin'
 import type { Visit } from '@/api/visits'
 import { VISIT_STATUS_MAP } from '@/api/visits'
 import * as visitsApi from '@/api/visits'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
+import { usePageTransition } from '@/hooks/use-page-transition'
 import { beijingNow } from '@/utils/time'
 
 const { RangePicker } = DatePicker
@@ -84,6 +86,7 @@ export function VisitsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const qc = useQueryClient()
   const hasRestoredScrollRef = useRef(false)
+  const resultsRef = useRef<HTMLDivElement | null>(null)
   const initialState = useMemo(() => {
     const keywordParam = searchParams.get('keyword') ?? ''
     const consultantParam = searchParams.get('consultant_id') ?? undefined
@@ -130,6 +133,8 @@ export function VisitsPage() {
     () => `visits-scroll:${visitListSearch}`,
     [visitListSearch],
   )
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
 
   useEffect(() => {
     const nextParams = new URLSearchParams()
@@ -161,12 +166,13 @@ export function VisitsPage() {
 
   const dateRange = resolveDateRange(datePreset, customRange)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isFetching, isError } = useQuery({
     queryKey: [
         'visits-workbench',
         keyword,
         consultantFilter,
         recordingFilter,
+      activeHospitalCode ?? '',
       dateRange.from ?? '',
       dateRange.to ?? '',
       page,
@@ -175,6 +181,7 @@ export function VisitsPage() {
     queryFn: () =>
       visitsApi.fetchVisits({
         keyword: keyword || undefined,
+        hospital_code: activeHospitalCode,
         consultant_id: consultantFilter,
         has_recordings:
           recordingFilter === 'all' ? undefined : recordingFilter === 'linked',
@@ -187,6 +194,7 @@ export function VisitsPage() {
       }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
 
   useEffect(() => {
@@ -216,14 +224,29 @@ export function VisitsPage() {
   }, [isLoading, scrollRestoreKey])
 
   const { data: staffData } = useQuery({
-    queryKey: ['staff', 'all'],
-    queryFn: () => adminApi.fetchStaff({ page_size: 100 }),
+    queryKey: ['staff', 'all', activeHospitalCode ?? ''],
+    queryFn: () => adminApi.fetchStaff({ hospital_code: activeHospitalCode, page_size: 100 }),
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
   const staff = staffData?.items ?? []
   const consultants = staff.filter((member) => member.role === 'consultant' || member.role === 'manager')
 
   const visits = data?.items ?? []
   const total = data?.total ?? 0
+  const {
+    beginPageTransition,
+    displayedPage,
+    isPageFetching,
+    isPageTransitionVisible,
+    isShowingStalePage,
+    transitionPage,
+  } = usePageTransition({
+    page,
+    loadedPage: data?.page,
+    isFetching,
+    isInitialLoading: isLoading,
+    isError,
+  })
 
   const pendingLinkCount = visits.filter((visit) => visit.recording_count === 0).length
   const linkedVisitCount = visits.filter((visit) => visit.recording_count > 0).length
@@ -380,6 +403,25 @@ export function VisitsPage() {
         </div>
 
         <div className="visit-toolbar__filters">
+          {hospitalScope.canSelectHospital ? (
+            <Select
+              showSearch
+              placeholder="机构范围"
+              optionFilterProp="label"
+              options={hospitalScope.selectOptions}
+              value={activeHospitalCode}
+              loading={hospitalScope.isLoading}
+              onChange={(value) => {
+                hospitalScope.setHospitalCode(value)
+                setConsultantFilter(undefined)
+                setPage(1)
+              }}
+            />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
+          ) : null}
           <Select
             allowClear
             showSearch
@@ -424,39 +466,61 @@ export function VisitsPage() {
         </button>
       </div>
 
-      {isLoading ? (
-        <div className="visit-grid__loading">
-          <Spin size="large" />
-        </div>
-      ) : visits.length === 0 ? (
-        <Card bordered={false}>
-          <Empty description="当前筛选条件下没有接诊记录" />
-        </Card>
-      ) : (
-        <div>
-          {(() => {
-            const groups: { label: string; items: typeof visits }[] = []
-            for (const visit of visits) {
-              const dateStr = visit.visit_date
-                ? dayjs(visit.visit_date).format('YYYY-MM-DD')
-                : '未知日期'
-              const last = groups[groups.length - 1]
-              if (last && last.label === dateStr) {
-                last.items.push(visit)
-              } else {
-                groups.push({ label: dateStr, items: [visit] })
+      <div
+        ref={resultsRef}
+        className={`paged-results-shell${isPageTransitionVisible || isPageFetching ? ' paged-results-shell--updating' : ''}`}
+        aria-busy={isPageTransitionVisible || isPageFetching}
+      >
+        {isPageFetching && (
+          <div className="paged-results-shell__overlay">
+            <Spin size="small" />
+            <span>正在加载第 {page} 页</span>
+          </div>
+        )}
+
+        {isPageTransitionVisible && (
+          <div className="paged-results-toast">
+            <Spin size="small" />
+            <span>
+              正在加载第 {transitionPage} 页接诊记录
+              {isShowingStalePage ? `，当前仍显示第 ${displayedPage} 页` : ''}
+            </span>
+          </div>
+        )}
+
+        {isLoading ? (
+          <div className="visit-grid__loading">
+            <Spin size="large" />
+          </div>
+        ) : visits.length === 0 ? (
+          <Card bordered={false}>
+            <Empty description="当前筛选条件下没有接诊记录" />
+          </Card>
+        ) : (
+          <div>
+            {(() => {
+              const groups: { label: string; items: typeof visits }[] = []
+              for (const visit of visits) {
+                const dateStr = visit.visit_date
+                  ? dayjs(visit.visit_date).format('YYYY-MM-DD')
+                  : '未知日期'
+                const last = groups[groups.length - 1]
+                if (last && last.label === dateStr) {
+                  last.items.push(visit)
+                } else {
+                  groups.push({ label: dateStr, items: [visit] })
+                }
               }
-            }
-            return groups.map((group) => (
-              <div key={group.label} className="date-group">
-                <div className="date-group__header">
-                  <span className="date-group__line" />
-                  <span className="date-group__label">{group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}</span>
-                  <span className="date-group__count">{group.items.length} 条</span>
-                  <span className="date-group__line" />
-                </div>
-                <div className="visit-card-grid">
-                  {group.items.map((visit) => {
+              return groups.map((group) => (
+                <div key={group.label} className="date-group">
+                  <div className="date-group__header">
+                    <span className="date-group__line" />
+                    <span className="date-group__label">{group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}</span>
+                    <span className="date-group__count">{group.items.length} 条</span>
+                    <span className="date-group__line" />
+                  </div>
+                  <div className="visit-card-grid">
+                    {group.items.map((visit) => {
             const recordingCount = visit.recording_count ?? 0
             return (
               <article key={visit.id} className="visit-card visit-card--interactive" onClick={() => openVisitDetail(visit.id)}>
@@ -563,22 +627,34 @@ export function VisitsPage() {
               </article>
             )
           })}
+                  </div>
                 </div>
-              </div>
-            ))
-          })()}
-        </div>
-      )}
+              ))
+            })()}
+          </div>
+        )}
+      </div>
 
       <div className="visit-pagination">
-        <span>{hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`}</span>
+        <span>
+          {isPageTransitionVisible
+            ? `正在加载第 ${transitionPage} 页...`
+            : hasNextPage
+              ? `第 ${page} 页，可继续翻页加载更多`
+              : `第 ${page} 页，已到当前结果末页`}
+        </span>
         <Pagination
           current={page}
           pageSize={pageSize}
           total={total}
+          disabled={isPageTransitionVisible}
           showSizeChanger
           pageSizeOptions={[12, 24, 48]}
           onChange={(nextPage, nextPageSize) => {
+            beginPageTransition(nextPage, nextPageSize !== pageSize)
+            window.setTimeout(() => {
+              resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }, 0)
             setPage(nextPage)
             setPageSize(nextPageSize)
           }}

@@ -72,6 +72,8 @@ class WecomTenantConfig:
     agent_id: str
     agent_secret: str
     frontend_url: str
+    callback_token: str | None = None
+    callback_aes_key: str | None = None
     host: str | None = None
     is_default: bool = False
     api_base_url: str | None = None
@@ -115,6 +117,8 @@ def legacy_wecom_tenant_config() -> WecomTenantConfig | None:
         agent_id=settings.wecom_agent_id.strip(),
         agent_secret=settings.wecom_agent_secret.strip(),
         frontend_url=settings.frontend_url.strip().rstrip("/"),
+        callback_token=settings.wecom_callback_token.strip() or None,
+        callback_aes_key=settings.wecom_callback_aes_key.strip() or None,
         is_default=True,
         api_base_url=settings.wecom_api_base_url,
         oauth_base_url=settings.wecom_oauth_base_url,
@@ -452,6 +456,8 @@ async def send_wecom_text_message(
     to_user: str,
     content: str,
     tenant: WecomTenantConfig | None = None,
+    enable_duplicate_check: bool = True,
+    duplicate_check_interval: int = 1800,
 ) -> dict[str, Any]:
     resolved_tenant = ensure_wecom_enabled(tenant)
     target_user = str(to_user or "").strip()
@@ -474,8 +480,269 @@ async def send_wecom_text_message(
             "agentid": agent_id_payload,
             "text": {"content": clean_content},
             "safe": 0,
+            "enable_duplicate_check": 1 if enable_duplicate_check else 0,
+            "duplicate_check_interval": max(int(duplicate_check_interval or 0), 0),
+        },
+        tenant=resolved_tenant,
+    )
+
+
+async def send_wecom_textcard_message(
+    *,
+    to_user: str,
+    title: str,
+    description: str,
+    url: str,
+    btn_text: str = "查看详情",
+    tenant: WecomTenantConfig | None = None,
+) -> dict[str, Any]:
+    resolved_tenant = ensure_wecom_enabled(tenant)
+    target_user = str(to_user or "").strip()
+    if not target_user:
+        raise WecomConfigError("企业微信消息接收人 UserId 不能为空")
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise WecomConfigError("企业微信卡片标题不能为空")
+    clean_description = str(description or "").strip()
+    if not clean_description:
+        raise WecomConfigError("企业微信卡片描述不能为空")
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        raise WecomConfigError("企业微信卡片跳转 URL 不能为空")
+    agent_id_payload: int | str = (
+        int(resolved_tenant.agent_id)
+        if str(resolved_tenant.agent_id).strip().isdigit()
+        else resolved_tenant.agent_id
+    )
+    return await _post_wecom_api(
+        "/cgi-bin/message/send",
+        {},
+        {
+            "touser": target_user,
+            "msgtype": "textcard",
+            "agentid": agent_id_payload,
+            "textcard": {
+                "title": clean_title,
+                "description": clean_description,
+                "url": clean_url,
+                "btntxt": str(btn_text or "查看详情").strip() or "查看详情",
+            },
+            "safe": 0,
             "enable_duplicate_check": 1,
             "duplicate_check_interval": 1800,
+        },
+        tenant=resolved_tenant,
+    )
+
+
+async def send_wecom_button_interaction_card(
+    *,
+    to_user: str,
+    title: str,
+    description: str,
+    task_id: str,
+    buttons: list[dict[str, str | int]],
+    main_title_desc: str | None = None,
+    source_desc: str = "朗姿智能工牌",
+    horizontal_content_list: list[dict[str, str | int]] | None = None,
+    tenant: WecomTenantConfig | None = None,
+) -> dict[str, Any]:
+    resolved_tenant = ensure_wecom_enabled(tenant)
+    target_user = str(to_user or "").strip()
+    if not target_user:
+        raise WecomConfigError("企业微信消息接收人 UserId 不能为空")
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise WecomConfigError("企业微信交互卡片标题不能为空")
+    clean_description = str(description or "").strip()
+    if not clean_description:
+        raise WecomConfigError("企业微信交互卡片描述不能为空")
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        raise WecomConfigError("企业微信交互卡片 task_id 不能为空")
+
+    button_list: list[dict[str, str | int]] = []
+    for button in buttons:
+        text = str(button.get("text") or "").strip()
+        key = str(button.get("key") or "").strip()
+        if not text or not key:
+            continue
+        item: dict[str, str | int] = {"text": text, "key": key, "type": 0}
+        style = button.get("style")
+        if isinstance(style, int) and 1 <= style <= 4:
+            item["style"] = style
+        button_list.append(item)
+    if not button_list:
+        raise WecomConfigError("企业微信交互卡片按钮不能为空")
+
+    horizontal_items: list[dict[str, str | int]] = []
+    for item in horizontal_content_list or []:
+        keyname = str(item.get("keyname") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not keyname or not value:
+            continue
+        horizontal_item: dict[str, str | int] = {"keyname": keyname, "value": value}
+        item_type = item.get("type")
+        if isinstance(item_type, int) and item_type >= 0:
+            horizontal_item["type"] = item_type
+        horizontal_items.append(horizontal_item)
+
+    agent_id_payload: int | str = (
+        int(resolved_tenant.agent_id)
+        if str(resolved_tenant.agent_id).strip().isdigit()
+        else resolved_tenant.agent_id
+    )
+    template_card: dict[str, Any] = {
+        "card_type": "button_interaction",
+        "source": {"desc": source_desc},
+        "main_title": {
+            "title": clean_title,
+            "desc": str(main_title_desc or "").strip() or None,
+        },
+        "sub_title_text": clean_description,
+        "button_list": button_list,
+        "task_id": clean_task_id,
+    }
+    if horizontal_items:
+        template_card["horizontal_content_list"] = horizontal_items
+    template_card["main_title"] = {
+        key: value for key, value in template_card["main_title"].items() if value
+    }
+    return await _post_wecom_api(
+        "/cgi-bin/message/send",
+        {},
+        {
+            "touser": target_user,
+            "msgtype": "template_card",
+            "agentid": agent_id_payload,
+            "template_card": template_card,
+            "enable_duplicate_check": 1,
+            "duplicate_check_interval": 1800,
+        },
+        tenant=resolved_tenant,
+    )
+
+
+async def update_wecom_template_card_button(
+    *,
+    to_user: str,
+    response_code: str,
+    replace_name: str,
+    tenant: WecomTenantConfig | None = None,
+) -> dict[str, Any]:
+    resolved_tenant = ensure_wecom_enabled(tenant)
+    target_user = str(to_user or "").strip()
+    if not target_user:
+        raise WecomConfigError("企业微信消息接收人 UserId 不能为空")
+    clean_response_code = str(response_code or "").strip()
+    if not clean_response_code:
+        raise WecomConfigError("企业微信卡片 response_code 不能为空")
+    clean_replace_name = str(replace_name or "").strip()
+    if not clean_replace_name:
+        raise WecomConfigError("企业微信卡片按钮替换文案不能为空")
+    agent_id_payload: int | str = (
+        int(resolved_tenant.agent_id)
+        if str(resolved_tenant.agent_id).strip().isdigit()
+        else resolved_tenant.agent_id
+    )
+    return await _post_wecom_api(
+        "/cgi-bin/message/update_template_card",
+        {},
+        {
+            "userids": [target_user],
+            "agentid": agent_id_payload,
+            "response_code": clean_response_code,
+            "button": {"replace_name": clean_replace_name[:20]},
+        },
+        tenant=resolved_tenant,
+    )
+
+
+async def update_wecom_button_interaction_card(
+    *,
+    to_user: str,
+    response_code: str,
+    title: str,
+    description: str,
+    task_id: str,
+    buttons: list[dict[str, str | int]],
+    main_title_desc: str | None = None,
+    source_desc: str = "朗姿智能工牌",
+    horizontal_content_list: list[dict[str, str | int]] | None = None,
+    tenant: WecomTenantConfig | None = None,
+) -> dict[str, Any]:
+    resolved_tenant = ensure_wecom_enabled(tenant)
+    target_user = str(to_user or "").strip()
+    if not target_user:
+        raise WecomConfigError("企业微信消息接收人 UserId 不能为空")
+    clean_response_code = str(response_code or "").strip()
+    if not clean_response_code:
+        raise WecomConfigError("企业微信卡片 response_code 不能为空")
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise WecomConfigError("企业微信交互卡片标题不能为空")
+    clean_description = str(description or "").strip()
+    if not clean_description:
+        raise WecomConfigError("企业微信交互卡片描述不能为空")
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        raise WecomConfigError("企业微信交互卡片 task_id 不能为空")
+
+    button_list: list[dict[str, str | int]] = []
+    for button in buttons:
+        text = str(button.get("text") or "").strip()
+        key = str(button.get("key") or "").strip()
+        if not text or not key:
+            continue
+        item: dict[str, str | int] = {"text": text, "key": key, "type": 0}
+        style = button.get("style")
+        if isinstance(style, int) and 1 <= style <= 4:
+            item["style"] = style
+        button_list.append(item)
+    if not button_list:
+        raise WecomConfigError("企业微信交互卡片按钮不能为空")
+
+    horizontal_items: list[dict[str, str | int]] = []
+    for item in horizontal_content_list or []:
+        keyname = str(item.get("keyname") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not keyname or not value:
+            continue
+        horizontal_item: dict[str, str | int] = {"keyname": keyname, "value": value}
+        item_type = item.get("type")
+        if isinstance(item_type, int) and item_type >= 0:
+            horizontal_item["type"] = item_type
+        horizontal_items.append(horizontal_item)
+
+    agent_id_payload: int | str = (
+        int(resolved_tenant.agent_id)
+        if str(resolved_tenant.agent_id).strip().isdigit()
+        else resolved_tenant.agent_id
+    )
+    template_card: dict[str, Any] = {
+        "card_type": "button_interaction",
+        "source": {"desc": source_desc},
+        "main_title": {
+            "title": clean_title,
+            "desc": str(main_title_desc or "").strip() or None,
+        },
+        "sub_title_text": clean_description,
+        "button_list": button_list,
+        "task_id": clean_task_id,
+    }
+    if horizontal_items:
+        template_card["horizontal_content_list"] = horizontal_items
+    template_card["main_title"] = {
+        key: value for key, value in template_card["main_title"].items() if value
+    }
+    return await _post_wecom_api(
+        "/cgi-bin/message/update_template_card",
+        {},
+        {
+            "userids": [target_user],
+            "agentid": agent_id_payload,
+            "response_code": clean_response_code,
+            "template_card": template_card,
         },
         tenant=resolved_tenant,
     )

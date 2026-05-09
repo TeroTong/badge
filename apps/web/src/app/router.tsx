@@ -43,6 +43,7 @@ const WecomVisitDetailPage = lazy(() => import('@/pages/wecom/wecom-visit-detail
 const WecomCustomerDetailPage = lazy(() => import('@/pages/wecom/wecom-customer-detail-page'))
 const WecomRecordingsPage = lazy(() => import('@/pages/wecom/wecom-recordings-page'))
 const WecomRecordingDetailPage = lazy(() => import('@/pages/wecom/wecom-recording-detail-page'))
+const WecomSapReviewsPage = lazy(() => import('@/pages/wecom/wecom-sap-reviews-page'))
 
 function Lazy({ children }: { children: ReactNode }) {
   return <Suspense fallback={<div style={{ padding: 48, textAlign: 'center' }}>加载中…</div>}>{children}</Suspense>
@@ -207,6 +208,8 @@ const router = createBrowserRouter([
       { path: 'customers/:customerId', element: <Lazy><WecomCustomerDetailPage /></Lazy> },
       { path: 'recordings', element: <Lazy><WecomRecordingsPage /></Lazy> },
       { path: 'recordings/:recordingId', element: <Lazy><WecomRecordingDetailPage /></Lazy> },
+      { path: 'sap-reviews', element: <Lazy><WecomSapReviewsPage /></Lazy> },
+      { path: 'sap-reviews/:visitId', element: <Lazy><WecomSapReviewsPage /></Lazy> },
       { path: 'profile', element: <Navigate replace to="/wecom/badge" /> },
     ],
   },

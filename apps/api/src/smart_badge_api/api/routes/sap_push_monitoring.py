@@ -10,6 +10,7 @@ from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from smart_badge_api.api.hospital_scope import normalize_hospital_code
 from smart_badge_api.db.models import SapPushLog, VisitOrder
 from smart_badge_api.db.session import get_db
 from smart_badge_api.sap_push_service import serialize_sap_push_log
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/sap-push-monitoring", tags=["SAP回传监控"])
 
 
 _OVERVIEW_CACHE_TTL_SECONDS = 30.0
-_overview_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+_overview_cache: dict[str, dict[str, Any]] = {}
 _overview_cache_lock = asyncio.Lock()
 
 
@@ -82,49 +83,90 @@ def _log_overview_statuses(
     return result_statuses
 
 
-async def _build_sap_push_monitoring_overview(db: AsyncSession) -> SapPushMonitoringOverviewOut:
-    rows = (
+def _row_visit_order_lookup_key(row: SapPushMonitoringLogOut) -> tuple[str, str | None] | None:
+    visit_order_no = str(row.visit_order_no or "").strip()
+    if not visit_order_no:
+        return None
+    visit_order_seg = str(row.visit_order_seg or "").strip() or None
+    return visit_order_no, visit_order_seg
+
+
+def _row_matches_hospital(
+    row: SapPushMonitoringLogOut,
+    *,
+    visit_order_lookup: dict[tuple[str, str | None], VisitOrder],
+    hospital_code: str | None,
+) -> bool:
+    if not hospital_code:
+        return True
+    key = _row_visit_order_lookup_key(row)
+    if key is None:
+        return False
+    visit_order = visit_order_lookup.get(key)
+    return str(getattr(visit_order, "jgbm", "") or "").strip() == hospital_code
+
+
+def _monitoring_order_identity(row: SapPushMonitoringLogOut) -> tuple[str, str, str]:
+    key = _row_visit_order_lookup_key(row)
+    if key is not None:
+        visit_order_no, visit_order_seg = key
+        return "visit_order", visit_order_no, visit_order_seg or ""
+    return "log_target", row.log_id, str(row.target_index)
+
+
+async def _build_sap_push_monitoring_overview(
+    db: AsyncSession,
+    *,
+    hospital_code: str | None = None,
+) -> SapPushMonitoringOverviewOut:
+    logs = (
         await db.execute(
-            select(
-                SapPushLog.trigger_mode,
-                SapPushLog.status,
-                SapPushLog.request_payloads,
-                SapPushLog.response_items,
-                SapPushLog.sent_at,
-            )
+            select(SapPushLog)
+            .options(selectinload(SapPushLog.recording))
             .order_by(desc(SapPushLog.created_at))
         )
-    ).all()
+    ).scalars().all()
+    visit_order_lookup = await _load_visit_order_lookup(db, logs)
 
-    total_count = 0
+    buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    latest_sent_at: str | None = None
+
+    for log in logs:
+        for row in _to_monitoring_log_rows(log, visit_order_lookup=visit_order_lookup):
+            if not _row_matches_hospital(row, visit_order_lookup=visit_order_lookup, hospital_code=hospital_code):
+                continue
+            identity = _monitoring_order_identity(row)
+            bucket = buckets.setdefault(
+                identity,
+                {"statuses": set(), "has_manual": False, "has_auto": False},
+            )
+            bucket["statuses"].add(str(row.result_status or "prepared"))
+            if str(row.trigger_mode or "").strip() == "manual":
+                bucket["has_manual"] = True
+            else:
+                bucket["has_auto"] = True
+            if row.sent_at and latest_sent_at is None:
+                latest_sent_at = row.sent_at
+
+    total_count = len(buckets)
     succeeded_count = 0
     failed_count = 0
     pending_count = 0
     auto_count = 0
     manual_count = 0
-    latest_sent_at = None
 
-    for trigger_mode, status, request_payloads, response_items, sent_at in rows:
-        result_statuses = _log_overview_statuses(
-            status=status,
-            request_payloads=request_payloads,
-            response_items=response_items,
-        )
-        target_count = len(result_statuses)
-        total_count += target_count
-        if str(trigger_mode or "").strip() == "manual":
-            manual_count += target_count
+    for bucket in buckets.values():
+        statuses = set(bucket.get("statuses") or set())
+        if "succeeded" in statuses:
+            succeeded_count += 1
+        elif "failed" in statuses:
+            failed_count += 1
         else:
-            auto_count += target_count
-        for result_status in result_statuses:
-            if result_status == "succeeded":
-                succeeded_count += 1
-            elif result_status == "failed":
-                failed_count += 1
-            else:
-                pending_count += 1
-        if sent_at and latest_sent_at is None:
-            latest_sent_at = sent_at.isoformat()
+            pending_count += 1
+        if bucket.get("has_manual"):
+            manual_count += 1
+        elif bucket.get("has_auto"):
+            auto_count += 1
 
     return SapPushMonitoringOverviewOut(
         total_count=total_count,
@@ -137,20 +179,29 @@ async def _build_sap_push_monitoring_overview(db: AsyncSession) -> SapPushMonito
     )
 
 
-async def _cached_sap_push_monitoring_overview(db: AsyncSession) -> SapPushMonitoringOverviewOut:
+async def _cached_sap_push_monitoring_overview(
+    db: AsyncSession,
+    *,
+    hospital_code: str | None = None,
+) -> SapPushMonitoringOverviewOut:
+    cache_key = hospital_code or "__all__"
     now = monotonic_time.monotonic()
-    cached_value = _overview_cache.get("value")
-    if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+    cached_entry = _overview_cache.get(cache_key) or {}
+    cached_value = cached_entry.get("value")
+    if cached_value is not None and float(cached_entry.get("expires_at") or 0.0) > now:
         return cached_value
 
     async with _overview_cache_lock:
         now = monotonic_time.monotonic()
-        cached_value = _overview_cache.get("value")
-        if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
+        cached_entry = _overview_cache.get(cache_key) or {}
+        cached_value = cached_entry.get("value")
+        if cached_value is not None and float(cached_entry.get("expires_at") or 0.0) > now:
             return cached_value
-        value = await _build_sap_push_monitoring_overview(db)
-        _overview_cache["value"] = value
-        _overview_cache["expires_at"] = now + _OVERVIEW_CACHE_TTL_SECONDS
+        value = await _build_sap_push_monitoring_overview(db, hospital_code=hospital_code)
+        _overview_cache[cache_key] = {
+            "value": value,
+            "expires_at": now + _OVERVIEW_CACHE_TTL_SECONDS,
+        }
         return value
 
 
@@ -351,9 +402,29 @@ async def _count_sap_push_monitoring_targets(
     *,
     status_filter: str,
     trigger_mode: str,
+    hospital_code: str | None,
     date_from: date | None,
     date_to: date | None,
 ) -> int:
+    if hospital_code:
+        stmt = (
+            select(SapPushLog)
+            .options(selectinload(SapPushLog.recording))
+            .where(*_sap_push_log_date_filters(date_from, date_to))
+            .order_by(desc(SapPushLog.created_at))
+        )
+        if trigger_mode and trigger_mode != "all":
+            stmt = stmt.where(SapPushLog.trigger_mode == trigger_mode)
+        logs = (await db.execute(stmt)).scalars().all()
+        visit_order_lookup = await _load_visit_order_lookup(db, logs)
+        return sum(
+            1
+            for log in logs
+            for row in _to_monitoring_log_rows(log, visit_order_lookup=visit_order_lookup)
+            if _row_matches_hospital(row, visit_order_lookup=visit_order_lookup, hospital_code=hospital_code)
+            and _status_matches_filter(row.result_status, status_filter)
+        )
+
     stmt = select(
         SapPushLog.status,
         SapPushLog.request_payloads,
@@ -381,6 +452,7 @@ async def _load_sap_push_monitoring_page_rows(
     *,
     status_filter: str,
     trigger_mode: str,
+    hospital_code: str | None,
     date_from: date | None,
     date_to: date | None,
     page: int,
@@ -412,6 +484,8 @@ async def _load_sap_push_monitoring_page_rows(
         visit_order_lookup = await _load_visit_order_lookup(db, logs)
         for log in logs:
             for row in _to_monitoring_log_rows(log, visit_order_lookup=visit_order_lookup):
+                if not _row_matches_hospital(row, visit_order_lookup=visit_order_lookup, hospital_code=hospital_code):
+                    continue
                 if not _status_matches_filter(row.result_status, status_filter):
                     continue
                 if matched_seen >= target_start and matched_seen < target_end:
@@ -430,9 +504,13 @@ async def _load_sap_push_monitoring_page_rows(
 
 @router.get("/overview", response_model=SapPushMonitoringOverviewOut)
 async def get_sap_push_monitoring_overview(
+    hospital_code: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _cached_sap_push_monitoring_overview(db)
+    return await _cached_sap_push_monitoring_overview(
+        db,
+        hospital_code=normalize_hospital_code(hospital_code),
+    )
 
     logs = (
         await db.execute(
@@ -488,6 +566,7 @@ async def get_sap_push_monitoring_overview(
 @router.get("/logs", response_model=PaginatedResponse[SapPushMonitoringLogOut])
 async def list_sap_push_monitoring_logs(
     db: AsyncSession = Depends(get_db),
+    hospital_code: str | None = Query(default=None),
     status: str = Query(default="all"),
     trigger_mode: str = Query(default="all"),
     keyword: str | None = Query(default=None),
@@ -496,11 +575,13 @@ async def list_sap_push_monitoring_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ):
+    requested_hospital_code = normalize_hospital_code(hospital_code)
     if not (keyword and keyword.strip()):
         total = await _count_sap_push_monitoring_targets(
             db,
             status_filter=status,
             trigger_mode=trigger_mode,
+            hospital_code=requested_hospital_code,
             date_from=date_from,
             date_to=date_to,
         )
@@ -508,6 +589,7 @@ async def list_sap_push_monitoring_logs(
             db,
             status_filter=status,
             trigger_mode=trigger_mode,
+            hospital_code=requested_hospital_code,
             date_from=date_from,
             date_to=date_to,
             page=page,
@@ -535,6 +617,16 @@ async def list_sap_push_monitoring_logs(
         for log in logs
         for row in _to_monitoring_log_rows(log, visit_order_lookup=visit_order_lookup)
     ]
+    if requested_hospital_code:
+        rows = [
+            row
+            for row in rows
+            if _row_matches_hospital(
+                row,
+                visit_order_lookup=visit_order_lookup,
+                hospital_code=requested_hospital_code,
+            )
+        ]
     if keyword and keyword.strip():
         rows = [row for row in rows if _matches_keyword(row, keyword)]
     if status and status != "all":

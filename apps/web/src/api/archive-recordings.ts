@@ -27,6 +27,7 @@ export type ArchiveRecording = {
   quality_reason?: string | null
   error_message?: string | null
   recording_id?: string | null
+  is_split_hidden?: boolean | null
   visit_id?: string | null
   linked_visit_ids: string[]
   linked_visit_order_refs: string[]

@@ -581,6 +581,124 @@ def test_wecom_archive_recordings_exclude_higher_permission_managed_staff() -> N
     asyncio.run(scenario())
 
 
+def test_wecom_archive_recordings_super_admin_staff_id_remains_global() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        archive_index = {
+            "milan-unmanaged": {
+                "summary": _archive_item(
+                    "milan-unmanaged",
+                    create_time="2026-05-09T17:57:39+08:00",
+                    pipeline_status="analyzed",
+                    needs_visit_link=False,
+                    has_visit_link=False,
+                    staff_id="staff-6101",
+                    staff_hospital_code="6101",
+                )
+            },
+            "yamei-managed": {
+                "summary": _archive_item(
+                    "yamei-managed",
+                    create_time="2026-05-09T17:49:53+08:00",
+                    pipeline_status="analyzed",
+                    needs_visit_link=False,
+                    has_visit_link=False,
+                    staff_id="staff-6501",
+                    staff_hospital_code="6501",
+                )
+            },
+        }
+
+        try:
+            async with session_factory() as db:
+                current_user = User(
+                    username="super-admin",
+                    hashed_password="x",
+                    role="super_admin",
+                    staff_id="admin-6501",
+                )
+                manager = Staff(id="admin-6501", name="Super", hospital_code="6501", permission_role="super_admin")
+                milan_staff = Staff(id="staff-6101", name="Milan", hospital_code="6101", permission_role="staff")
+                yamei_staff = Staff(id="staff-6501", name="Yamei", hospital_code="6501", permission_role="staff")
+                db.add_all([
+                    current_user,
+                    manager,
+                    milan_staff,
+                    yamei_staff,
+                    StaffManagementRelation(
+                        hospital_code="6501",
+                        manager_staff_id=manager.id,
+                        subordinate_staff_id=yamei_staff.id,
+                    ),
+                ])
+                await db.commit()
+
+                with (
+                    patch(
+                        "smart_badge_api.api.routes.recordings._load_archive_recording_index",
+                        return_value=archive_index,
+                    ),
+                    patch(
+                        "smart_badge_api.api.routes.recordings._attach_archive_recording_bindings",
+                        AsyncMock(side_effect=lambda _db, items: items),
+                    ),
+                ):
+                    all_page = await list_archive_recordings(
+                        visit_id=None,
+                        staff_id=None,
+                        hospital_code=None,
+                        status="analyzed",
+                        keyword=None,
+                        link_state=None,
+                        sort_mode=None,
+                        exclude_filtered=False,
+                        exclude_quality_filtered=False,
+                        problem_only=False,
+                        include_date_summaries=False,
+                        include_analysis_summary=False,
+                        fast_page=True,
+                        date_from=None,
+                        date_to=None,
+                        db=db,
+                        current_user=current_user,
+                        page=1,
+                        page_size=10,
+                    )
+                    milan_page = await list_archive_recordings(
+                        visit_id=None,
+                        staff_id=None,
+                        hospital_code="6101",
+                        status="analyzed",
+                        keyword=None,
+                        link_state=None,
+                        sort_mode=None,
+                        exclude_filtered=False,
+                        exclude_quality_filtered=False,
+                        problem_only=False,
+                        include_date_summaries=False,
+                        include_analysis_summary=False,
+                        fast_page=True,
+                        date_from=None,
+                        date_to=None,
+                        db=db,
+                        current_user=current_user,
+                        page=1,
+                        page_size=10,
+                    )
+
+            assert [item.id for item in all_page.items] == ["milan-unmanaged", "yamei-managed"]
+            assert [item.id for item in milan_page.items] == ["milan-unmanaged"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_dingtalk_archive_recordings_follow_staff_management_scope() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -921,11 +1039,15 @@ def test_resolve_archive_analysis_result_prefers_latest_analysis_task(tmp_path) 
                 "smart_badge_api.api.routes.dingtalk.get_settings",
                 return_value=fake_settings,
             ),
-            patch(
-                "smart_badge_api.api.routes.dingtalk._resolve_archive_manifest_file_path",
-                return_value=stage_result_path,
-            ),
-        ):
+                patch(
+                    "smart_badge_api.api.routes.dingtalk._resolve_archive_manifest_file_path",
+                    return_value=stage_result_path,
+                ),
+                patch(
+                    "smart_badge_api.api.routes.dingtalk.attach_unlinked_sap_preview_to_result",
+                    AsyncMock(side_effect=lambda _db, _recording_id, payload: payload),
+                ),
+            ):
             resolved = await _resolve_archive_analysis_result(
                 _FakeDb(),  # type: ignore[arg-type]
                 summary={"recording_id": "recording123"},
@@ -1240,6 +1362,92 @@ def test_list_archive_recordings_fast_page_binds_only_first_candidate_batch() ->
         assert page.pages == 2
         assert attach_mock.await_count == 1
         assert len(attach_mock.await_args.args[1]) == 50
+
+    asyncio.run(scenario())
+
+
+def test_list_archive_recordings_fast_page_filters_hospital_after_binding() -> None:
+    async def scenario() -> None:
+        archive_index = {
+            "newer-other-hospital": {
+                "summary": _archive_item(
+                    "newer-other-hospital",
+                    create_time="2026-05-09T13:10:00+08:00",
+                    pipeline_status="analyzed",
+                    needs_visit_link=False,
+                    has_visit_link=True,
+                    staff_hospital_code=None,
+                )
+            },
+            "target-missing-hospital": {
+                "summary": _archive_item(
+                    "target-missing-hospital",
+                    create_time="2026-05-09T13:00:00+08:00",
+                    pipeline_status="analyzed",
+                    needs_visit_link=False,
+                    has_visit_link=True,
+                    staff_hospital_code=None,
+                )
+            },
+            "target-stale-status": {
+                "summary": _archive_item(
+                    "target-stale-status",
+                    create_time="2026-05-09T12:50:00+08:00",
+                    pipeline_status="transcribed",
+                    needs_visit_link=False,
+                    has_visit_link=True,
+                    staff_hospital_code=None,
+                )
+            },
+        }
+        current_user = User(username="admin", hashed_password="x", role="super_admin")
+
+        async def attach(_db, items):
+            for item in items:
+                if item["id"] == "newer-other-hospital":
+                    item["staff_hospital_code"] = "6101"
+                else:
+                    item["staff_hospital_code"] = "6501"
+                    item["pipeline_status"] = "analyzed"
+                    item["has_analysis"] = True
+            return items
+
+        with (
+            patch(
+                "smart_badge_api.api.routes.recordings._load_archive_recording_index",
+                return_value=archive_index,
+            ),
+            patch(
+                "smart_badge_api.api.routes.recordings._attach_archive_recording_bindings",
+                AsyncMock(side_effect=attach),
+            ),
+        ):
+            page = await list_archive_recordings(
+                visit_id=None,
+                staff_id=None,
+                hospital_code="6501",
+                status="analyzed",
+                keyword=None,
+                link_state=None,
+                sort_mode=None,
+                exclude_filtered=False,
+                exclude_quality_filtered=True,
+                problem_only=False,
+                include_date_summaries=False,
+                include_analysis_summary=False,
+                fast_page=True,
+                date_from=None,
+                date_to=None,
+                db=None,  # type: ignore[arg-type]
+                current_user=current_user,
+                page=1,
+                page_size=12,
+            )
+
+        assert [item.id for item in page.items] == [
+            "target-missing-hospital",
+            "target-stale-status",
+        ]
 
     asyncio.run(scenario())
 

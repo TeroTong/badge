@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smart_badge_api.api.deps import get_db
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.schemas.visit_order_push import SapHanaVisitOrderPushAck, SapHanaVisitOrderPushIn
-from smart_badge_api.task_queue import dispatch_visit_order_push_materialization
+from smart_badge_api.task_queue import dispatch_visit_order_advisor_notifications, dispatch_visit_order_push_materialization
 from smart_badge_api.visit_order_push_service import upsert_sap_hana_visit_orders
 
 router = APIRouter(prefix="/visit-orders", tags=["visit-orders-push"])
@@ -92,6 +92,14 @@ async def push_visit_orders_from_sap_hana(
         for item in items
         if (jgbm := _clean_text(item.jgbm)) and (dzdh := _clean_text(item.dzdh))
     }
+    notification_dispatched = False
+    try:
+        if sync_keys and (result.created_count or result.updated_count):
+            await dispatch_visit_order_advisor_notifications(sync_keys)
+            notification_dispatched = True
+    except Exception:
+        logger.exception("SAP HANA visit order push saved but advisor notification dispatch failed")
+
     dispatched = False
     try:
         if sync_keys:
@@ -111,5 +119,7 @@ async def push_visit_orders_from_sap_hana(
         message += "Visitorders queued for async sync"
     else:
         message += "Visitorders sync not queued; fallback sync will retry"
+    if notification_dispatched:
+        message += "; advisor notifications queued"
 
     return _ack_response(message, state="S", status_code=status.HTTP_200_OK)

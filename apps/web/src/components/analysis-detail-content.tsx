@@ -1113,6 +1113,27 @@ export function AnalysisDetailContent({
 
       <div className="ad-analysis-columns">
 
+        {!embeddedSimplified ? (
+          <AnalysisSection
+            title="SAP预回写内容"
+            embedded={embedded}
+            defaultOpen={embeddedSectionDefaultOpen}
+          >
+            <div className="ad-sap-preview">
+              <div className="ad-sap-preview__panel ad-sap-preview__panel--text">
+                <h3 className="ad-sap-preview__title">咨询备注</h3>
+                {primarySapText ? (
+                  <pre className="ad-sap-preview__text">{primarySapText}</pre>
+                ) : (
+                  <p className="ad-sap-preview__empty">
+                    暂未生成SAP预回写内容。录音完成LLM分析后会在这里展示预回写给SAP的咨询备注。
+                  </p>
+                )}
+              </div>
+            </div>
+          </AnalysisSection>
+        ) : null}
+
         <AnalysisSection
           title="面诊结果分析"
           embedded={embedded}
@@ -1347,27 +1368,6 @@ export function AnalysisDetailContent({
             </div>
           </div>
         </AnalysisSection>
-
-        {!embeddedSimplified ? (
-          <AnalysisSection
-            title="SAP预回写内容"
-            embedded={embedded}
-            defaultOpen={embeddedSectionDefaultOpen}
-          >
-            <div className="ad-sap-preview">
-              <div className="ad-sap-preview__panel ad-sap-preview__panel--text">
-                <h3 className="ad-sap-preview__title">咨询备注</h3>
-                {primarySapText ? (
-                  <pre className="ad-sap-preview__text">{primarySapText}</pre>
-                ) : (
-                  <p className="ad-sap-preview__empty">
-                    暂未生成SAP预回写内容。录音完成LLM分析后会在这里展示预回写给SAP的咨询备注。
-                  </p>
-                )}
-              </div>
-            </div>
-          </AnalysisSection>
-        ) : null}
 
         <AnalysisSection
           title="面诊过程评价"

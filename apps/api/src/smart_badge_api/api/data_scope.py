@@ -9,6 +9,7 @@ from smart_badge_api.core.permissions import (
     LEGACY_STAFF_PERMISSION_ROLE_MAP,
     PERMISSION_ROLE_LEVELS,
     PermissionScope,
+    GLOBAL_ROLES,
     is_global_role,
     normalize_permission_role,
     permission_role_level,
@@ -33,10 +34,11 @@ def _first_non_empty(*values: str | None) -> str | None:
 
 
 async def build_permission_scope(user: User) -> PermissionScope:
+    role = normalize_permission_role(getattr(user, "role", None))
     return PermissionScope(
-        role=getattr(user, "role", None),
+        role=role,
         staff_id=getattr(user, "staff_id", None),
-        hospital_code=_first_non_empty(getattr(user, "hospital_code", None)),
+        hospital_code=None if role in GLOBAL_ROLES else _first_non_empty(getattr(user, "hospital_code", None)),
     )
 
 
@@ -61,6 +63,8 @@ def _staff_visit_order_participation_condition(staff_model, visit_order_model) -
 
 
 def _staff_id_in_management_scope(scope: PermissionScope, staff_id_column) -> ColumnElement[bool]:
+    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+        return true()
     if not scope.staff_id:
         return false()
     if scope.role == "single_staff":
@@ -141,6 +145,8 @@ def _hospital_visit_match_condition(
 
 
 def visit_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
+    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+        return true()
     if scope.staff_id:
         direct_recording_model = aliased(Recording)
         linked_recording_model = aliased(Recording)
@@ -182,6 +188,8 @@ def visit_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
 
 
 def recording_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
+    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+        return true()
     if scope.staff_id:
         return _staff_id_in_management_scope(scope, Recording.staff_id)
 
@@ -189,6 +197,8 @@ def recording_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
 
 
 def customer_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
+    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+        return true()
     return exists(
         select(Visit.id).where(
             Visit.customer_id == Customer.id,
@@ -198,6 +208,8 @@ def customer_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
 
 
 def visit_order_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
+    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+        return true()
     if scope.staff_id:
         participant_visit_order = aliased(VisitOrder)
         participant_staff = aliased(Staff)

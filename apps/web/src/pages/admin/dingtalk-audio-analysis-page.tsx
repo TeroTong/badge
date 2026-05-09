@@ -1,17 +1,16 @@
-import { type CSSProperties, useMemo, useState } from 'react'
+import { type CSSProperties, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import dayjs from 'dayjs'
-import { Button, Empty, Input, Pagination, Select, Spin } from 'antd'
+import { Button, Empty, Input, Pagination, Select, Spin, Tag } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 
-import * as adminApi from '@/api/admin'
 import {
   type ArchiveRecording as DingtalkArchiveRecording,
   fetchArchiveRecordings,
 } from '@/api/archive-recordings'
-import { isHospitalAdminOrAbove } from '@/app/roles'
-import { useAuth } from '@/app/use-auth'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
+import { usePageTransition } from '@/hooks/use-page-transition'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { beijingNow, formatBeijingTime } from '@/utils/time'
 
@@ -206,38 +205,34 @@ function ArchiveAnalysisCard({
 }
 
 export default function DingtalkAudioAnalysisPage() {
-  const auth = useAuth()
+  const hospitalScope = useHospitalScopeFilter()
+  const resultsRef = useRef<HTMLDivElement | null>(null)
+  const activeHospitalCode = hospitalScope.hospitalCode
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
-  const [hospitalFilter, setHospitalFilter] = useState<string | undefined>()
   const [datePreset, setDatePreset] = useState<DatePreset>(DEFAULT_DATE_PRESET)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(12)
   const dateRange = useMemo(() => resolveDateRange(datePreset), [datePreset])
-  const canFilterByHospital = auth.status === 'authenticated' && isHospitalAdminOrAbove(auth.user.role)
-  const hospitalOptionsQuery = useQuery({
-    queryKey: ['staff', 'hospital-options'],
-    queryFn: () => adminApi.fetchStaffHospitalOptions(),
-    enabled: canFilterByHospital,
-  })
-  const hospitalOptions = (hospitalOptionsQuery.data ?? []).map((item) => ({
-    value: item.hospital_code,
-    label: item.hospital_name && item.hospital_name !== item.hospital_code
-      ? `${item.hospital_name}（${item.hospital_code}）`
-      : item.hospital_code,
-  }))
+  const canFilterByHospital = hospitalScope.canSelectHospital
+  const hospitalOptionsQuery = {
+    data: hospitalScope.hospitalOptions,
+    isLoading: hospitalScope.isLoading,
+  }
+  const hospitalOptions = hospitalScope.selectOptions
 
   const {
     data,
     isLoading,
     isFetching,
+    isError,
     error,
     refetch,
   } = useQuery({
-    queryKey: ['dingtalk-audio-analysis-list', keyword, hospitalFilter || 'all', datePreset, page, pageSize],
+    queryKey: ['dingtalk-audio-analysis-list', keyword, activeHospitalCode ?? '', datePreset, page, pageSize],
     queryFn: () => fetchArchiveRecordings({
       keyword: keyword || undefined,
-      hospital_code: hospitalFilter,
+      hospital_code: activeHospitalCode,
       status: 'analyzed',
       exclude_quality_filtered: true,
       include_date_summaries: false,
@@ -249,9 +244,24 @@ export default function DingtalkAudioAnalysisPage() {
     }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
 
   const items = useMemo(() => data?.items ?? [], [data])
+  const {
+    beginPageTransition,
+    displayedPage,
+    isPageFetching,
+    isPageTransitionVisible,
+    isShowingStalePage,
+    transitionPage,
+  } = usePageTransition({
+    page,
+    loadedPage: data?.page,
+    isFetching,
+    isInitialLoading: isLoading,
+    isError,
+  })
 
   const groupedItems = useMemo(() => {
     const groups: Array<{ label: string; items: DingtalkArchiveRecording[] }> = []
@@ -268,6 +278,11 @@ export default function DingtalkAudioAnalysisPage() {
   }, [items])
 
   const handlePageChange = (nextPage: number, nextPageSize: number) => {
+    const targetPage = nextPageSize !== pageSize ? 1 : nextPage
+    beginPageTransition(targetPage, nextPageSize !== pageSize)
+    window.setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
     if (nextPageSize !== pageSize) {
       setPageSize(nextPageSize)
       setPage(1)
@@ -298,19 +313,22 @@ export default function DingtalkAudioAnalysisPage() {
           />
           {canFilterByHospital ? (
             <Select
-              allowClear
               showSearch
               className="analysis-results-page__hospital-select"
-              placeholder="全部机构"
-              value={hospitalFilter}
+              placeholder="机构范围"
+              value={activeHospitalCode}
               loading={hospitalOptionsQuery.isLoading}
               options={hospitalOptions}
               optionFilterProp="label"
               onChange={(value) => {
-                setHospitalFilter(value || undefined)
+                hospitalScope.setHospitalCode(value)
                 setPage(1)
               }}
             />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
           ) : null}
           <Input.Search
             allowClear
@@ -339,48 +357,74 @@ export default function DingtalkAudioAnalysisPage() {
 
       {!isLoading && !error ? (
         <>
-          <div className="analysis-results-page__summary">
-            当前第 {page} 页，已加载 {items.length} 条分析结果
-          </div>
-          <div className="analysis-results-page__summary" hidden>
-            共 {data?.total ?? 0} 条已分析工牌录音，当前页 {items.length} 条。
-          </div>
+          <div
+            ref={resultsRef}
+            className={`paged-results-shell${isPageTransitionVisible || isPageFetching ? ' paged-results-shell--updating' : ''}`}
+            aria-busy={isPageTransitionVisible || isPageFetching}
+          >
+            {isPageFetching && (
+              <div className="paged-results-shell__overlay">
+                <Spin size="small" />
+                <span>正在加载第 {page} 页</span>
+              </div>
+            )}
 
-          {items.length === 0 ? (
-            <Empty description="当前没有可展示的录音分析结果" />
-          ) : (
-            <div>
-              {groupedItems.map((group) => (
-                <div key={group.label} className="date-group">
-                  <div className="date-group__header">
-                    <span className="date-group__line" />
-                    <span className="date-group__label">
-                      {group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}
-                    </span>
-                    <span className="date-group__count">{group.items.length} 条</span>
-                    <span className="date-group__line" />
-                  </div>
-                  <div className="analysis-card-grid">
-                    {group.items.map((item) => (
-                      <ArchiveAnalysisCard
-                        key={item.id}
-                        item={item}
-                        detailReady={buildArchiveAnalysisCardSummary(item)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              ))}
+            {isPageTransitionVisible && (
+              <div className="paged-results-toast">
+                <Spin size="small" />
+                <span>
+                  正在加载第 {transitionPage} 页分析结果
+                  {isShowingStalePage ? `，当前仍显示第 ${displayedPage} 页` : ''}
+                </span>
+              </div>
+            )}
+
+            <div className="analysis-results-page__summary">
+              当前第 {page} 页，已加载 {items.length} 条分析结果
             </div>
-          )}
+            <div className="analysis-results-page__summary" hidden>
+              共 {data?.total ?? 0} 条已分析工牌录音，当前页 {items.length} 条。
+            </div>
+
+            {items.length === 0 ? (
+              <Empty description="当前没有可展示的录音分析结果" />
+            ) : (
+              <div>
+                {groupedItems.map((group) => (
+                  <div key={group.label} className="date-group">
+                    <div className="date-group__header">
+                      <span className="date-group__line" />
+                      <span className="date-group__label">
+                        {group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}
+                      </span>
+                      <span className="date-group__count">{group.items.length} 条</span>
+                      <span className="date-group__line" />
+                    </div>
+                    <div className="analysis-card-grid">
+                      {group.items.map((item) => (
+                        <ArchiveAnalysisCard
+                          key={item.id}
+                          item={item}
+                          detailReady={buildArchiveAnalysisCardSummary(item)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="analysis-results-page__footer">
-            <span className="analysis-results-page__footer-total">第 {page} 页</span>
+            <span className="analysis-results-page__footer-total">
+              {isPageTransitionVisible ? `正在加载第 ${transitionPage} 页...` : `第 ${page} 页`}
+            </span>
             <span className="analysis-results-page__footer-total">共 {data?.total ?? 0} 条记录</span>
             <Pagination
               current={page}
               pageSize={pageSize}
               total={data?.total ?? 0}
+              disabled={isPageTransitionVisible}
               showSizeChanger
               pageSizeOptions={[12, 24, 48]}
               onChange={handlePageChange}

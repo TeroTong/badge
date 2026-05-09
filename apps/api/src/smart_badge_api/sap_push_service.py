@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import Recording, RecordingVisitAnalysis, SapPushLog
+from smart_badge_api.db.models import Recording, RecordingVisitAnalysis, SapConsultationReview, SapPushLog
 from smart_badge_api.db.session import _session_factory
 from smart_badge_api.sap_consultation import generate_sap_consultation_payloads
 from smart_badge_api.sap_push_notifications import notify_sap_push_result
@@ -28,31 +28,14 @@ SAP_IM_TYPE = "YMC_2013"
 SAP_RESULT_FIELD = "RE_DATA"
 
 
-# 共享 httpx AsyncClient，避免每次推送新建连接池。
-_HTTP_CLIENT: httpx.AsyncClient | None = None
-_HTTP_CLIENT_LOCK: asyncio.Lock | None = None
-
-
-async def _get_shared_client() -> httpx.AsyncClient:
-    global _HTTP_CLIENT, _HTTP_CLIENT_LOCK
-    if _HTTP_CLIENT_LOCK is None:
-        _HTTP_CLIENT_LOCK = asyncio.Lock()
-    if _HTTP_CLIENT is not None and not _HTTP_CLIENT.is_closed:
-        return _HTTP_CLIENT
-    async with _HTTP_CLIENT_LOCK:
-        if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
-            timeout = get_settings().sap_rfc_timeout_seconds
-            limits = httpx.Limits(max_keepalive_connections=10, max_connections=30, keepalive_expiry=30.0)
-            _HTTP_CLIENT = httpx.AsyncClient(timeout=timeout, limits=limits)
-        return _HTTP_CLIENT
+def _new_sap_push_client() -> httpx.AsyncClient:
+    timeout = get_settings().sap_rfc_timeout_seconds
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=30, keepalive_expiry=30.0)
+    return httpx.AsyncClient(timeout=timeout, limits=limits)
 
 
 async def close_shared_sap_push_client() -> None:
-    global _HTTP_CLIENT
-    client = _HTTP_CLIENT
-    _HTTP_CLIENT = None
-    if client is not None and not client.is_closed:
-        await client.aclose()
+    return None
 
 
 class SapPushPreparationError(RuntimeError):
@@ -167,6 +150,16 @@ def _build_response_item(request_index: int, http_status_code: int | None, respo
 
 
 async def _commit_final_push_log(db: AsyncSession, push_log: SapPushLog) -> None:
+    if push_log.visit_id:
+        review = (
+            await db.execute(
+                select(SapConsultationReview).where(SapConsultationReview.visit_id == push_log.visit_id)
+            )
+        ).scalar_one_or_none()
+        if review is not None and review.status != "modified":
+            review.last_push_log_id = push_log.id
+            review.status = push_log.status
+            review.updated_at = _utcnow()
     await db.commit()
     await notify_sap_push_result(db, push_log)
     await db.refresh(push_log)
@@ -236,12 +229,14 @@ def _collapse_response_attempts(response_items: list[dict[str, Any]]) -> tuple[l
 
 def serialize_sap_push_log(log: SapPushLog) -> dict[str, Any]:
     result_summary = summarize_sap_push_log_result(log)
+    # Avoid triggering SQLAlchemy async lazy loads from synchronous serialization.
+    recording = log.__dict__.get("recording")
     return {
         "id": log.id,
         "recording_id": log.recording_id,
-        "recording_file_name": log.recording.file_name if getattr(log, "recording", None) else None,
-        "recording_created_at": log.recording.created_at.isoformat()
-        if getattr(log, "recording", None) and getattr(log.recording, "created_at", None)
+        "recording_file_name": recording.file_name if recording else None,
+        "recording_created_at": recording.created_at.isoformat()
+        if recording and getattr(recording, "created_at", None)
         else None,
         "visit_id": log.visit_id,
         "visit_order_no": log.visit_order_no,
@@ -366,6 +361,14 @@ async def create_sap_push_log(
         ).scalar_one_or_none()
         if analysis is not None:
             analysis.sap_push_log_id = push_log.id
+        review = (
+            await db.execute(
+                select(SapConsultationReview).where(SapConsultationReview.visit_id == target_visit_id)
+            )
+        ).scalar_one_or_none()
+        if review is not None:
+            review.last_push_log_id = push_log.id
+            review.status = push_log.status
     await db.commit()
     await db.refresh(push_log)
     return push_log
@@ -423,48 +426,48 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
         response_items: list[dict[str, Any]] = []
 
         try:
-            client = await _get_shared_client()
-            for index, body in enumerate(gateway_bodies, start=1):
-                payload_mode = str((request_payloads[index - 1].get("zxxx") or {}).get("mode") or "").strip() or "C"
-                response = await client.post(settings.sap_rfc_gateway_url, json=body, headers=headers)
-                try:
-                    response_body: Any = response.json()
-                except ValueError:
-                    response_body = {"raw_text": response.text}
-                created_item = _build_response_item(index, response.status_code, response_body)
-                created_item["attempt"] = 1
-                created_item["payload_mode"] = payload_mode
-                created_item["retry_reason"] = None
-                created_item["superseded_by_retry"] = False
-                response_items.append(created_item)
+            async with _new_sap_push_client() as client:
+                for index, body in enumerate(gateway_bodies, start=1):
+                    payload_mode = str((request_payloads[index - 1].get("zxxx") or {}).get("mode") or "").strip() or "C"
+                    response = await client.post(settings.sap_rfc_gateway_url, json=body, headers=headers)
+                    try:
+                        response_body: Any = response.json()
+                    except ValueError:
+                        response_body = {"raw_text": response.text}
+                    created_item = _build_response_item(index, response.status_code, response_body)
+                    created_item["attempt"] = 1
+                    created_item["payload_mode"] = payload_mode
+                    created_item["retry_reason"] = None
+                    created_item["superseded_by_retry"] = False
+                    response_items.append(created_item)
 
-                existing_consultation_no = (
-                    _extract_existing_consultation_no(created_item.get("business_message"))
-                    if not created_item["success"] and payload_mode == "C"
-                    else None
-                )
-                if not existing_consultation_no:
-                    continue
+                    existing_consultation_no = (
+                        _extract_existing_consultation_no(created_item.get("business_message"))
+                        if not created_item["success"] and payload_mode == "C"
+                        else None
+                    )
+                    if not existing_consultation_no:
+                        continue
 
-                retry_payload = _build_update_retry_payload(request_payloads[index - 1], existing_consultation_no)
-                retry_body = build_sap_gateway_request(retry_payload)
-                push_log.gateway_requests = list(push_log.gateway_requests or []) + [_mask_gateway_request_for_log(retry_body)]
-                await db.commit()
+                    retry_payload = _build_update_retry_payload(request_payloads[index - 1], existing_consultation_no)
+                    retry_body = build_sap_gateway_request(retry_payload)
+                    push_log.gateway_requests = list(push_log.gateway_requests or []) + [_mask_gateway_request_for_log(retry_body)]
+                    await db.commit()
 
-                retry_response = await client.post(settings.sap_rfc_gateway_url, json=retry_body, headers=headers)
-                try:
-                    retry_response_body: Any = retry_response.json()
-                except ValueError:
-                    retry_response_body = {"raw_text": retry_response.text}
+                    retry_response = await client.post(settings.sap_rfc_gateway_url, json=retry_body, headers=headers)
+                    try:
+                        retry_response_body: Any = retry_response.json()
+                    except ValueError:
+                        retry_response_body = {"raw_text": retry_response.text}
 
-                response_items[-1]["superseded_by_retry"] = True
-                response_items[-1]["retry_reason"] = f"已有咨询单，改用咨询单号 {existing_consultation_no} 进行修改回传"
-                retry_item = _build_response_item(index, retry_response.status_code, retry_response_body)
-                retry_item["attempt"] = 2
-                retry_item["payload_mode"] = "U"
-                retry_item["retry_reason"] = f"使用已有咨询单号 {existing_consultation_no} 改为修改模式回传"
-                retry_item["superseded_by_retry"] = False
-                response_items.append(retry_item)
+                    response_items[-1]["superseded_by_retry"] = True
+                    response_items[-1]["retry_reason"] = f"已有咨询单，改用咨询单号 {existing_consultation_no} 进行修改回传"
+                    retry_item = _build_response_item(index, retry_response.status_code, retry_response_body)
+                    retry_item["attempt"] = 2
+                    retry_item["payload_mode"] = "U"
+                    retry_item["retry_reason"] = f"使用已有咨询单号 {existing_consultation_no} 改为修改模式回传"
+                    retry_item["superseded_by_retry"] = False
+                    response_items.append(retry_item)
         except Exception as exc:
             logger.exception("sap push failed log_id=%s", push_log_id)
             push_log.status = "failed"

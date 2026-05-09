@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time as monotonic_time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -26,6 +27,68 @@ _CHINA_TZ = ZoneInfo("Asia/Shanghai")
 _OVERVIEW_CACHE_TTL_SECONDS = 60.0
 _overview_cache: dict[str, object] = {"expires_at": 0.0, "value": None}
 _overview_cache_lock = asyncio.Lock()
+_OVERVIEW_REDIS_KEY = "asr_monitoring:overview:v1"
+_overview_redis_client = None
+_overview_redis_disabled = False
+_overview_cache_logger = logging.getLogger(__name__)
+
+
+async def _overview_get_redis_client():
+    global _overview_redis_client, _overview_redis_disabled
+    if _overview_redis_disabled:
+        return None
+    if _overview_redis_client is not None:
+        return _overview_redis_client
+    try:
+        import redis.asyncio as redis_asyncio  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        _overview_cache_logger.warning("asr-monitoring L2 cache disabled: %s", exc)
+        _overview_redis_disabled = True
+        return None
+    try:
+        _overview_redis_client = redis_asyncio.from_url(
+            get_settings().redis_url,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+            health_check_interval=30,
+        )
+        await _overview_redis_client.ping()
+    except Exception as exc:
+        _overview_cache_logger.warning("asr-monitoring L2 cache disabled (ping failed): %s", exc)
+        _overview_redis_client = None
+        _overview_redis_disabled = True
+        return None
+    return _overview_redis_client
+
+
+async def _overview_redis_get() -> AsrMonitoringOverviewOut | None:
+    cli = await _overview_get_redis_client()
+    if cli is None:
+        return None
+    try:
+        raw = await cli.get(_OVERVIEW_REDIS_KEY)
+    except Exception as exc:
+        _overview_cache_logger.warning("asr-monitoring L2 GET failed: %s", exc)
+        return None
+    if raw is None:
+        return None
+    try:
+        return AsrMonitoringOverviewOut.model_validate_json(raw)
+    except Exception as exc:
+        _overview_cache_logger.warning("asr-monitoring L2 decode failed: %s", exc)
+        return None
+
+
+async def _overview_redis_set(value: AsrMonitoringOverviewOut) -> None:
+    cli = await _overview_get_redis_client()
+    if cli is None:
+        return
+    try:
+        await cli.set(_OVERVIEW_REDIS_KEY, value.model_dump_json(), ex=int(_OVERVIEW_CACHE_TTL_SECONDS))
+    except Exception as exc:
+        _overview_cache_logger.warning("asr-monitoring L2 SET failed: %s", exc)
+
+
 
 
 def _to_request_event_out(item: dict) -> AsrRequestEventOut:
@@ -56,15 +119,21 @@ async def _cached_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
     cached_value = _overview_cache.get("value")
     if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
         return cached_value  # type: ignore[return-value]
-
     async with _overview_cache_lock:
         now = monotonic_time.monotonic()
         cached_value = _overview_cache.get("value")
         if cached_value is not None and float(_overview_cache.get("expires_at") or 0.0) > now:
             return cached_value  # type: ignore[return-value]
+        # L2 (Redis) shared across workers
+        l2_value = await _overview_redis_get()
+        if l2_value is not None:
+            _overview_cache["value"] = l2_value
+            _overview_cache["expires_at"] = now + _OVERVIEW_CACHE_TTL_SECONDS
+            return l2_value
         value = await _build_asr_monitoring_overview()
         _overview_cache["value"] = value
         _overview_cache["expires_at"] = now + _OVERVIEW_CACHE_TTL_SECONDS
+        await _overview_redis_set(value)
         return value
 
 

@@ -1,4 +1,4 @@
-import { useState, type Key } from 'react'
+import { useRef, useState, type Key } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AudioOutlined,
@@ -19,6 +19,7 @@ import {
   Modal,
   Select,
   Space,
+  Spin,
   Table,
   Tag,
   Upload,
@@ -37,6 +38,7 @@ import {
   hasCompanionVisitOptions,
 } from '@/utils/companion-visit-linking'
 import { formatStaffDisplayLabel, getRecordingDeviceBadge } from '@/utils/staff-display'
+import { usePageTransition } from '@/hooks/use-page-transition'
 import { getDisplayMatchEvidenceLines } from '@/utils/match-evidence'
 import { getQuickRecommendSelection } from '@/utils/visit-order-recommendations'
 import { buildRecordingVisitLinkRiskLines } from '@/utils/recording-visit-link-confirmation'
@@ -46,6 +48,7 @@ import {
   formatVisitOrderLineItemRef,
 } from '@/utils/visit-order-line-items'
 import * as visitsApi from '@/api/visits'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { beijingNow, formatBeijingTime } from '@/utils/time'
 
@@ -617,6 +620,9 @@ function RecordingMatchPreview({
 export function RecordingsPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const resultsRef = useRef<HTMLDivElement | null>(null)
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([])
   const [page, setPage] = useState(1)
@@ -646,11 +652,12 @@ export function RecordingsPage() {
   const [dailyVisitOrdersKeyword, setDailyVisitOrdersKeyword] = useState('')
   const [dailyVisitOrdersSearchDraft, setDailyVisitOrdersSearchDraft] = useState('')
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['recordings', queryFilters, page, pageSize],
+  const { data, isLoading, isFetching, isError } = useQuery({
+    queryKey: ['recordings', activeHospitalCode ?? '', queryFilters, page, pageSize],
     queryFn: () =>
       recordingsApi.fetchRecordings({
         visit_id: queryFilters.visit_id || undefined,
+        hospital_code: activeHospitalCode,
         staff_id: queryFilters.staff_id || undefined,
         keyword: queryFilters.keyword || undefined,
         customer_keyword: queryFilters.customer_keyword || undefined,
@@ -670,17 +677,20 @@ export function RecordingsPage() {
       }),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
 
   const { data: visitsData } = useQuery({
-    queryKey: ['visits', 'all'],
-    queryFn: () => visitsApi.fetchVisits({ page_size: 100 }),
+    queryKey: ['visits', 'all', activeHospitalCode ?? ''],
+    queryFn: () => visitsApi.fetchVisits({ hospital_code: activeHospitalCode, page_size: 100 }),
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
   const visits = visitsData?.items ?? []
 
   const { data: staffData } = useQuery({
-    queryKey: ['staff', 'all'],
-    queryFn: () => adminApi.fetchStaff({ page_size: 100 }),
+    queryKey: ['staff', 'all', activeHospitalCode ?? ''],
+    queryFn: () => adminApi.fetchStaff({ hospital_code: activeHospitalCode, page_size: 100 }),
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
   const staff = staffData?.items ?? []
 
@@ -1006,6 +1016,20 @@ export function RecordingsPage() {
     ),
   )
   const dailyVisitOrdersScopeLabel = dailyVisitOrdersMode === 'org' ? '所有人当天全部到诊单' : '自己当天全部到诊单'
+  const {
+    beginPageTransition,
+    displayedPage,
+    isPageFetching,
+    isPageTransitionVisible,
+    isShowingStalePage,
+    transitionPage,
+  } = usePageTransition({
+    page,
+    loadedPage: data?.page,
+    isFetching,
+    isInitialLoading: isLoading,
+    isError,
+  })
 
   return (
     <div className="operation-page recordings-page">
@@ -1080,6 +1104,26 @@ export function RecordingsPage() {
         </div>
 
         <div className="recordings-filters__grid">
+          {hospitalScope.canSelectHospital ? (
+            <Select
+              showSearch
+              placeholder="机构范围"
+              optionFilterProp="label"
+              options={hospitalScope.selectOptions}
+              value={activeHospitalCode}
+              loading={hospitalScope.isLoading}
+              onChange={(value) => {
+                hospitalScope.setHospitalCode(value)
+                setDraftFilters((current) => ({ ...current, staff_id: undefined, visit_id: '' }))
+                setQueryFilters((current) => ({ ...current, staff_id: undefined, visit_id: '' }))
+                setPage(1)
+              }}
+            />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
+          ) : null}
           <Select
             value={draftFilters.linkState}
             options={LINK_OPTIONS}
@@ -1160,7 +1204,28 @@ export function RecordingsPage() {
         </div>
       </div>
 
-      <div className="operation-card recordings-table-card">
+      <div
+        ref={resultsRef}
+        className={`operation-card recordings-table-card paged-results-shell${isPageTransitionVisible || isPageFetching ? ' paged-results-shell--updating' : ''}`}
+        aria-busy={isPageTransitionVisible || isPageFetching}
+      >
+        {isPageFetching && (
+          <div className="paged-results-shell__overlay">
+            <Spin size="small" />
+            <span>正在加载第 {page} 页</span>
+          </div>
+        )}
+
+        {isPageTransitionVisible && (
+          <div className="paged-results-toast">
+            <Spin size="small" />
+            <span>
+              正在加载第 {transitionPage} 页录音列表
+              {isShowingStalePage ? `，当前仍显示第 ${displayedPage} 页` : ''}
+            </span>
+          </div>
+        )}
+
         <Table
           rowKey="id"
           loading={isLoading}
@@ -1200,10 +1265,19 @@ export function RecordingsPage() {
             current: page,
             pageSize,
             total: data?.total ?? 0,
+            disabled: isPageTransitionVisible,
             showSizeChanger: true,
             pageSizeOptions: ['10', '20', '50', '100'],
-            showTotal: (total) => `共 ${total} 条`,
+            showTotal: (total) => (
+              isPageTransitionVisible
+                ? `正在加载第 ${transitionPage} 页...`
+                : `共 ${total} 条`
+            ),
             onChange: (nextPage, nextPageSize) => {
+              beginPageTransition(nextPage, nextPageSize !== pageSize)
+              window.setTimeout(() => {
+                resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }, 0)
               setPage(nextPage)
               setPageSize(nextPageSize)
             },
@@ -1838,7 +1912,7 @@ export function RecordingsPage() {
           <Descriptions.Item label="数据日期">{visitOrderDetail?.sjrq || '-'}</Descriptions.Item>
           <Descriptions.Item label="客户姓名">{visitOrderDetail?.ninam || '-'}</Descriptions.Item>
           <Descriptions.Item label="客户编码">{visitOrderDetail?.kunr || '-'}</Descriptions.Item>
-          <Descriptions.Item label="客户属性">{visitOrderDetail?.kutyp_dq_txt || visitOrderDetail?.kut30_dq_txt || visitOrderDetail?.kusta_dq_txt || visitOrderDetail?.kusex_txt || '-'}</Descriptions.Item>
+          <Descriptions.Item label="客户属性">{visitOrderDetail?.kut30_dq_txt || visitOrderDetail?.kusta_dq_txt || visitOrderDetail?.kusex_txt || '-'}</Descriptions.Item>
           <Descriptions.Item label="机构编码">{visitOrderDetail?.jgbm || '-'}</Descriptions.Item>
           <Descriptions.Item label="接诊顾问">{visitOrderDetail?.fzuer_long || visitOrderDetail?.fzuer || '-'}</Descriptions.Item>
           <Descriptions.Item label="客服">{visitOrderDetail?.vipkf || visitOrderDetail?.d_vipkf || '-'}</Descriptions.Item>

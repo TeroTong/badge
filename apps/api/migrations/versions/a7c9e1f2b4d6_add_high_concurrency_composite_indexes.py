@@ -54,8 +54,10 @@ def upgrade() -> None:
         else:
             try:
                 op.create_index(name, table, cols)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Tolerate "already exists" errors only; surface anything else.
+                if "already exists" not in str(exc).lower():
+                    raise
 
 
 def downgrade() -> None:
@@ -67,5 +69,6 @@ def downgrade() -> None:
         else:
             try:
                 op.drop_index(name)
-            except Exception:
-                pass
+            except Exception as exc:
+                if "does not exist" not in str(exc).lower():
+                    raise

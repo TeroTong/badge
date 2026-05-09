@@ -8,7 +8,7 @@ from smart_badge_api.db.base import Base
 from smart_badge_api.db.models import Customer, Recording, Staff, User, Visit, VisitOrder
 
 
-def test_customer_outputs_include_latest_scoped_kutyp_customer_type() -> None:
+def test_customer_outputs_include_latest_scoped_kut30_customer_type() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -84,8 +84,10 @@ def test_customer_outputs_include_latest_scoped_kutyp_customer_type() -> None:
                             dzseg="110",
                             jgbm="6101",
                             advxc=staff.external_account,
-                            kutyp_dq="Q",
-                            kutyp_dq_txt="潜客/新客",
+                            kutyp_dq="V",
+                            kutyp_dq_txt="会员/老客",
+                            kut30_dq="Q",
+                            kut30_dq_txt="潜客/新客",
                             sjrq="2026-04-20",
                             crtdt="2026-04-20",
                         ),
@@ -95,8 +97,10 @@ def test_customer_outputs_include_latest_scoped_kutyp_customer_type() -> None:
                             dzseg="110",
                             jgbm="6101",
                             advxc=staff.external_account,
-                            kutyp_dq="V",
-                            kutyp_dq_txt="会员/老客",
+                            kutyp_dq="Q",
+                            kutyp_dq_txt="潜客/新客",
+                            kut30_dq="V",
+                            kut30_dq_txt="会员/老客",
                             sjrq="2026-04-21",
                             crtdt="2026-04-21",
                         ),
@@ -105,8 +109,10 @@ def test_customer_outputs_include_latest_scoped_kutyp_customer_type() -> None:
                             dzdh="DZ003",
                             dzseg="110",
                             jgbm="6102",
-                            kutyp_dq="Q",
-                            kutyp_dq_txt="潜客/新客",
+                            kutyp_dq="V",
+                            kutyp_dq_txt="会员/老客",
+                            kut30_dq="Q",
+                            kut30_dq_txt="潜客/新客",
                             sjrq="2026-04-22",
                             crtdt="2026-04-22",
                         ),

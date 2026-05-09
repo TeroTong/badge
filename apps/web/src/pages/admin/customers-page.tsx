@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { SearchOutlined } from '@ant-design/icons'
 import {
@@ -22,10 +22,11 @@ import dayjs, { type Dayjs } from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 
 import * as adminApi from '@/api/admin'
-import type { Customer } from '@/api/customers'
+import type { Customer, CustomerPage } from '@/api/customers'
 import * as customersApi from '@/api/customers'
 import { VISIT_STATUS_MAP } from '@/api/visits'
 import * as visitsApi from '@/api/visits'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
 import { beijingNow, formatBeijingTime } from '@/utils/time'
 
 const { RangePicker } = DatePicker
@@ -98,6 +99,7 @@ function formatVisitTimelineTime(visitDate: string | null, visitTime: string | n
 export function CustomersPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const resultsRef = useRef<HTMLDivElement | null>(null)
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [datePreset, setDatePreset] = useState<DatePreset>('all')
@@ -106,17 +108,38 @@ export function CustomersPage() {
   const [recordingFilter, setRecordingFilter] = useState<'all' | 'linked' | 'unlinked'>('all')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(12)
+  const [pageTransition, setPageTransition] = useState<{ page: number; startedAt: number } | null>(null)
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Customer | null>(null)
   const [form] = Form.useForm()
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
 
   const dateRange = resolveDateRange(datePreset, customRange)
-
-  const { data, isLoading } = useQuery({
-    queryKey: [
+  const customerQueryParams = useMemo(
+    () => ({
+      keyword: keyword || undefined,
+      hospital_code: activeHospitalCode,
+      consultant_id: consultantFilter,
+      has_recordings:
+        recordingFilter === 'all'
+          ? undefined
+          : recordingFilter === 'linked',
+      date_from: dateRange.from,
+      date_to: dateRange.to,
+      include_date_summaries: false,
+      fast_page: true,
+      page,
+      page_size: pageSize,
+    }),
+    [activeHospitalCode, consultantFilter, dateRange.from, dateRange.to, keyword, page, pageSize, recordingFilter],
+  )
+  const customerQueryKey = useMemo(
+    () => [
       'customers-workbench',
       keyword,
+      activeHospitalCode ?? '',
       dateRange.from ?? '',
       dateRange.to ?? '',
       consultantFilter,
@@ -124,28 +147,22 @@ export function CustomersPage() {
       page,
       pageSize,
     ],
-    queryFn: () =>
-      customersApi.fetchCustomers({
-        keyword: keyword || undefined,
-        consultant_id: consultantFilter,
-        has_recordings:
-          recordingFilter === 'all'
-            ? undefined
-            : recordingFilter === 'linked',
-        date_from: dateRange.from,
-        date_to: dateRange.to,
-        include_date_summaries: false,
-        fast_page: true,
-        page,
-        page_size: pageSize,
-      }),
+    [activeHospitalCode, consultantFilter, dateRange.from, dateRange.to, keyword, page, pageSize, recordingFilter],
+  )
+
+  const { data, isLoading, isFetching, isError } = useQuery({
+    queryKey: customerQueryKey,
+    queryFn: () => customersApi.fetchCustomers(customerQueryParams),
     placeholderData: (previousData) => previousData,
     staleTime: 30_000,
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
   })
 
   const { data: staffData } = useQuery({
-    queryKey: ['staff', 'all'],
-    queryFn: () => adminApi.fetchStaff({ page_size: 100 }),
+    queryKey: ['staff', 'all', activeHospitalCode ?? ''],
+    queryFn: () => adminApi.fetchStaff({ hospital_code: activeHospitalCode, page_size: 100 }),
+    enabled: hospitalScope.isReady && Boolean(activeHospitalCode),
+    staleTime: 300_000,
   })
   const staff = staffData?.items ?? []
   const consultants = staff.filter((member) => member.role === 'consultant' || member.role === 'manager')
@@ -163,6 +180,74 @@ export function CustomersPage() {
 
   const customerVisitsMap = new Map((customerVisitsData ?? []).map((item) => [item.customer_id, item.visits]))
   const hasNextPage = total > page * pageSize
+  const isPageFetching = isFetching && !isLoading
+  const displayedPage = data?.page ?? page
+  const isShowingStalePage = displayedPage !== page
+  const isPageTransitionVisible = Boolean(pageTransition) || isShowingStalePage
+  const transitionPage = pageTransition?.page ?? page
+
+  useEffect(() => {
+    if (pageTransition && isError) {
+      const timer = window.setTimeout(() => setPageTransition(null), 0)
+      return () => window.clearTimeout(timer)
+    }
+    if (!pageTransition || data?.page !== pageTransition.page || isFetching) return
+
+    const elapsed = Date.now() - pageTransition.startedAt
+    const delay = Math.max(0, 450 - elapsed)
+    const timer = window.setTimeout(() => setPageTransition(null), delay)
+    return () => window.clearTimeout(timer)
+  }, [data?.page, isError, isFetching, pageTransition])
+
+  useEffect(() => {
+    if (!data || !hasNextPage || isPageFetching) return
+
+    const nextPage = page + 1
+    const nextParams = { ...customerQueryParams, page: nextPage }
+    const nextQueryKey = [
+      'customers-workbench',
+      keyword,
+      activeHospitalCode ?? '',
+      dateRange.from ?? '',
+      dateRange.to ?? '',
+      consultantFilter,
+      recordingFilter,
+      nextPage,
+      pageSize,
+    ]
+
+    void qc
+      .prefetchQuery({
+        queryKey: nextQueryKey,
+        queryFn: () => customersApi.fetchCustomers(nextParams),
+        staleTime: 30_000,
+      })
+      .then(() => {
+        const nextData = qc.getQueryData<CustomerPage>(nextQueryKey)
+        const nextCustomerIds = nextData?.items.map((customer) => customer.id) ?? []
+        if (nextCustomerIds.length === 0) return
+
+        void qc.prefetchQuery({
+          queryKey: ['customer-visits-batch', nextCustomerIds, CUSTOMER_VISIT_PREVIEW_LIMIT],
+          queryFn: () => visitsApi.fetchVisitsByCustomers(nextCustomerIds, CUSTOMER_VISIT_PREVIEW_LIMIT),
+          staleTime: 60_000,
+        })
+      })
+  }, [
+    consultantFilter,
+    customerQueryParams,
+    activeHospitalCode,
+    data,
+    dateRange.from,
+    dateRange.to,
+    hasNextPage,
+    isPageFetching,
+    keyword,
+    page,
+    pageSize,
+    qc,
+    recordingFilter,
+  ])
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['customers'] })
     qc.invalidateQueries({ queryKey: ['customers-workbench'] })
@@ -283,6 +368,25 @@ export function CustomersPage() {
         </div>
 
         <div className="visit-toolbar__filters">
+          {hospitalScope.canSelectHospital ? (
+            <Select
+              showSearch
+              placeholder="机构范围"
+              optionFilterProp="label"
+              options={hospitalScope.selectOptions}
+              value={activeHospitalCode}
+              loading={hospitalScope.isLoading}
+              onChange={(value) => {
+                hospitalScope.setHospitalCode(value)
+                setConsultantFilter(undefined)
+                setPage(1)
+              }}
+            />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
+          ) : null}
           <Select
             allowClear
             showSearch
@@ -318,39 +422,61 @@ export function CustomersPage() {
         </div>
       </div>
 
-      {isLoading ? (
-        <div className="visit-grid__loading">
-          <Spin size="large" />
-        </div>
-      ) : customers.length === 0 ? (
-        <Card bordered={false}>
-          <Empty description="当前筛选条件下没有客户档案" />
-        </Card>
-      ) : (
-        <div>
-          {(() => {
-            const groups: { label: string; items: { customer: typeof customers[0]; index: number }[] }[] = []
-            customers.forEach((customer, idx) => {
-              const dateStr = customer.last_visit_at
-                ? formatBeijingTime(customer.last_visit_at, 'YYYY-MM-DD')
-                : '未知日期'
-              const last = groups[groups.length - 1]
-              if (last && last.label === dateStr) {
-                last.items.push({ customer, index: idx })
-              } else {
-                groups.push({ label: dateStr, items: [{ customer, index: idx }] })
-              }
-            })
-            return groups.map((group) => (
-              <div key={group.label} className="date-group">
-                <div className="date-group__header">
-                  <span className="date-group__line" />
-                  <span className="date-group__label">{group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}</span>
-                  <span className="date-group__count">{group.items.length} 位</span>
-                  <span className="date-group__line" />
-                </div>
-                <div className="customer-card-grid">
-                  {group.items.map(({ customer }) => {
+      <div
+        ref={resultsRef}
+        className={`customer-results-shell${isPageTransitionVisible || isPageFetching ? ' customer-results-shell--updating' : ''}`}
+        aria-busy={isPageTransitionVisible || isPageFetching}
+      >
+        {isPageFetching && (
+          <div className="customer-results-shell__overlay">
+            <Spin size="small" />
+            <span>正在加载第 {page} 页</span>
+          </div>
+        )}
+
+        {isPageTransitionVisible && (
+          <div className="customer-page-loading-toast">
+            <Spin size="small" />
+            <span>
+              正在加载第 {transitionPage} 页客户档案
+              {isShowingStalePage ? `，当前仍显示第 ${displayedPage} 页` : ''}
+            </span>
+          </div>
+        )}
+
+        {isLoading ? (
+          <div className="visit-grid__loading">
+            <Spin size="large" />
+          </div>
+        ) : customers.length === 0 ? (
+          <Card bordered={false}>
+            <Empty description="当前筛选条件下没有客户档案" />
+          </Card>
+        ) : (
+          <div>
+            {(() => {
+              const groups: { label: string; items: { customer: typeof customers[0]; index: number }[] }[] = []
+              customers.forEach((customer, idx) => {
+                const dateStr = customer.last_visit_at
+                  ? formatBeijingTime(customer.last_visit_at, 'YYYY-MM-DD')
+                  : '未知日期'
+                const last = groups[groups.length - 1]
+                if (last && last.label === dateStr) {
+                  last.items.push({ customer, index: idx })
+                } else {
+                  groups.push({ label: dateStr, items: [{ customer, index: idx }] })
+                }
+              })
+              return groups.map((group) => (
+                <div key={group.label} className="date-group">
+                  <div className="date-group__header">
+                    <span className="date-group__line" />
+                    <span className="date-group__label">{group.label === '未知日期' ? '未知日期' : dayjs(group.label).format('YYYY年MM月DD日')}</span>
+                    <span className="date-group__count">{group.items.length} 位</span>
+                    <span className="date-group__line" />
+                  </div>
+                  <div className="customer-card-grid">
+                    {group.items.map(({ customer }) => {
             const visits = customerVisitsMap.get(customer.id) ?? []
             const visitsLoading = customerVisitsLoading
             const latestVisit = visits[0]
@@ -515,22 +641,36 @@ export function CustomersPage() {
               </article>
             )
           })}
+                  </div>
                 </div>
-              </div>
-            ))
-          })()}
-        </div>
-      )}
+              ))
+            })()}
+          </div>
+        )}
+      </div>
 
       <div className="visit-pagination">
-        <span>{hasNextPage ? `第 ${page} 页，可继续翻页加载更多` : `第 ${page} 页，已到当前结果末页`}</span>
+        <span>
+          {isPageTransitionVisible
+            ? `正在加载第 ${transitionPage} 页...`
+            : hasNextPage
+              ? `第 ${page} 页，可继续翻页加载更多`
+              : `第 ${page} 页，已到当前结果末页`}
+        </span>
         <Pagination
           current={page}
           pageSize={pageSize}
           total={total}
+          disabled={isPageTransitionVisible}
           showSizeChanger
           pageSizeOptions={[12, 24, 48]}
           onChange={(nextPage, nextPageSize) => {
+            if (nextPage !== page || nextPageSize !== pageSize) {
+              setPageTransition({ page: nextPage, startedAt: Date.now() })
+              window.setTimeout(() => {
+                resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }, 0)
+            }
             setPage(nextPage)
             setPageSize(nextPageSize)
           }}

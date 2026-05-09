@@ -6,7 +6,7 @@ from starlette.requests import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from smart_badge_api.api.routes.auth import login
+from smart_badge_api.api.routes.auth import _resolve_staff_for_wecom_identity, login
 from smart_badge_api.api.routes.staff import (
     activate_staff_account,
     create_staff,
@@ -24,6 +24,7 @@ from smart_badge_api.db.models import PositionProfile, Staff, StaffManagementRel
 from smart_badge_api.db.system_defaults import ensure_system_positions
 from smart_badge_api.schemas.auth import LoginRequest
 from smart_badge_api.schemas.staff import StaffCreate, StaffUpdate
+from smart_badge_api.wecom import WecomMemberIdentity, WecomTenantConfig
 
 
 def _make_request(ip: str = "127.0.0.1", path: str = "/api/v1/staff/account") -> Request:
@@ -84,6 +85,54 @@ def test_enable_staff_account_uses_employee_code_first() -> None:
                 assert result.temporary_password == "9369@Abcd"
                 user = (await db.execute(select(User).where(User.staff_id == staff.id))).scalar_one()
                 assert verify_password("9369@Abcd", user.hashed_password)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_wecom_login_keeps_global_staff_unbound_to_single_corp() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                global_staff = Staff(
+                    id="global_admin",
+                    name="Global Admin",
+                    permission_role="system_admin",
+                    hospital_code=None,
+                    hospital_short_name="所有机构",
+                    wecom_user_id="global-user",
+                    wecom_corp_id=None,
+                    is_active=True,
+                )
+                db.add(global_staff)
+                await db.commit()
+
+                staff, reason = await _resolve_staff_for_wecom_identity(
+                    db,
+                    WecomMemberIdentity(userid="global-user"),
+                    WecomTenantConfig(
+                        id="tenant_6501",
+                        name="长沙雅美",
+                        corp_id="ww6501",
+                        agent_id="agent",
+                        agent_secret="secret",
+                        frontend_url="http://example.com",
+                        is_default=False,
+                    ),
+                )
+
+                assert staff is not None
+                assert staff.id == global_staff.id
+                assert reason is None
+                assert staff.wecom_user_id == "global-user"
+                assert staff.wecom_corp_id is None
         finally:
             await engine.dispose()
 
@@ -218,6 +267,82 @@ def test_staff_create_and_update_resolve_wecom_corp_id_from_institution_code() -
                 assert updated.wecom_corp_id == "ww6101"
                 await db.refresh(staff)
                 assert staff.wecom_corp_id == "ww6101"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_global_staff_roles_belong_to_all_institutions() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                admin = await _make_admin_user(db, role="super_admin", hospital_code="6501")
+                db.add(
+                    WecomTenant(
+                        name="Hospital 6501",
+                        default_hospital_code="6501",
+                        default_hospital_name="Hospital 6501",
+                        corp_id="ww6501",
+                        is_active=True,
+                    )
+                )
+                await db.commit()
+
+                created = await create_staff(
+                    StaffCreate(
+                        name="Global Admin",
+                        external_account="GLOBAL001",
+                        hospital_code="6501",
+                        permission_role="system_admin",
+                    ),
+                    _make_request(path="/api/v1/staff"),
+                    db=db,
+                    current_user=admin,
+                )
+
+                assert created.permission_role == "system_admin"
+                assert created.hospital_code is None
+                assert created.hospital_short_name == "所有机构"
+                assert created.wecom_corp_id is None
+
+                staff = (await db.execute(select(Staff).where(Staff.id == created.id))).scalar_one()
+                assert staff.hospital_code is None
+                assert staff.hospital_short_name == "所有机构"
+                assert staff.wecom_corp_id is None
+
+                linked_user = User(
+                    username="GLOBAL001",
+                    hashed_password="hashed",
+                    display_name="Global Admin",
+                    staff_id=staff.id,
+                    role="system_admin",
+                    hospital_code="6501",
+                    hospital_name="Hospital 6501",
+                    is_active=True,
+                )
+                db.add(linked_user)
+                await db.commit()
+
+                updated = await update_staff(
+                    staff.id,
+                    StaffUpdate(permission_role="system_admin", hospital_code="6501"),
+                    _make_request(path=f"/api/v1/staff/{staff.id}"),
+                    db=db,
+                    current_user=admin,
+                )
+
+                assert updated.hospital_code is None
+                assert updated.hospital_short_name == "所有机构"
+                await db.refresh(linked_user)
+                assert linked_user.hospital_code is None
+                assert linked_user.hospital_name == "所有机构"
         finally:
             await engine.dispose()
 

@@ -40,6 +40,12 @@ export type HotwordGroup = {
   words: Hotword[]
 }
 
+export type HotwordBulkCreateResult = {
+  created: Hotword[]
+  skipped_existing: string[]
+  skipped_duplicate: string[]
+}
+
 export type Staff = {
   id: string
   name: string
@@ -234,12 +240,14 @@ export type WecomTenant = {
   corp_id: string | null
   agent_id: string | null
   frontend_url: string | null
+  callback_configured: boolean
   default_hospital_code: string | null
   default_hospital_name: string | null
   sap_summary_template_name: string | null
   sap_summary_template_version: string | null
   sap_summary_template: string | null
   sap_summary_prompt: string | null
+  sap_summary_enabled: boolean
   department_assistant_match_config: DepartmentAssistantMatchConfig | null
   is_default: boolean
   is_active: boolean
@@ -254,6 +262,8 @@ export type WecomTenantPayload = {
   corp_id?: string | null
   agent_id?: string | null
   agent_secret?: string | null
+  callback_token?: string | null
+  callback_aes_key?: string | null
   frontend_url?: string | null
   default_hospital_code?: string | null
   default_hospital_name?: string | null
@@ -261,6 +271,7 @@ export type WecomTenantPayload = {
   sap_summary_template_version?: string | null
   sap_summary_template?: string | null
   sap_summary_prompt?: string | null
+  sap_summary_enabled?: boolean
   department_assistant_match_config?: DepartmentAssistantMatchConfig | null
   is_default?: boolean
   is_active?: boolean
@@ -429,6 +440,10 @@ export const updateHotwordGroup = (id: string, data: Partial<HotwordGroup>) =>
 export const deleteHotwordGroup = (id: string) => api.delete(`hotwords/groups/${id}`)
 export const createHotword = (groupId: string, data: { word: string; weight?: number; is_active?: boolean }) =>
   api.post(`hotwords/groups/${groupId}/words`, { json: data }).json<Hotword>()
+export const createHotwordsBulk = (
+  groupId: string,
+  data: { words: string[]; weight?: number; is_active?: boolean },
+) => api.post(`hotwords/groups/${groupId}/words/bulk`, { json: data }).json<HotwordBulkCreateResult>()
 export const updateHotword = (id: string, data: Partial<Hotword>) =>
   api.put(`hotwords/words/${id}`, { json: data }).json<Hotword>()
 export const deleteHotword = (id: string) => api.delete(`hotwords/words/${id}`)
@@ -477,9 +492,10 @@ export const createStaff = (data: {
 export const importStaff = (data: { rows: StaffImportRow[] }) =>
   api.post('staff/import', { json: data }).json<StaffImportResult>()
 export const fetchStaffDirectorySyncStatus = () => api.get('staff/sync-status').json<StaffDirectorySyncStatus>()
-export const fetchStaffBadgeBindingCandidates = (params?: { keyword?: string; include_inactive?: boolean }) => {
+export const fetchStaffBadgeBindingCandidates = (params?: { keyword?: string; hospital_code?: string; include_inactive?: boolean }) => {
   const sp = new URLSearchParams()
   if (params?.keyword) sp.set('keyword', params.keyword)
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.include_inactive !== undefined) sp.set('include_inactive', String(params.include_inactive))
   const qs = sp.toString()
   return api.get(`staff/badge-binding-candidates${qs ? `?${qs}` : ''}`).json<StaffBadgeBindingCandidate[]>()
@@ -625,10 +641,15 @@ export const fetchAsrMonitoringRequests = (params?: {
   return api.get(`asr-monitoring/requests${qs ? `?${qs}` : ''}`).json<PaginatedResponse<AsrRequestEvent>>()
 }
 
-export const fetchSapPushMonitoringOverview = () =>
-  api.get('sap-push-monitoring/overview').json<SapPushMonitoringOverview>()
+export const fetchSapPushMonitoringOverview = (params?: { hospital_code?: string }) => {
+  const sp = new URLSearchParams()
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
+  const qs = sp.toString()
+  return api.get(`sap-push-monitoring/overview${qs ? `?${qs}` : ''}`).json<SapPushMonitoringOverview>()
+}
 
 export const fetchSapPushMonitoringLogs = (params?: {
+  hospital_code?: string
   status?: string
   trigger_mode?: string
   keyword?: string
@@ -638,6 +659,7 @@ export const fetchSapPushMonitoringLogs = (params?: {
   page_size?: number
 }) => {
   const sp = new URLSearchParams()
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.status) sp.set('status', params.status)
   if (params?.trigger_mode) sp.set('trigger_mode', params.trigger_mode)
   if (params?.keyword) sp.set('keyword', params.keyword)
@@ -764,6 +786,7 @@ export type VisitOrderSyncResult = {
 export const fetchVisitOrders = (params?: {
   page?: number
   page_size?: number
+  hospital_code?: string
   keyword?: string
   fzuer?: string
   sjrq_start?: string
@@ -774,6 +797,7 @@ export const fetchVisitOrders = (params?: {
   const sp = new URLSearchParams()
   if (params?.page) sp.set('page', String(params.page))
   if (params?.page_size) sp.set('page_size', String(params.page_size))
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.keyword) sp.set('keyword', params.keyword)
   if (params?.fzuer) sp.set('fzuer', params.fzuer)
   if (params?.sjrq_start) sp.set('sjrq_start', params.sjrq_start)

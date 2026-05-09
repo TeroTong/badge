@@ -470,10 +470,12 @@ def create_app() -> FastAPI:
         max_body_bytes=settings.hot_read_cache_max_body_bytes,
     )
 
+    # CORS: spec forbids "*" + credentials. The frontend uses Bearer tokens
+    # (no cookies), so disabling credentials with wildcard origins is safe.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

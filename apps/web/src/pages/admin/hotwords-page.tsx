@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Alert,
   Button,
   Card,
   Empty,
@@ -14,7 +15,7 @@ import {
   Tag,
   message,
 } from 'antd'
-import { LinkOutlined, PlusOutlined } from '@ant-design/icons'
+import { LinkOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons'
 
 import type { Hotword, HotwordGroup } from '@/api/admin'
 import * as adminApi from '@/api/admin'
@@ -40,10 +41,49 @@ function getWeightBuckets(words: Hotword[]) {
   }
 }
 
+function normalizeHotwordKey(value: string) {
+  return value.trim().toLocaleLowerCase()
+}
+
+function parseHotwordInput(value: unknown) {
+  const seen = new Set<string>()
+  const uniqueWords: string[] = []
+  const duplicateWords: string[] = []
+  String(value ?? '')
+    .split(/[\n,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((word) => {
+      const key = normalizeHotwordKey(word)
+      if (!key) return
+      if (seen.has(key)) {
+        duplicateWords.push(word)
+        return
+      }
+      seen.add(key)
+      uniqueWords.push(word)
+    })
+  return { uniqueWords, duplicateWords }
+}
+
+function renderPreviewWords(words: string[]) {
+  if (!words.length) return null
+  const visibleWords = words.slice(0, 12)
+  return (
+    <>
+      {visibleWords.map((word) => (
+        <Tag key={word}>{word}</Tag>
+      ))}
+      {words.length > visibleWords.length ? <Tag>+{words.length - visibleWords.length}</Tag> : null}
+    </>
+  )
+}
+
 export function HotwordsPage() {
   const qc = useQueryClient()
   const [activeScope, setActiveScope] = useState<LibraryScope>('public')
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+  const [wordSearch, setWordSearch] = useState('')
 
   const [groupModalOpen, setGroupModalOpen] = useState(false)
   const [editingGroup, setEditingGroup] = useState<HotwordGroup | null>(null)
@@ -53,6 +93,7 @@ export function HotwordsPage() {
   const [editingWord, setEditingWord] = useState<Hotword | null>(null)
   const [wordGroupId, setWordGroupId] = useState<string | null>(null)
   const [wordForm] = Form.useForm()
+  const wordsTextValue = Form.useWatch('wordsText', wordForm)
 
   const { data: groups = [], isLoading } = useQuery({
     queryKey: ['hotword-groups'],
@@ -69,6 +110,38 @@ export function HotwordsPage() {
   const selectedGroup = visibleGroups.find((group) => group.id === selectedGroupId) ?? visibleGroups[0] ?? null
   const selectedWords = [...(selectedGroup?.words ?? [])].sort((a, b) => b.weight - a.weight || a.word.localeCompare(b.word))
   const weightBuckets = getWeightBuckets(selectedWords)
+  const searchKeyword = wordSearch.trim()
+  const searchMatches = useMemo(() => {
+    const keyword = normalizeHotwordKey(searchKeyword)
+    if (!keyword) return []
+    return groups
+      .flatMap((group) =>
+        group.words
+          .filter((word) => normalizeHotwordKey(word.word).includes(keyword))
+          .map((word) => ({
+            group,
+            word,
+            exact: normalizeHotwordKey(word.word) === keyword,
+          })),
+      )
+      .sort((a, b) => Number(b.exact) - Number(a.exact) || a.group.name.localeCompare(b.group.name) || a.word.word.localeCompare(b.word.word))
+  }, [groups, searchKeyword])
+  const batchPreview = useMemo(() => {
+    const parsed = parseHotwordInput(wordsTextValue)
+    const targetGroup = groups.find((group) => group.id === wordGroupId)
+    const existingByKey = new Map((targetGroup?.words ?? []).map((word) => [normalizeHotwordKey(word.word), word.word]))
+    const existingWords: string[] = []
+    const newWords: string[] = []
+    for (const word of parsed.uniqueWords) {
+      const existingWord = existingByKey.get(normalizeHotwordKey(word))
+      if (existingWord) {
+        existingWords.push(existingWord)
+      } else {
+        newWords.push(word)
+      }
+    }
+    return { ...parsed, existingWords, newWords }
+  }, [groups, wordGroupId, wordsTextValue])
 
   const invalidate = async () => {
     await qc.invalidateQueries({ queryKey: ['hotword-groups'] })
@@ -93,10 +166,9 @@ export function HotwordsPage() {
       setSelectedGroupId(null)
     },
   })
-  const wordCreate = useMutation({
-    mutationFn: ({ groupId, data }: { groupId: string; data: { word: string; weight?: number; is_active?: boolean } }) =>
-      adminApi.createHotword(groupId, data),
-    onSuccess: invalidate,
+  const wordBulkCreate = useMutation({
+    mutationFn: ({ groupId, data }: { groupId: string; data: { words: string[]; weight?: number; is_active?: boolean } }) =>
+      adminApi.createHotwordsBulk(groupId, data),
   })
   const wordUpdate = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<Hotword> }) => adminApi.updateHotword(id, data),
@@ -136,6 +208,7 @@ export function HotwordsPage() {
   const openWordModal = (groupId: string, word?: Hotword) => {
     setWordGroupId(groupId)
     setEditingWord(word ?? null)
+    wordForm.resetFields()
     wordForm.setFieldsValue(
       word
         ? { word: word.word, weight: word.weight, is_active: word.is_active }
@@ -159,25 +232,28 @@ export function HotwordsPage() {
       })
       message.success('词汇已更新')
     } else {
-      const words = String(values.wordsText)
-        .split(/[\n,，]/)
-        .map((item) => item.trim())
-        .filter(Boolean)
+      const parsed = parseHotwordInput(values.wordsText)
+      const targetGroup = groups.find((group) => group.id === wordGroupId)
+      const existingKeys = new Set((targetGroup?.words ?? []).map((word) => normalizeHotwordKey(word.word)))
+      const wordsToCreate = parsed.uniqueWords.filter((word) => !existingKeys.has(normalizeHotwordKey(word)))
 
-      if (!words.length) {
+      if (!parsed.uniqueWords.length) {
         message.warning('请至少输入一个热词')
         return
       }
-
-      let created = 0
-      for (const word of words) {
-        await wordCreate.mutateAsync({
-          groupId: wordGroupId,
-          data: { word, weight: values.weight, is_active: values.is_active },
-        })
-        created += 1
+      if (!wordsToCreate.length) {
+        message.warning('输入的热词都已存在于当前词库，没有新增内容')
+        return
       }
-      message.success(`已添加 ${created} 个热词`)
+
+      const result = await wordBulkCreate.mutateAsync({
+        groupId: wordGroupId,
+        data: { words: wordsToCreate, weight: values.weight, is_active: values.is_active },
+      })
+      await invalidate()
+      const skippedExistingCount = parsed.uniqueWords.length - wordsToCreate.length
+      const skippedCount = parsed.duplicateWords.length + skippedExistingCount + result.skipped_existing.length + result.skipped_duplicate.length
+      message.success(`已添加 ${result.created.length} 个热词${skippedCount ? `，跳过 ${skippedCount} 个已存在或重复词` : ''}`)
     }
 
     setWordModalOpen(false)
@@ -329,6 +405,47 @@ export function HotwordsPage() {
                 <span className="hotword-main__updated">最后更新时间：{formatDateTime(selectedGroup.updated_at)}</span>
               </div>
 
+              <div className="hotword-search-panel">
+                <div className="hotword-search-panel__control">
+                  <Input
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    placeholder="搜索热词，查看是否已在词库中"
+                    value={wordSearch}
+                    onChange={(event) => setWordSearch(event.target.value)}
+                  />
+                </div>
+                {searchKeyword ? (
+                  <div className="hotword-search-panel__result">
+                    <span>
+                      {searchMatches.length
+                        ? `找到 ${searchMatches.length} 个匹配热词`
+                        : `未找到“${searchKeyword}”`}
+                    </span>
+                    {searchMatches.length ? (
+                      <div className="hotword-search-panel__matches">
+                        {searchMatches.slice(0, 16).map((match) => (
+                          <button
+                            key={`${match.group.id}-${match.word.id}`}
+                            type="button"
+                            onClick={() => {
+                              setActiveScope(match.group.library_scope)
+                              setSelectedGroupId(match.group.id)
+                            }}
+                          >
+                            <strong>{match.word.word}</strong>
+                            <small>
+                              {match.group.library_scope === 'personal' ? '我的热词库' : '公共词库'} / {match.group.name}
+                              {match.exact ? ' / 完全匹配' : ''}
+                            </small>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
               <div className="hotword-main__summary">
                 <div className="hotword-summary-card">
                   <span>词库来源</span>
@@ -423,7 +540,7 @@ export function HotwordsPage() {
         open={wordModalOpen}
         onOk={() => void handleWordSubmit()}
         onCancel={() => setWordModalOpen(false)}
-        confirmLoading={wordCreate.isPending || wordUpdate.isPending}
+        confirmLoading={wordBulkCreate.isPending || wordUpdate.isPending}
       >
         <Form form={wordForm} layout="vertical">
           {editingWord ? (
@@ -448,6 +565,33 @@ export function HotwordsPage() {
           <Form.Item name="is_active" label="启用状态" valuePropName="checked">
             <Switch />
           </Form.Item>
+
+          {!editingWord && wordModalOpen && batchPreview.uniqueWords.length ? (
+            <div className="hotword-batch-preview">
+              {batchPreview.existingWords.length ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`当前词库已有 ${batchPreview.existingWords.length} 个词，提交时会自动跳过`}
+                  description={<div className="hotword-batch-preview__tags">{renderPreviewWords(batchPreview.existingWords)}</div>}
+                />
+              ) : null}
+              {batchPreview.duplicateWords.length ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message={`输入内容中有 ${batchPreview.duplicateWords.length} 个重复词，提交时只保留第一次出现的词`}
+                  description={<div className="hotword-batch-preview__tags">{renderPreviewWords(batchPreview.duplicateWords)}</div>}
+                />
+              ) : null}
+              <Alert
+                type={batchPreview.newWords.length ? 'success' : 'warning'}
+                showIcon
+                message={batchPreview.newWords.length ? `将新增 ${batchPreview.newWords.length} 个热词` : '没有可新增的热词'}
+                description={<div className="hotword-batch-preview__tags">{renderPreviewWords(batchPreview.newWords)}</div>}
+              />
+            </div>
+          ) : null}
         </Form>
       </Modal>
     </div>

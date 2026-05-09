@@ -4,6 +4,7 @@ import { Button, DatePicker, Input, Select, Space, Table, Tag } from 'antd'
 import type { Dayjs } from 'dayjs'
 
 import * as adminApi from '@/api/admin'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { formatBeijingTime, splitBeijingDateTime } from '@/utils/time'
 
@@ -77,20 +78,25 @@ function OverviewCard({
 }
 
 export function SapPushMonitoringPage() {
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
+  const queryEnabled = hospitalScope.isReady && Boolean(activeHospitalCode)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [filters, setFilters] = useState<MonitoringFilters>(DEFAULT_FILTERS)
   const [queryFilters, setQueryFilters] = useState<MonitoringQueryFilters>(DEFAULT_QUERY_FILTERS)
 
   const overviewQuery = useQuery({
-    queryKey: ['sap-push-monitoring-overview'],
-    queryFn: () => adminApi.fetchSapPushMonitoringOverview(),
+    queryKey: ['sap-push-monitoring-overview', activeHospitalCode ?? ''],
+    queryFn: () => adminApi.fetchSapPushMonitoringOverview({ hospital_code: activeHospitalCode }),
+    enabled: queryEnabled,
   })
 
   const logsQuery = useQuery({
-    queryKey: ['sap-push-monitoring-logs', queryFilters, page, pageSize],
+    queryKey: ['sap-push-monitoring-logs', activeHospitalCode ?? '', queryFilters, page, pageSize],
     queryFn: () =>
       adminApi.fetchSapPushMonitoringLogs({
+        hospital_code: activeHospitalCode,
         ...queryFilters,
         status: queryFilters.status || 'all',
         trigger_mode: queryFilters.trigger_mode || 'all',
@@ -100,6 +106,7 @@ export function SapPushMonitoringPage() {
         page,
         page_size: pageSize,
       }),
+    enabled: queryEnabled,
   })
 
   const rows = logsQuery.data?.items ?? []
@@ -137,16 +144,35 @@ export function SapPushMonitoringPage() {
           </div>
         </div>
         <Space>
+          {hospitalScope.canSelectHospital ? (
+            <Select
+              showSearch
+              placeholder="机构范围"
+              value={activeHospitalCode}
+              loading={hospitalScope.isLoading}
+              options={hospitalScope.selectOptions}
+              optionFilterProp="label"
+              style={{ minWidth: 180 }}
+              onChange={(value) => {
+                hospitalScope.setHospitalCode(value)
+                setPage(1)
+              }}
+            />
+          ) : hospitalScope.hospitalName ? (
+            <Tag bordered={false} color="blue">
+              {hospitalScope.hospitalName}
+            </Tag>
+          ) : null}
           <Button onClick={refreshAll}>刷新</Button>
         </Space>
       </div>
 
       <div className="sap-monitoring-overview-grid">
-        <OverviewCard label="总回传条数" value={String(overview?.total_count ?? 0)} hint="按目标到诊单拆分统计" />
-        <OverviewCard label="成功" value={String(overview?.succeeded_count ?? 0)} hint="目标到诊单回传成功" />
-        <OverviewCard label="失败" value={String(overview?.failed_count ?? 0)} hint="目标到诊单回传失败" />
-        <OverviewCard label="待处理" value={String(overview?.pending_count ?? 0)} hint="队列中或发送中" />
-        <OverviewCard label="自动触发" value={String(overview?.auto_count ?? 0)} hint="稳定关联 5 分钟后触发" />
+        <OverviewCard label="总回传到诊单" value={String(overview?.total_count ?? 0)} hint="同一到诊单多次回传只计一次" />
+        <OverviewCard label="成功" value={String(overview?.succeeded_count ?? 0)} hint="只要成功过一次即计成功" />
+        <OverviewCard label="失败" value={String(overview?.failed_count ?? 0)} hint="从未成功且存在失败" />
+        <OverviewCard label="待处理" value={String(overview?.pending_count ?? 0)} hint="从未成功且尚无失败" />
+        <OverviewCard label="自动触发" value={String(overview?.auto_count ?? 0)} hint="唯一到诊单口径" />
         <OverviewCard label="最近一次发送" value={overview?.latest_sent_at ? formatBeijingTime(overview.latest_sent_at, 'MM-DD HH:mm') : '-'} hint={formatDateTime(overview?.latest_sent_at)} />
       </div>
 

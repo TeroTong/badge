@@ -8,6 +8,8 @@ from sqlalchemy.orm import selectinload
 from smart_badge_api.db.models import Hotword, HotwordGroup
 from smart_badge_api.db.session import get_db
 from smart_badge_api.schemas.hotwords import (
+    HotwordBulkCreate,
+    HotwordBulkCreateResult,
     HotwordCreate,
     HotwordGroupCreate,
     HotwordGroupOut,
@@ -115,6 +117,48 @@ async def create_word(group_id: str, body: HotwordCreate, db: AsyncSession = Dep
     await db.commit()
     await db.refresh(word)
     return word
+
+
+@router.post("/groups/{group_id}/words/bulk", response_model=HotwordBulkCreateResult, status_code=status.HTTP_201_CREATED)
+async def create_words_bulk(group_id: str, body: HotwordBulkCreate, db: AsyncSession = Depends(get_db)):
+    await _get_group_or_404(db, group_id)
+    existing_words = (await db.execute(select(Hotword).where(Hotword.group_id == group_id))).scalars().all()
+    existing_keys = {word.word.strip().casefold() for word in existing_words}
+
+    created: list[Hotword] = []
+    skipped_existing: list[str] = []
+    skipped_duplicate: list[str] = []
+    seen_input: set[str] = set()
+    for raw_word in body.words:
+        normalized_word = _normalize_word(raw_word)
+        word_key = normalized_word.casefold()
+        if word_key in seen_input:
+            skipped_duplicate.append(normalized_word)
+            continue
+        seen_input.add(word_key)
+        if word_key in existing_keys:
+            skipped_existing.append(normalized_word)
+            continue
+
+        word = Hotword(
+            group_id=group_id,
+            word=normalized_word,
+            weight=body.weight,
+            is_active=body.is_active,
+        )
+        db.add(word)
+        created.append(word)
+        existing_keys.add(word_key)
+
+    await db.commit()
+    for word in created:
+        await db.refresh(word)
+
+    return HotwordBulkCreateResult(
+        created=created,
+        skipped_existing=skipped_existing,
+        skipped_duplicate=skipped_duplicate,
+    )
 
 
 @router.put("/words/{word_id}", response_model=HotwordOut)

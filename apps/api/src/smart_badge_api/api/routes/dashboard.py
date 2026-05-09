@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import logging
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -18,6 +21,7 @@ from smart_badge_api.api.data_scope import (
     build_permission_scope,
     managed_staff_scope_condition,
 )
+from smart_badge_api.core.config import get_settings
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.analysis.consultation_evaluation import normalize_consultation_dimension_name
 from smart_badge_api.analysis.schemas import CONSULTATION_PROCESS_EVALUATION_BLUEPRINT
@@ -286,7 +290,77 @@ class DashboardStats(BaseModel):
 
 # Simple in-memory cache keyed by permission scope.
 _cache: dict[str, tuple[float, DashboardStats]] = {}
+_cache_locks: dict[str, asyncio.Lock] = {}
 _CACHE_TTL = 60  # seconds
+_REDIS_CACHE_TTL = 60  # seconds; shared across all workers
+_REDIS_KEY_PREFIX = "dashboard:stats:v1:"
+_redis_client = None  # lazy redis.asyncio.Redis
+_redis_disabled = False  # set True after repeated errors
+_dashboard_cache_logger = logging.getLogger(__name__)
+
+
+def _redis_cache_key(cache_key: str) -> str:
+    digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()
+    return f"{_REDIS_KEY_PREFIX}{digest}"
+
+
+async def _get_redis_client():
+    global _redis_client, _redis_disabled
+    if _redis_disabled:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        import redis.asyncio as redis_asyncio  # type: ignore
+    except Exception as exc:  # pragma: no cover - redis package required
+        _dashboard_cache_logger.warning("dashboard L2 cache disabled: %s", exc)
+        _redis_disabled = True
+        return None
+    try:
+        _redis_client = redis_asyncio.from_url(
+            get_settings().redis_url,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+            health_check_interval=30,
+        )
+        await _redis_client.ping()
+    except Exception as exc:
+        _dashboard_cache_logger.warning("dashboard L2 cache disabled (ping failed): %s", exc)
+        _redis_client = None
+        _redis_disabled = True
+        return None
+    return _redis_client
+
+
+async def _redis_cache_get(cache_key: str) -> DashboardStats | None:
+    cli = await _get_redis_client()
+    if cli is None:
+        return None
+    try:
+        raw = await cli.get(_redis_cache_key(cache_key))
+    except Exception as exc:
+        _dashboard_cache_logger.warning("dashboard L2 GET failed: %s", exc)
+        return None
+    if raw is None:
+        return None
+    try:
+        return DashboardStats.model_validate_json(raw)
+    except Exception as exc:
+        _dashboard_cache_logger.warning("dashboard L2 decode failed: %s", exc)
+        return None
+
+
+async def _redis_cache_set(cache_key: str, value: DashboardStats) -> None:
+    cli = await _get_redis_client()
+    if cli is None:
+        return
+    try:
+        payload = value.model_dump_json()
+        await cli.set(_redis_cache_key(cache_key), payload, ex=_REDIS_CACHE_TTL)
+    except Exception as exc:
+        _dashboard_cache_logger.warning("dashboard L2 SET failed: %s", exc)
+
+
 _SUMMARY_ANALYSIS_SAMPLE_LIMIT = 300
 _SUMMARY_PROCESS_ISSUE_LIMIT = 80
 _IGNORED_TAG_VALUES = {"未明确", "未提及", "未知", "无", "N/A", "-"}
@@ -802,7 +876,18 @@ def _staff_stats_scope(scope) -> PermissionScope:
     return scope
 
 
-async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: PermissionScope) -> list[str]:
+async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: PermissionScope) -> list[str] | None:
+    # Global roles (super_admin/system_admin) without an explicitly selected
+    # staff see all staff. When a hospital is selected the visible staff are
+    # restricted to that hospital. None is the sentinel for "unrestricted".
+    if is_global_role(scope.role) and not scope.staff_id:
+        if scope.hospital_code:
+            stmt = select(Staff.id).where(
+                Staff.hospital_code == scope.hospital_code,
+                Staff.is_active.is_(True),
+            )
+            return list((await db.execute(stmt)).scalars().all())
+        return None
     if not scope.staff_id:
         return []
     if scope.role == "single_staff":
@@ -835,19 +920,27 @@ async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: Permissi
     return list(ids)
 
 
-def _dashboard_recording_scope_condition(managed_staff_ids: list[str]):
+def _dashboard_recording_scope_condition(managed_staff_ids: list[str] | None):
+    if managed_staff_ids is None:
+        from sqlalchemy import true
+        return true()
     if not managed_staff_ids:
         return false()
     return Recording.staff_id.in_(managed_staff_ids)
 
 
-def _dashboard_visit_scope_condition(visible_visit_ids: list[str]):
+def _dashboard_visit_scope_condition(visible_visit_ids: list[str] | None):
+    if visible_visit_ids is None:
+        from sqlalchemy import true
+        return true()
     if not visible_visit_ids:
         return false()
     return Visit.id.in_(visible_visit_ids)
 
 
-async def _resolve_dashboard_visible_visit_ids(db: AsyncSession, managed_staff_ids: list[str]) -> list[str]:
+async def _resolve_dashboard_visible_visit_ids(db: AsyncSession, managed_staff_ids: list[str] | None) -> list[str] | None:
+    if managed_staff_ids is None:
+        return None
     if not managed_staff_ids:
         return []
 
@@ -989,6 +1082,25 @@ def _visit_date_filters(date_from: date | None, date_to: date | None) -> list[An
     if date_to:
         filters.append(visit_activity_date <= date_to)
     return filters
+
+
+def _visit_order_join_condition():
+    visit_seg = func.coalesce(func.nullif(func.trim(Visit.external_visit_order_seg), ""), "")
+    order_seg = func.coalesce(func.nullif(func.trim(VisitOrder.dzseg), ""), "")
+    return and_(
+        VisitOrder.dzdh == Visit.external_visit_order_no,
+        visit_seg == order_seg,
+    )
+
+
+def _real_arrival_visit_order_condition():
+    purpose_code = func.upper(func.trim(func.coalesce(VisitOrder.dymd, "")))
+    purpose_label = func.trim(func.coalesce(VisitOrder.dymd_txt, ""))
+    return and_(
+        or_(purpose_code != "", purpose_label != ""),
+        purpose_code.notin_(("X", "Z")),
+        purpose_label.notin_(("未到院购买", "其他")),
+    )
 
 
 def _visit_hospital_condition(hospital_code: str):
@@ -1142,7 +1254,7 @@ def _resolve_dashboard_scope(
     return PermissionScope(
         role=normalized_role,
         staff_id=base_scope.staff_id,
-        hospital_code=base_scope.hospital_code,
+        hospital_code=selected_hospital_code or base_scope.hospital_code,
     )
 
 
@@ -1424,912 +1536,920 @@ async def get_dashboard(
     if cached is not None and now - cached[0] < _CACHE_TTL:
         return cached[1]
 
-    recording_date_filters = _recording_date_filters(date_from, date_to)
-    visit_date_filters = _visit_date_filters(date_from, date_to)
-    managed_staff_ids = await _resolve_dashboard_managed_staff_ids(db, scope)
-    recording_scope_filter = _dashboard_recording_scope_condition(managed_staff_ids)
-    visible_visit_ids = await _resolve_dashboard_visible_visit_ids(db, managed_staff_ids)
-    visit_scope_filter = _dashboard_visit_scope_condition(visible_visit_ids)
+    lock = _cache_locks.get(cache_key)
+    if lock is None:
+        lock = _cache_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        # Double-check L1 after acquiring lock.
+        now = time.monotonic()
+        cached = _cache.get(cache_key)
+        if cached is not None and now - cached[0] < _CACHE_TTL:
+            return cached[1]
+        # L2 (Redis) — shared across workers.
+        l2_value = await _redis_cache_get(cache_key)
+        if l2_value is not None:
+            _cache[cache_key] = (time.monotonic(), l2_value)
+            return l2_value
+        recording_date_filters = _recording_date_filters(date_from, date_to)
+        visit_date_filters = _visit_date_filters(date_from, date_to)
+        managed_staff_ids = await _resolve_dashboard_managed_staff_ids(db, scope)
+        recording_scope_filter = _dashboard_recording_scope_condition(managed_staff_ids)
+        visible_visit_ids = await _resolve_dashboard_visible_visit_ids(db, managed_staff_ids)
+        visit_scope_filter = _dashboard_visit_scope_condition(visible_visit_ids)
 
-    allowed_recordings_subquery = (
-        select(
-            Recording.id.label("recording_id"),
-            func.concat("recording_", Recording.id, ".json").label("analysis_file_name"),
-        )
-        .where(recording_scope_filter, *recording_date_filters)
-        .subquery()
-    )
-
-    # ── Task counts (1 query) ──
-    task_row = (await db.execute(
-        select(
-            func.count(AnalysisTask.id),
-            func.count(case((AnalysisTask.status == "done", 1))),
-            func.count(case((AnalysisTask.status.in_(["running", "pending"]), 1))),
-            func.count(case((AnalysisTask.status == "failed", 1))),
-        )
-        .join(
-            allowed_recordings_subquery,
-            allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
-        )
-    )).one()
-    total, done, running, failed = int(task_row[0]), int(task_row[1]), int(task_row[2]), int(task_row[3])
-
-    # Aggregate from result JSON: dimensions, dialogue types, concerns
-    await ensure_tag_categories(db)
-    tag_categories = (
-        await db.execute(
-            select(TagCategory)
-            .where(TagCategory.is_active.is_(True))
-            .options(selectinload(TagCategory.tags))
-            .order_by(TagCategory.sort_order)
-        )
-    ).scalars().all()
-    tag_category_options_map: dict[str, set[str]] = {
-        str(category.name).strip(): {
-            str(tag.name).strip()
-            for tag in category.tags
-            if tag.is_active and str(tag.name).strip()
-        }
-        for category in tag_categories
-        if str(category.name).strip()
-    }
-    done_tasks_stmt = (
-        select(AnalysisTask)
-        .join(
-            allowed_recordings_subquery,
-            allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
-        )
-        .where(AnalysisTask.status == "done", AnalysisTask.result.isnot(None))
-        .order_by(
-            AnalysisTask.completed_at.desc().nullslast(),
-            AnalysisTask.updated_at.desc(),
-            AnalysisTask.created_at.desc(),
-        )
-    )
-    if requested_detail_level == "summary":
-        done_tasks_stmt = done_tasks_stmt.limit(_SUMMARY_ANALYSIS_SAMPLE_LIMIT * 2)
-    done_tasks = (await db.execute(done_tasks_stmt)).scalars().all()
-    unique_done_tasks = _dedupe_done_tasks_by_file_name(done_tasks)
-    if requested_detail_level == "summary":
-        unique_done_tasks = unique_done_tasks[:_SUMMARY_ANALYSIS_SAMPLE_LIMIT]
-
-    sampled_recording_ids = [
-        recording_id
-        for recording_id in (_extract_recording_id(task.file_name) for task in unique_done_tasks)
-        if recording_id
-    ]
-    metadata_recordings_subquery = (
-        select(Recording.id.label("recording_id"))
-        .where(Recording.id.in_(sampled_recording_ids))
-        .subquery()
-        if requested_detail_level == "summary"
-        else allowed_recordings_subquery
-    )
-    recording_customer_map: dict[str, set[str]] = {}
-    primary_customer_rows = (
-        await db.execute(
-            select(Recording.id, Visit.customer_id)
-            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
-            .join(Visit, Visit.id == Recording.visit_id)
-            .where(Visit.customer_id.is_not(None))
-        )
-    ).all()
-    for recording_id, customer_id in primary_customer_rows:
-        if recording_id and customer_id:
-            recording_customer_map.setdefault(recording_id, set()).add(customer_id)
-    linked_customer_rows = (
-        await db.execute(
-            select(RecordingVisitLink.recording_id, Visit.customer_id)
-            .join(Visit, Visit.id == RecordingVisitLink.visit_id)
-            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == RecordingVisitLink.recording_id)
-            .where(Visit.customer_id.is_not(None))
-        )
-    ).all()
-    for recording_id, customer_id in linked_customer_rows:
-        if recording_id and customer_id:
-            recording_customer_map.setdefault(recording_id, set()).add(customer_id)
-
-    recording_meta_rows = (
-        await db.execute(
+        allowed_recordings_subquery = (
             select(
-                Recording.id,
-                Recording.staff_id,
-                Staff.name,
-                Recording.file_name,
-                Recording.created_at,
-                Recording.duration_seconds,
-                Recording.status,
+                Recording.id.label("recording_id"),
+                func.concat("recording_", Recording.id, ".json").label("analysis_file_name"),
             )
-            .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
-            .outerjoin(Staff, Staff.id == Recording.staff_id)
+            .where(recording_scope_filter, *recording_date_filters)
+            .subquery()
         )
-    ).all()
-    recording_meta_map: dict[str, dict[str, Any]] = {
-        recording_id: {
-            "staff_id": staff_id,
-            "staff_name": staff_name,
-            "file_name": file_name,
-            "created_at": created_at,
-            "duration_seconds": duration_seconds,
-            "status": status,
+
+        # ── Task counts (1 query) ──
+        task_row = (await db.execute(
+            select(
+                func.count(AnalysisTask.id),
+                func.count(case((AnalysisTask.status == "done", 1))),
+                func.count(case((AnalysisTask.status.in_(["running", "pending"]), 1))),
+                func.count(case((AnalysisTask.status == "failed", 1))),
+            )
+            .join(
+                allowed_recordings_subquery,
+                allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
+            )
+        )).one()
+        total, done, running, failed = int(task_row[0]), int(task_row[1]), int(task_row[2]), int(task_row[3])
+
+        # Aggregate from result JSON: dimensions, dialogue types, concerns
+        await ensure_tag_categories(db)
+        tag_categories = (
+            await db.execute(
+                select(TagCategory)
+                .where(TagCategory.is_active.is_(True))
+                .options(selectinload(TagCategory.tags))
+                .order_by(TagCategory.sort_order)
+            )
+        ).scalars().all()
+        tag_category_options_map: dict[str, set[str]] = {
+            str(category.name).strip(): {
+                str(tag.name).strip()
+                for tag in category.tags
+                if tag.is_active and str(tag.name).strip()
+            }
+            for category in tag_categories
+            if str(category.name).strip()
         }
-        for recording_id, staff_id, staff_name, file_name, created_at, duration_seconds, status in recording_meta_rows
-        if recording_id
-    }
+        done_tasks_stmt = (
+            select(AnalysisTask)
+            .join(
+                allowed_recordings_subquery,
+                allowed_recordings_subquery.c.analysis_file_name == AnalysisTask.file_name,
+            )
+            .where(AnalysisTask.status == "done", AnalysisTask.result.isnot(None))
+            .order_by(
+                AnalysisTask.completed_at.desc().nullslast(),
+                AnalysisTask.updated_at.desc(),
+                AnalysisTask.created_at.desc(),
+            )
+        )
+        done_tasks = (await db.execute(done_tasks_stmt)).scalars().all()
+        unique_done_tasks = _dedupe_done_tasks_by_file_name(done_tasks)
 
-    dim_scores: dict[str, list[float]] = {}
-    scores: list[float] = []
-    scored_tasks: list[tuple[AnalysisTask, float]] = []
-    example_recording_map: dict[str, DashboardExampleRecordingItem] = {}
-    score_trend_mode = _resolve_score_trend_mode(date_from, date_to)
-    score_trend_periods = (
-        _resolve_score_trend_days(date_from, date_to)
-        if score_trend_mode == "day"
-        else _resolve_score_trend_weeks(date_from, date_to)
-    )
-    score_trend_map: dict[date, dict[str, Any]] = {
-        period_start: {
-            "scores": [],
-            "task_count": 0,
-            "dimension_scores": {},
+        sampled_recording_ids = [
+            recording_id
+            for recording_id in (_extract_recording_id(task.file_name) for task in unique_done_tasks)
+            if recording_id
+        ]
+        metadata_recordings_subquery = (
+            select(Recording.id.label("recording_id"))
+            .where(Recording.id.in_(sampled_recording_ids))
+            .subquery()
+            if requested_detail_level == "summary"
+            else allowed_recordings_subquery
+        )
+        recording_customer_map: dict[str, set[str]] = {}
+        primary_customer_rows = (
+            await db.execute(
+                select(Recording.id, Visit.customer_id)
+                .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
+                .join(Visit, Visit.id == Recording.visit_id)
+                .where(Visit.customer_id.is_not(None))
+            )
+        ).all()
+        for recording_id, customer_id in primary_customer_rows:
+            if recording_id and customer_id:
+                recording_customer_map.setdefault(recording_id, set()).add(customer_id)
+        linked_customer_rows = (
+            await db.execute(
+                select(RecordingVisitLink.recording_id, Visit.customer_id)
+                .join(Visit, Visit.id == RecordingVisitLink.visit_id)
+                .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == RecordingVisitLink.recording_id)
+                .where(Visit.customer_id.is_not(None))
+            )
+        ).all()
+        for recording_id, customer_id in linked_customer_rows:
+            if recording_id and customer_id:
+                recording_customer_map.setdefault(recording_id, set()).add(customer_id)
+
+        recording_meta_rows = (
+            await db.execute(
+                select(
+                    Recording.id,
+                    Recording.staff_id,
+                    Staff.name,
+                    Recording.file_name,
+                    Recording.created_at,
+                    Recording.duration_seconds,
+                    Recording.status,
+                )
+                .join(metadata_recordings_subquery, metadata_recordings_subquery.c.recording_id == Recording.id)
+                .outerjoin(Staff, Staff.id == Recording.staff_id)
+            )
+        ).all()
+        recording_meta_map: dict[str, dict[str, Any]] = {
+            recording_id: {
+                "staff_id": staff_id,
+                "staff_name": staff_name,
+                "file_name": file_name,
+                "created_at": created_at,
+                "duration_seconds": duration_seconds,
+                "status": status,
+            }
+            for recording_id, staff_id, staff_name, file_name, created_at, duration_seconds, status in recording_meta_rows
+            if recording_id
         }
-        for period_start in score_trend_periods
-    }
-    dialogue_counter: Counter[str] = Counter()
-    concern_counter: Counter[str] = Counter()
-    tag_breakdown_map: dict[str, dict[str, Any]] = {}
-    indication_breakdown_map: dict[str, dict[str, Any]] = {}
-    total_tag_count = 0
-    total_indication_count = 0
-    normalized_result_count = 0
-    result_module_acc: dict[str, dict[str, Any]] = {
-        key: {"label": label, "covered_count": 0, "item_count": 0}
-        for key, label in _RESULT_ANALYSIS_MODULES
-    }
-    process_blueprint_sections = _process_blueprint_sections()
-    process_section_name_to_code = {name: code for code, name in process_blueprint_sections if name}
-    process_section_acc: dict[str, dict[str, Any]] = {
-        code: {
-            "code": code,
-            "name": name,
-            "scores": [],
-            "max_score": 1.0,
-            "evaluated_count": 0,
-            "pass_count": 0,
-            "issue_count": 0,
-        }
-        for code, name in process_blueprint_sections
-        if code
-    }
-    process_evaluated_count = 0
-    process_total_scores: list[float] = []
-    process_max_total_score = 9.0
-    process_passed_sections = 0
-    process_section_evaluation_count = 0
-    process_issue_count = 0
-    process_issue_items: list[ProcessEvaluationIssueItem] = []
-    process_issue_item_limit = None if requested_detail_level == "full" else _SUMMARY_PROCESS_ISSUE_LIMIT
 
-    for task in unique_done_tasks:
-        result = normalize_analysis_result(task.result) if isinstance(task.result, dict) else None
-        if not isinstance(result, dict):
-            continue
-        normalized_result_count += 1
-        recording_id = _extract_recording_id(task.file_name) or ""
-        recording_meta = recording_meta_map.get(recording_id) or {}
-        module_counts = _result_analysis_module_item_counts(result)
-        for module_key, item_count in module_counts.items():
-            bucket = result_module_acc.get(module_key)
-            if bucket is None:
-                continue
-            bucket["item_count"] += item_count
-            if item_count > 0:
-                bucket["covered_count"] += 1
-
-        process_evaluation = _as_dict(result.get("consultation_process_evaluation"))
-        process_sections = [section for section in _as_list(process_evaluation.get("sections")) if isinstance(section, dict)]
-        if process_sections:
-            process_evaluated_count += 1
-            process_total_score = _dimension_numeric_score(process_evaluation.get("total_score"))
-            process_max_score = _dimension_numeric_score(process_evaluation.get("max_total_score")) or float(len(process_sections) or 9)
-            if process_total_score is None:
-                section_scores = [
-                    score
-                    for score in (_dimension_numeric_score(section.get("point_score")) for section in process_sections)
-                    if score is not None
-                ]
-                process_total_score = sum(section_scores) if section_scores else None
-            if process_total_score is not None:
-                process_total_scores.append(process_total_score)
-            process_max_total_score = max(process_max_total_score, process_max_score)
-
-            for section in process_sections:
-                section_key = _process_section_key(section)
-                section_name = _clean_text(section.get("name"))
-                if section_key not in process_section_acc and section_name in process_section_name_to_code:
-                    section_key = process_section_name_to_code[section_name]
-                if section_key not in process_section_acc:
-                    process_section_acc[section_key] = {
-                        "code": _clean_text(section.get("code")) or section_key,
-                        "name": section_name or section_key,
-                        "scores": [],
-                        "max_score": _dimension_numeric_score(section.get("max_score")) or 1.0,
-                        "evaluated_count": 0,
-                        "pass_count": 0,
-                        "issue_count": 0,
-                    }
-                section_bucket = process_section_acc[section_key]
-                section_score = _dimension_numeric_score(section.get("point_score"))
-                section_max_score = _dimension_numeric_score(section.get("max_score")) or 1.0
-                section_bucket["evaluated_count"] += 1
-                section_bucket["max_score"] = max(float(section_bucket["max_score"]), section_max_score)
-                if section_score is not None:
-                    section_bucket["scores"].append(section_score)
-                if _is_process_section_passed(section):
-                    section_bucket["pass_count"] += 1
-                    process_passed_sections += 1
-                issue_count = _process_section_issue_count(section)
-                section_bucket["issue_count"] += issue_count
-                process_issue_count += issue_count
-                process_section_evaluation_count += 1
-                for issue in _iter_process_section_issues(section):
-                    if process_issue_item_limit is not None and len(process_issue_items) >= process_issue_item_limit:
-                        continue
-                    process_issue_items.append(
-                        ProcessEvaluationIssueItem(
-                            recording_id=recording_id,
-                            analysis_task_id=task.id,
-                            file_name=str(recording_meta.get("file_name") or task.file_name),
-                            recorded_at=(
-                                recording_meta["created_at"].isoformat()
-                                if isinstance(recording_meta.get("created_at"), datetime)
-                                else None
-                            ),
-                            staff_id=recording_meta.get("staff_id"),
-                            staff_name=recording_meta.get("staff_name"),
-                            section_code=str(issue["section_code"] or section_key),
-                            section_name=str(issue["section_name"] or section_name or section_key),
-                            checkpoint_code=issue["checkpoint_code"],
-                            checkpoint_name=issue["checkpoint_name"],
-                            description=str(issue["description"] or "未填写问题描述"),
-                            evidence=issue["evidence"],
-                        )
-                    )
-
-        trend_day = _to_local_date(recording_meta.get("created_at")) or _to_local_date(task.created_at)
-        trend_period = (
-            trend_day
+        dim_scores: dict[str, list[float]] = {}
+        scores: list[float] = []
+        scored_tasks: list[tuple[AnalysisTask, float]] = []
+        example_recording_map: dict[str, DashboardExampleRecordingItem] = {}
+        score_trend_mode = _resolve_score_trend_mode(date_from, date_to)
+        score_trend_periods = (
+            _resolve_score_trend_days(date_from, date_to)
             if score_trend_mode == "day"
-            else (_start_of_week(trend_day) if trend_day else None)
+            else _resolve_score_trend_weeks(date_from, date_to)
         )
-        trend_bucket = score_trend_map.get(trend_period) if trend_period else None
-        total_score = _consultation_total_score(result)
-        if trend_bucket is not None:
-            trend_bucket["task_count"] += 1
-            if total_score is not None:
-                trend_bucket["scores"].append(total_score)
-        if total_score is not None:
-            scores.append(total_score)
-            scored_tasks.append((task, total_score))
-            if recording_id and recording_meta:
-                candidate = DashboardExampleRecordingItem(
-                    recording_id=recording_id,
-                    analysis_task_id=task.id,
-                    file_name=str(recording_meta.get("file_name") or task.file_name),
-                    recorded_at=(
-                        recording_meta["created_at"].isoformat()
-                        if isinstance(recording_meta.get("created_at"), datetime)
-                        else None
-                    ),
-                    duration_seconds=(
-                        int(recording_meta["duration_seconds"])
-                        if recording_meta.get("duration_seconds") is not None
-                        else None
-                    ),
-                    staff_id=recording_meta.get("staff_id"),
-                    staff_name=recording_meta.get("staff_name"),
-                    total_score=round(total_score, 2),
-                    max_score=round(
-                        _dimension_numeric_score(_as_dict(result.get("consultation_process_evaluation")).get("max_total_score"))
-                        or 9.0,
-                        2,
-                    ),
-                    indication_count=_count_indications(result),
-                    tag_count=_count_profile_tags(result),
-                    concern_count=_count_concerns(result),
-                    summary=_build_example_recording_summary(result),
-                )
-                previous = example_recording_map.get(recording_id)
-                if previous is None:
-                    example_recording_map[recording_id] = candidate
-        # Dimensions
-        for name, score_value in _consultation_dimension_scores(result):
-            dim_scores.setdefault(name, []).append(score_value)
-            if trend_bucket is not None:
-                trend_bucket["dimension_scores"].setdefault(name, []).append(score_value)
-        # Dialogue type
-        dt = result.get("customer_demands", {}).get("expectation", {}).get("dialogue_type")
-        if dt:
-            dialogue_counter[dt] += 1
-        task_customer_ids = recording_customer_map.get(recording_id, set())
-        # Concerns
-        for c in result.get("customer_concerns", {}).get("items", []):
-            ct = c.get("type")
-            if ct:
-                concern_counter[ct] += 1
-        profile = result.get("customer_profile", {})
-        if isinstance(profile, dict):
-            for item in profile.get("tags") or []:
-                if not isinstance(item, dict):
+        score_trend_map: dict[date, dict[str, Any]] = {
+            period_start: {
+                "scores": [],
+                "task_count": 0,
+                "dimension_scores": {},
+            }
+            for period_start in score_trend_periods
+        }
+        dialogue_counter: Counter[str] = Counter()
+        concern_counter: Counter[str] = Counter()
+        tag_breakdown_map: dict[str, dict[str, Any]] = {}
+        indication_breakdown_map: dict[str, dict[str, Any]] = {}
+        total_tag_count = 0
+        total_indication_count = 0
+        normalized_result_count = 0
+        result_module_acc: dict[str, dict[str, Any]] = {
+            key: {"label": label, "covered_count": 0, "item_count": 0}
+            for key, label in _RESULT_ANALYSIS_MODULES
+        }
+        process_blueprint_sections = _process_blueprint_sections()
+        process_section_name_to_code = {name: code for code, name in process_blueprint_sections if name}
+        process_section_acc: dict[str, dict[str, Any]] = {
+            code: {
+                "code": code,
+                "name": name,
+                "scores": [],
+                "max_score": 1.0,
+                "evaluated_count": 0,
+                "pass_count": 0,
+                "issue_count": 0,
+            }
+            for code, name in process_blueprint_sections
+            if code
+        }
+        process_evaluated_count = 0
+        process_total_scores: list[float] = []
+        process_max_total_score = 9.0
+        process_passed_sections = 0
+        process_section_evaluation_count = 0
+        process_issue_count = 0
+        process_issue_items: list[ProcessEvaluationIssueItem] = []
+        process_issue_item_limit = None if requested_detail_level == "full" else _SUMMARY_PROCESS_ISSUE_LIMIT
+
+        for task in unique_done_tasks:
+            result = normalize_analysis_result(task.result) if isinstance(task.result, dict) else None
+            if not isinstance(result, dict):
+                continue
+            normalized_result_count += 1
+            recording_id = _extract_recording_id(task.file_name) or ""
+            recording_meta = recording_meta_map.get(recording_id) or {}
+            module_counts = _result_analysis_module_item_counts(result)
+            for module_key, item_count in module_counts.items():
+                bucket = result_module_acc.get(module_key)
+                if bucket is None:
                     continue
-                category = str(item.get("category") or "").strip()
-                value = str(item.get("value") or "").strip()
-                if not category and not value:
-                    continue
-                if _should_ignore_dashboard_tag_value(category, value):
-                    continue
-                resolved_category = _resolve_tag_category_name(category, tag_category_options_map)
-                selectable_values = tag_category_options_map.get(resolved_category)
-                is_open_value_category = not selectable_values
-                if not value and not is_open_value_category:
-                    continue
-                category_key = resolved_category or value
-                category_label = resolved_category or value
-                if not category_key:
-                    continue
-                bucket = tag_breakdown_map.setdefault(
-                    category_key,
-                    {
-                        "key": category_key,
-                        "label": category_label,
-                        "count": 0,
-                        "task_ids": set(),
-                        "customer_ids": set(),
-                        "is_open_value": is_open_value_category,
-                        "value_breakdown_map": {},
-                    },
-                )
-                bucket["count"] += 1
-                bucket["task_ids"].add(task.id)
-                bucket["customer_ids"].update(task_customer_ids)
-                value_key = value or "未填写"
-                value_label = value or "未填写"
-                value_bucket = bucket["value_breakdown_map"].setdefault(
-                    value_key,
-                    {
-                        "key": value_key,
-                        "label": value_label,
-                        "count": 0,
-                        "task_ids": set(),
-                        "customer_ids": set(),
-                    },
-                )
-                value_bucket["count"] += 1
-                value_bucket["task_ids"].add(task.id)
-                value_bucket["customer_ids"].update(task_customer_ids)
-                total_tag_count += 1
-        indications = result.get("standardized_indications", {})
-        if isinstance(indications, dict):
-            for item in indications.get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                department_code = str(item.get("department_code") or "").strip()
-                department_name = str(item.get("department_name") or "").strip()
-                indication_code = str(item.get("indication_code") or "").strip()
-                indication_name = str(item.get("indication_name") or "").strip()
-                body_part_code = str(item.get("body_part_code") or "").strip()
-                body_part_name = str(item.get("body_part_name") or "").strip()
-                if not indication_name and not indication_code:
-                    continue
-                indication_key = "|".join(
-                    [
-                        department_code or department_name,
-                        indication_code or indication_name,
-                        body_part_code or body_part_name,
+                bucket["item_count"] += item_count
+                if item_count > 0:
+                    bucket["covered_count"] += 1
+
+            process_evaluation = _as_dict(result.get("consultation_process_evaluation"))
+            process_sections = [section for section in _as_list(process_evaluation.get("sections")) if isinstance(section, dict)]
+            if process_sections:
+                process_evaluated_count += 1
+                process_total_score = _dimension_numeric_score(process_evaluation.get("total_score"))
+                process_max_score = _dimension_numeric_score(process_evaluation.get("max_total_score")) or float(len(process_sections) or 9)
+                if process_total_score is None:
+                    section_scores = [
+                        score
+                        for score in (_dimension_numeric_score(section.get("point_score")) for section in process_sections)
+                        if score is not None
                     ]
-                ).strip("|")
-                if not indication_key:
-                    indication_key = indication_name
-                bucket = indication_breakdown_map.setdefault(
-                    indication_key,
-                    {
-                        "key": indication_key,
-                        "label": indication_name,
-                        "count": 0,
-                        "task_ids": set(),
-                        "customer_ids": set(),
-                        "department_code": department_code or None,
-                        "department_name": department_name or None,
-                        "indication_code": indication_code or None,
-                        "body_part_code": body_part_code or None,
-                        "body_part_name": body_part_name or None,
-                    },
+                    process_total_score = sum(section_scores) if section_scores else None
+                if process_total_score is not None:
+                    process_total_scores.append(process_total_score)
+                process_max_total_score = max(process_max_total_score, process_max_score)
+
+                for section in process_sections:
+                    section_key = _process_section_key(section)
+                    section_name = _clean_text(section.get("name"))
+                    if section_key not in process_section_acc and section_name in process_section_name_to_code:
+                        section_key = process_section_name_to_code[section_name]
+                    if section_key not in process_section_acc:
+                        process_section_acc[section_key] = {
+                            "code": _clean_text(section.get("code")) or section_key,
+                            "name": section_name or section_key,
+                            "scores": [],
+                            "max_score": _dimension_numeric_score(section.get("max_score")) or 1.0,
+                            "evaluated_count": 0,
+                            "pass_count": 0,
+                            "issue_count": 0,
+                        }
+                    section_bucket = process_section_acc[section_key]
+                    section_score = _dimension_numeric_score(section.get("point_score"))
+                    section_max_score = _dimension_numeric_score(section.get("max_score")) or 1.0
+                    section_bucket["evaluated_count"] += 1
+                    section_bucket["max_score"] = max(float(section_bucket["max_score"]), section_max_score)
+                    if section_score is not None:
+                        section_bucket["scores"].append(section_score)
+                    if _is_process_section_passed(section):
+                        section_bucket["pass_count"] += 1
+                        process_passed_sections += 1
+                    issue_count = _process_section_issue_count(section)
+                    section_bucket["issue_count"] += issue_count
+                    process_issue_count += issue_count
+                    process_section_evaluation_count += 1
+                    for issue in _iter_process_section_issues(section):
+                        if process_issue_item_limit is not None and len(process_issue_items) >= process_issue_item_limit:
+                            continue
+                        process_issue_items.append(
+                            ProcessEvaluationIssueItem(
+                                recording_id=recording_id,
+                                analysis_task_id=task.id,
+                                file_name=str(recording_meta.get("file_name") or task.file_name),
+                                recorded_at=(
+                                    recording_meta["created_at"].isoformat()
+                                    if isinstance(recording_meta.get("created_at"), datetime)
+                                    else None
+                                ),
+                                staff_id=recording_meta.get("staff_id"),
+                                staff_name=recording_meta.get("staff_name"),
+                                section_code=str(issue["section_code"] or section_key),
+                                section_name=str(issue["section_name"] or section_name or section_key),
+                                checkpoint_code=issue["checkpoint_code"],
+                                checkpoint_name=issue["checkpoint_name"],
+                                description=str(issue["description"] or "未填写问题描述"),
+                                evidence=issue["evidence"],
+                            )
+                        )
+
+            trend_day = _to_local_date(recording_meta.get("created_at")) or _to_local_date(task.created_at)
+            trend_period = (
+                trend_day
+                if score_trend_mode == "day"
+                else (_start_of_week(trend_day) if trend_day else None)
+            )
+            trend_bucket = score_trend_map.get(trend_period) if trend_period else None
+            total_score = _consultation_total_score(result)
+            if trend_bucket is not None:
+                trend_bucket["task_count"] += 1
+                if total_score is not None:
+                    trend_bucket["scores"].append(total_score)
+            if total_score is not None:
+                scores.append(total_score)
+                scored_tasks.append((task, total_score))
+                if recording_id and recording_meta:
+                    candidate = DashboardExampleRecordingItem(
+                        recording_id=recording_id,
+                        analysis_task_id=task.id,
+                        file_name=str(recording_meta.get("file_name") or task.file_name),
+                        recorded_at=(
+                            recording_meta["created_at"].isoformat()
+                            if isinstance(recording_meta.get("created_at"), datetime)
+                            else None
+                        ),
+                        duration_seconds=(
+                            int(recording_meta["duration_seconds"])
+                            if recording_meta.get("duration_seconds") is not None
+                            else None
+                        ),
+                        staff_id=recording_meta.get("staff_id"),
+                        staff_name=recording_meta.get("staff_name"),
+                        total_score=round(total_score, 2),
+                        max_score=round(
+                            _dimension_numeric_score(_as_dict(result.get("consultation_process_evaluation")).get("max_total_score"))
+                            or 9.0,
+                            2,
+                        ),
+                        indication_count=_count_indications(result),
+                        tag_count=_count_profile_tags(result),
+                        concern_count=_count_concerns(result),
+                        summary=_build_example_recording_summary(result),
+                    )
+                    previous = example_recording_map.get(recording_id)
+                    if previous is None:
+                        example_recording_map[recording_id] = candidate
+            # Dimensions
+            for name, score_value in _consultation_dimension_scores(result):
+                dim_scores.setdefault(name, []).append(score_value)
+                if trend_bucket is not None:
+                    trend_bucket["dimension_scores"].setdefault(name, []).append(score_value)
+            # Dialogue type
+            dt = result.get("customer_demands", {}).get("expectation", {}).get("dialogue_type")
+            if dt:
+                dialogue_counter[dt] += 1
+            task_customer_ids = recording_customer_map.get(recording_id, set())
+            # Concerns
+            for c in result.get("customer_concerns", {}).get("items", []):
+                ct = c.get("type")
+                if ct:
+                    concern_counter[ct] += 1
+            profile = result.get("customer_profile", {})
+            if isinstance(profile, dict):
+                for item in profile.get("tags") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    category = str(item.get("category") or "").strip()
+                    value = str(item.get("value") or "").strip()
+                    if not category and not value:
+                        continue
+                    if _should_ignore_dashboard_tag_value(category, value):
+                        continue
+                    resolved_category = _resolve_tag_category_name(category, tag_category_options_map)
+                    selectable_values = tag_category_options_map.get(resolved_category)
+                    is_open_value_category = not selectable_values
+                    if not value and not is_open_value_category:
+                        continue
+                    category_key = resolved_category or value
+                    category_label = resolved_category or value
+                    if not category_key:
+                        continue
+                    bucket = tag_breakdown_map.setdefault(
+                        category_key,
+                        {
+                            "key": category_key,
+                            "label": category_label,
+                            "count": 0,
+                            "task_ids": set(),
+                            "customer_ids": set(),
+                            "is_open_value": is_open_value_category,
+                            "value_breakdown_map": {},
+                        },
+                    )
+                    bucket["count"] += 1
+                    bucket["task_ids"].add(task.id)
+                    bucket["customer_ids"].update(task_customer_ids)
+                    value_key = value or "未填写"
+                    value_label = value or "未填写"
+                    value_bucket = bucket["value_breakdown_map"].setdefault(
+                        value_key,
+                        {
+                            "key": value_key,
+                            "label": value_label,
+                            "count": 0,
+                            "task_ids": set(),
+                            "customer_ids": set(),
+                        },
+                    )
+                    value_bucket["count"] += 1
+                    value_bucket["task_ids"].add(task.id)
+                    value_bucket["customer_ids"].update(task_customer_ids)
+                    total_tag_count += 1
+            indications = result.get("standardized_indications", {})
+            if isinstance(indications, dict):
+                for item in indications.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    department_code = str(item.get("department_code") or "").strip()
+                    department_name = str(item.get("department_name") or "").strip()
+                    indication_code = str(item.get("indication_code") or "").strip()
+                    indication_name = str(item.get("indication_name") or "").strip()
+                    body_part_code = str(item.get("body_part_code") or "").strip()
+                    body_part_name = str(item.get("body_part_name") or "").strip()
+                    if not indication_name and not indication_code:
+                        continue
+                    indication_key = "|".join(
+                        [
+                            department_code or department_name,
+                            indication_code or indication_name,
+                            body_part_code or body_part_name,
+                        ]
+                    ).strip("|")
+                    if not indication_key:
+                        indication_key = indication_name
+                    bucket = indication_breakdown_map.setdefault(
+                        indication_key,
+                        {
+                            "key": indication_key,
+                            "label": indication_name,
+                            "count": 0,
+                            "task_ids": set(),
+                            "customer_ids": set(),
+                            "department_code": department_code or None,
+                            "department_name": department_name or None,
+                            "indication_code": indication_code or None,
+                            "body_part_code": body_part_code or None,
+                            "body_part_name": body_part_name or None,
+                        },
+                    )
+                    bucket["count"] += 1
+                    bucket["task_ids"].add(task.id)
+                    bucket["customer_ids"].update(task_customer_ids)
+                    total_indication_count += 1
+
+        avg_score = sum(scores) / len(scores) if scores else 0
+        max_score = max(scores) if scores else 0
+        min_score = min(scores) if scores else 0
+
+        score_distribution_buckets = {f"{index}-{index + 1}": 0 for index in range(int(_CONSULTATION_TOTAL_SCORE_MAX))}
+        for score in scores:
+            normalized_bucket = min(int(score), int(_CONSULTATION_TOTAL_SCORE_MAX) - 1)
+            bucket_label = f"{normalized_bucket}-{normalized_bucket + 1}"
+            score_distribution_buckets[bucket_label] += 1
+        score_dist = [ScoreDistItem(range=label, count=count) for label, count in score_distribution_buckets.items()]
+
+        avg_tag_count = total_tag_count / len(unique_done_tasks) if unique_done_tasks else 0
+        avg_indication_count = total_indication_count / len(unique_done_tasks) if unique_done_tasks else 0
+        tag_breakdown = sorted(
+            [
+                (
+                    lambda sorted_values: BreakdownItem(
+                        key=item["key"],
+                        label=item["label"],
+                        count=int(item["count"]),
+                        task_count=len(item["task_ids"]),
+                        customer_count=len(item["customer_ids"]),
+                        is_open_value=bool(item["is_open_value"]),
+                        distinct_value_count=len(sorted_values),
+                        remaining_value_count=max(
+                            len(sorted_values)
+                            - (
+                                _MAX_OPEN_TAG_VALUE_ITEMS
+                                if item["is_open_value"]
+                                else len(sorted_values)
+                            ),
+                            0,
+                        ),
+                        detail=(
+                            (
+                                f"开放值，共识别{len(sorted_values)}种取值，仅展示前{min(len(sorted_values), _MAX_OPEN_TAG_VALUE_ITEMS)}种"
+                                if len(sorted_values) > _MAX_OPEN_TAG_VALUE_ITEMS
+                                else f"开放值，共识别{len(sorted_values)}种取值"
+                            )
+                            if item["is_open_value"] and sorted_values
+                            else (
+                                f"已命中{len(sorted_values)}个取值"
+                                if sorted_values
+                                else None
+                            )
+                        ),
+                        value_breakdown=[
+                            BreakdownValueItem(
+                                key=value_item["key"],
+                                label=value_item["label"],
+                                count=int(value_item["count"]),
+                                task_count=len(value_item["task_ids"]),
+                                customer_count=len(value_item["customer_ids"]),
+                            )
+                            for value_item in (
+                                sorted_values[:_MAX_OPEN_TAG_VALUE_ITEMS]
+                                if item["is_open_value"]
+                                else sorted_values
+                            )
+                        ],
+                    )
+                )(
+                    sorted(
+                        item["value_breakdown_map"].values(),
+                        key=lambda value_item: (
+                            -len(value_item["customer_ids"]),
+                            -int(value_item["count"]),
+                            value_item["label"],
+                        ),
+                    )
                 )
-                bucket["count"] += 1
-                bucket["task_ids"].add(task.id)
-                bucket["customer_ids"].update(task_customer_ids)
-                total_indication_count += 1
-
-    avg_score = sum(scores) / len(scores) if scores else 0
-    max_score = max(scores) if scores else 0
-    min_score = min(scores) if scores else 0
-
-    score_distribution_buckets = {f"{index}-{index + 1}": 0 for index in range(int(_CONSULTATION_TOTAL_SCORE_MAX))}
-    for score in scores:
-        normalized_bucket = min(int(score), int(_CONSULTATION_TOTAL_SCORE_MAX) - 1)
-        bucket_label = f"{normalized_bucket}-{normalized_bucket + 1}"
-        score_distribution_buckets[bucket_label] += 1
-    score_dist = [ScoreDistItem(range=label, count=count) for label, count in score_distribution_buckets.items()]
-
-    avg_tag_count = total_tag_count / len(unique_done_tasks) if unique_done_tasks else 0
-    avg_indication_count = total_indication_count / len(unique_done_tasks) if unique_done_tasks else 0
-    tag_breakdown = sorted(
-        [
-            (
-                lambda sorted_values: BreakdownItem(
+                for item in tag_breakdown_map.values()
+            ],
+            key=lambda item: (-item.customer_count, -item.task_count, -item.count, item.label),
+        )
+        indication_breakdown = sorted(
+            [
+                BreakdownItem(
                     key=item["key"],
                     label=item["label"],
                     count=int(item["count"]),
                     task_count=len(item["task_ids"]),
                     customer_count=len(item["customer_ids"]),
-                    is_open_value=bool(item["is_open_value"]),
-                    distinct_value_count=len(sorted_values),
-                    remaining_value_count=max(
-                        len(sorted_values)
-                        - (
-                            _MAX_OPEN_TAG_VALUE_ITEMS
-                            if item["is_open_value"]
-                            else len(sorted_values)
-                        ),
+                    department_code=item["department_code"],
+                    department_name=item["department_name"],
+                    indication_code=item["indication_code"],
+                    body_part_code=item["body_part_code"],
+                    body_part_name=item["body_part_name"],
+                    detail=" · ".join(
+                        part
+                        for part in [
+                            f"科室：{item['department_name']}" if item["department_name"] else None,
+                            f"部位：{item['body_part_name']}" if item["body_part_name"] else None,
+                            f"编码：{item['indication_code']}" if item["indication_code"] else None,
+                        ]
+                        if part
+                    )
+                    or None,
+                )
+                for item in indication_breakdown_map.values()
+            ],
+            key=lambda item: (-item.customer_count, -item.task_count, -item.count, item.label),
+        )
+
+        result_analysis_modules = [
+            ResultAnalysisModuleStats(
+                key=key,
+                label=str(bucket["label"]),
+                analyzed_count=normalized_result_count,
+                covered_count=int(bucket["covered_count"]),
+                coverage_rate=round((int(bucket["covered_count"]) / normalized_result_count) * 100, 1)
+                if normalized_result_count
+                else 0.0,
+                avg_item_count=round((int(bucket["item_count"]) / normalized_result_count), 1)
+                if normalized_result_count
+                else 0.0,
+            )
+            for key, bucket in result_module_acc.items()
+        ]
+        process_evaluation_summary = ProcessEvaluationSummaryStats(
+            evaluated_count=process_evaluated_count,
+            avg_total_score=round(sum(process_total_scores) / len(process_total_scores), 2)
+            if process_total_scores
+            else None,
+            max_total_score=round(process_max_total_score, 2),
+            pass_rate=round((process_passed_sections / process_section_evaluation_count) * 100, 1)
+            if process_section_evaluation_count
+            else 0.0,
+            issue_count=process_issue_count,
+            avg_passed_sections=round(process_passed_sections / process_evaluated_count, 1)
+            if process_evaluated_count
+            else 0.0,
+        )
+        process_evaluation_sections = [
+            ProcessEvaluationSectionStats(
+                code=str(bucket["code"]),
+                name=str(bucket["name"]),
+                evaluated_count=int(bucket["evaluated_count"]),
+                avg_score=round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
+                if bucket["scores"]
+                else None,
+                max_score=round(float(bucket["max_score"]), 2),
+                pass_count=int(bucket["pass_count"]),
+                pass_rate=round((int(bucket["pass_count"]) / int(bucket["evaluated_count"])) * 100, 1)
+                if int(bucket["evaluated_count"])
+                else 0.0,
+                issue_count=int(bucket["issue_count"]),
+            )
+            for bucket in process_section_acc.values()
+        ]
+
+        dimension_avgs = sorted(
+            [DimensionAvg(name=n, avg_score=round(sum(ss) / len(ss), 1)) for n, ss in dim_scores.items() if ss],
+            key=lambda x: -x.avg_score,
+        )
+        score_trend = [
+            ScoreTrendItem(
+                date=period_start.isoformat(),
+                label=_score_day_label(period_start) if score_trend_mode == "day" else _score_week_label(period_start),
+                avg_score=(
+                    round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
+                    if bucket["scores"]
+                    else None
+                ),
+                task_count=int(bucket["task_count"]),
+                dimension_averages=sorted(
+                    [
+                        DimensionAvg(name=name, avg_score=round(sum(values) / len(values), 2))
+                        for name, values in bucket["dimension_scores"].items()
+                        if values
+                    ],
+                    key=lambda item: item.name,
+                ),
+            )
+            for period_start, bucket in score_trend_map.items()
+        ]
+        dialogue_types = [DialogueTypeItem(type=t, count=c) for t, c in dialogue_counter.most_common(10)]
+        concern_types = [ConcernTypeItem(type=t, count=c) for t, c in concern_counter.most_common(10)]
+
+        # Low-score alerts: six-dimension total score lower than 3 / 6
+        low_tasks = sorted(
+            (item for item in scored_tasks if item[1] < (_CONSULTATION_TOTAL_SCORE_MAX / 2)),
+            key=lambda item: (item[1], item[0].created_at),
+        )[:10]
+        recent_low = [
+            RecentTask(
+                id=t.id,
+                file_name=t.file_name,
+                overall_score=round(score, 2),
+                status=t.status,
+                created_at=t.created_at.isoformat(),
+            )
+            for t, score in low_tasks
+        ]
+        example_recordings = list(example_recording_map.values())
+        positive_example_limit = min(3, max(1, (len(example_recordings) + 1) // 2)) if example_recordings else 0
+        positive_example_recordings = sorted(
+            example_recordings,
+            key=lambda item: (-item.total_score, item.recorded_at or "", item.staff_name or ""),
+        )[:positive_example_limit]
+        positive_example_recording_ids = {item.recording_id for item in positive_example_recordings}
+        negative_example_limit = min(3, max(0, len(example_recordings) - len(positive_example_recordings)))
+        negative_example_recordings = sorted(
+            [item for item in example_recordings if item.recording_id not in positive_example_recording_ids],
+            key=lambda item: (item.total_score, item.recorded_at or "", item.staff_name or ""),
+        )[:negative_example_limit]
+
+        # ── Deal KPIs (1 query) ──
+        deal_row = (
+            await db.execute(
+                select(
+                    func.coalesce(
+                        func.sum(func.coalesce(Visit.deposit_principal, 0) + func.coalesce(Visit.deposit_bonus, 0)),
                         0,
                     ),
-                    detail=(
-                        (
-                            f"开放值，共识别{len(sorted_values)}种取值，仅展示前{min(len(sorted_values), _MAX_OPEN_TAG_VALUE_ITEMS)}种"
-                            if len(sorted_values) > _MAX_OPEN_TAG_VALUE_ITEMS
-                            else f"开放值，共识别{len(sorted_values)}种取值"
-                        )
-                        if item["is_open_value"] and sorted_values
-                        else (
-                            f"已命中{len(sorted_values)}个取值"
-                            if sorted_values
-                            else None
-                        )
-                    ),
-                    value_breakdown=[
-                        BreakdownValueItem(
-                            key=value_item["key"],
-                            label=value_item["label"],
-                            count=int(value_item["count"]),
-                            task_count=len(value_item["task_ids"]),
-                            customer_count=len(value_item["customer_ids"]),
-                        )
-                        for value_item in (
-                            sorted_values[:_MAX_OPEN_TAG_VALUE_ITEMS]
-                            if item["is_open_value"]
-                            else sorted_values
-                        )
-                    ],
-                )
-            )(
-                sorted(
-                    item["value_breakdown_map"].values(),
-                    key=lambda value_item: (
-                        -len(value_item["customer_ids"]),
-                        -int(value_item["count"]),
-                        value_item["label"],
-                    ),
-                )
+                    func.count(Visit.id),
+                    func.count(func.distinct(Visit.customer_id)),
+                ).where(Visit.status == "closed_won", visit_scope_filter, *visit_date_filters)
             )
-            for item in tag_breakdown_map.values()
-        ],
-        key=lambda item: (-item.customer_count, -item.task_count, -item.count, item.label),
-    )
-    indication_breakdown = sorted(
-        [
-            BreakdownItem(
-                key=item["key"],
-                label=item["label"],
-                count=int(item["count"]),
-                task_count=len(item["task_ids"]),
-                customer_count=len(item["customer_ids"]),
-                department_code=item["department_code"],
-                department_name=item["department_name"],
-                indication_code=item["indication_code"],
-                body_part_code=item["body_part_code"],
-                body_part_name=item["body_part_name"],
-                detail=" · ".join(
-                    part
-                    for part in [
-                        f"科室：{item['department_name']}" if item["department_name"] else None,
-                        f"部位：{item['body_part_name']}" if item["body_part_name"] else None,
-                        f"编码：{item['indication_code']}" if item["indication_code"] else None,
-                    ]
-                    if part
-                )
-                or None,
+        ).one()
+        total_deal_amount = float(deal_row[0] or 0)
+        total_closed_won_visits = int(deal_row[1] or 0)
+        total_closed_won_customers = int(deal_row[2] or 0)
+
+        # Only visit orders whose arrival purpose represents an actual hospital arrival
+        # count toward arrival count; remote purchase and miscellaneous orders do not.
+        total_customers_stmt = (
+            select(func.count(func.distinct(VisitOrder.id)))
+            .select_from(Visit)
+            .join(VisitOrder, _visit_order_join_condition())
+            .where(
+                visit_scope_filter,
+                _real_arrival_visit_order_condition(),
+                *visit_date_filters,
             )
-            for item in indication_breakdown_map.values()
-        ],
-        key=lambda item: (-item.customer_count, -item.task_count, -item.count, item.label),
-    )
-
-    result_analysis_modules = [
-        ResultAnalysisModuleStats(
-            key=key,
-            label=str(bucket["label"]),
-            analyzed_count=normalized_result_count,
-            covered_count=int(bucket["covered_count"]),
-            coverage_rate=round((int(bucket["covered_count"]) / normalized_result_count) * 100, 1)
-            if normalized_result_count
-            else 0.0,
-            avg_item_count=round((int(bucket["item_count"]) / normalized_result_count), 1)
-            if normalized_result_count
-            else 0.0,
         )
-        for key, bucket in result_module_acc.items()
-    ]
-    process_evaluation_summary = ProcessEvaluationSummaryStats(
-        evaluated_count=process_evaluated_count,
-        avg_total_score=round(sum(process_total_scores) / len(process_total_scores), 2)
-        if process_total_scores
-        else None,
-        max_total_score=round(process_max_total_score, 2),
-        pass_rate=round((process_passed_sections / process_section_evaluation_count) * 100, 1)
-        if process_section_evaluation_count
-        else 0.0,
-        issue_count=process_issue_count,
-        avg_passed_sections=round(process_passed_sections / process_evaluated_count, 1)
-        if process_evaluated_count
-        else 0.0,
-    )
-    process_evaluation_sections = [
-        ProcessEvaluationSectionStats(
-            code=str(bucket["code"]),
-            name=str(bucket["name"]),
-            evaluated_count=int(bucket["evaluated_count"]),
-            avg_score=round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
-            if bucket["scores"]
-            else None,
-            max_score=round(float(bucket["max_score"]), 2),
-            pass_count=int(bucket["pass_count"]),
-            pass_rate=round((int(bucket["pass_count"]) / int(bucket["evaluated_count"])) * 100, 1)
-            if int(bucket["evaluated_count"])
-            else 0.0,
-            issue_count=int(bucket["issue_count"]),
-        )
-        for bucket in process_section_acc.values()
-    ]
+        total_customers = (await db.execute(total_customers_stmt)).scalar() or 0
+        # 合并 total_visits 与 visit_status_rows：通过对 GROUP BY 的结果求和得到总数，省一次扫表。
+        visit_status_rows = (await db.execute(
+            select(Visit.status, func.count(Visit.id))
+            .where(visit_scope_filter, *visit_date_filters)
+            .group_by(Visit.status)
+        )).all()
+        total_visits = sum(int(row[1] or 0) for row in visit_status_rows)
+        visit_status_dist = [VisitStatusItem(status=row[0], count=row[1]) for row in visit_status_rows]
 
-    dimension_avgs = sorted(
-        [DimensionAvg(name=n, avg_score=round(sum(ss) / len(ss), 1)) for n, ss in dim_scores.items() if ss],
-        key=lambda x: -x.avg_score,
-    )
-    score_trend = [
-        ScoreTrendItem(
-            date=period_start.isoformat(),
-            label=_score_day_label(period_start) if score_trend_mode == "day" else _score_week_label(period_start),
-            avg_score=(
-                round(sum(bucket["scores"]) / len(bucket["scores"]), 2)
-                if bucket["scores"]
-                else None
-            ),
-            task_count=int(bucket["task_count"]),
-            dimension_averages=sorted(
-                [
-                    DimensionAvg(name=name, avg_score=round(sum(values) / len(values), 2))
-                    for name, values in bucket["dimension_scores"].items()
-                    if values
-                ],
-                key=lambda item: item.name,
-            ),
-        )
-        for period_start, bucket in score_trend_map.items()
-    ]
-    dialogue_types = [DialogueTypeItem(type=t, count=c) for t, c in dialogue_counter.most_common(10)]
-    concern_types = [ConcernTypeItem(type=t, count=c) for t, c in concern_counter.most_common(10)]
-
-    # Low-score alerts: six-dimension total score lower than 3 / 6
-    low_tasks = sorted(
-        (item for item in scored_tasks if item[1] < (_CONSULTATION_TOTAL_SCORE_MAX / 2)),
-        key=lambda item: (item[1], item[0].created_at),
-    )[:10]
-    recent_low = [
-        RecentTask(
-            id=t.id,
-            file_name=t.file_name,
-            overall_score=round(score, 2),
-            status=t.status,
-            created_at=t.created_at.isoformat(),
-        )
-        for t, score in low_tasks
-    ]
-    example_recordings = list(example_recording_map.values())
-    positive_example_limit = min(3, max(1, (len(example_recordings) + 1) // 2)) if example_recordings else 0
-    positive_example_recordings = sorted(
-        example_recordings,
-        key=lambda item: (-item.total_score, item.recorded_at or "", item.staff_name or ""),
-    )[:positive_example_limit]
-    positive_example_recording_ids = {item.recording_id for item in positive_example_recordings}
-    negative_example_limit = min(3, max(0, len(example_recordings) - len(positive_example_recordings)))
-    negative_example_recordings = sorted(
-        [item for item in example_recordings if item.recording_id not in positive_example_recording_ids],
-        key=lambda item: (item.total_score, item.recorded_at or "", item.staff_name or ""),
-    )[:negative_example_limit]
-
-    # ── Deal KPIs (1 query) ──
-    deal_row = (
-        await db.execute(
-            select(
-                func.coalesce(
-                    func.sum(func.coalesce(Visit.deposit_principal, 0) + func.coalesce(Visit.deposit_bonus, 0)),
-                    0,
-                ),
-                func.count(Visit.id),
-                func.count(func.distinct(Visit.customer_id)),
-            ).where(Visit.status == "closed_won", visit_scope_filter, *visit_date_filters)
-        )
-    ).one()
-    total_deal_amount = float(deal_row[0] or 0)
-    total_closed_won_visits = int(deal_row[1] or 0)
-    total_closed_won_customers = int(deal_row[2] or 0)
-
-    # ── Business counts (2 scalar queries — separate tables) ──
-    last_visit_sub = (
-        select(
-            Visit.customer_id.label("customer_id"),
-            func.max(_visit_activity_date_expr()).label("last_visit_at"),
-        )
-        .where(visit_scope_filter, Visit.customer_id.is_not(None))
-        .group_by(Visit.customer_id)
-        .subquery()
-    )
-    total_customers_stmt = select(func.count(last_visit_sub.c.customer_id)).select_from(last_visit_sub)
-    if date_from:
-        total_customers_stmt = total_customers_stmt.where(last_visit_sub.c.last_visit_at >= date_from)
-    if date_to:
-        total_customers_stmt = total_customers_stmt.where(last_visit_sub.c.last_visit_at <= date_to)
-    total_customers = (await db.execute(total_customers_stmt)).scalar() or 0
-    # 合并 total_visits 与 visit_status_rows：通过对 GROUP BY 的结果求和得到总数，省一次扫表。
-    visit_status_rows = (await db.execute(
-        select(Visit.status, func.count(Visit.id))
-        .where(visit_scope_filter, *visit_date_filters)
-        .group_by(Visit.status)
-    )).all()
-    total_visits = sum(int(row[1] or 0) for row in visit_status_rows)
-    visit_status_dist = [VisitStatusItem(status=row[0], count=row[1]) for row in visit_status_rows]
-
-    dashboard_can_select_scope = normalize_permission_role(base_scope.role) != "staff" and bool(base_scope.staff_id)
-    dashboard_can_select_hospital = is_global_role(base_scope.role) and effective_scope_mode == "all" and bool(hospital_options)
-    dashboard_can_select_staff = normalize_permission_role(base_scope.role) != "staff" and bool(dashboard_staff_options)
-    dashboard_hospital_name: str | None = None
-    if selected_dashboard_hospital_code and selected_dashboard_hospital_code in hospital_option_map:
-        dashboard_hospital_name = hospital_option_map[selected_dashboard_hospital_code].hospital_name
-    elif scope.role == "hospital_admin" and scope.hospital_code:
-        dashboard_hospital_name = (
-            hospital_option_map.get(scope.hospital_code).hospital_name
-            if scope.hospital_code in hospital_option_map
-            else ((getattr(current_user, "hospital_name", None) or "").strip() or scope.hospital_code)
-        )
-    dashboard_staff_name = (
-        dashboard_staff_option_map[selected_dashboard_staff_id].staff_name
-        if selected_dashboard_staff_id and selected_dashboard_staff_id in dashboard_staff_option_map
-        else None
-    )
-
-    visit_trend_scope = "staff"
-    selected_trend_hospital_code: str | None = None
-    selected_trend_hospital_name: str | None = None
-    visit_trend_can_select_hospital = False
-
-    if is_global_role(scope.role):
-        visit_trend_scope = "hospital"
-        visit_trend_can_select_hospital = bool(hospital_options)
+        dashboard_can_select_scope = normalize_permission_role(base_scope.role) != "staff" and bool(base_scope.staff_id)
+        dashboard_can_select_hospital = is_global_role(base_scope.role) and effective_scope_mode == "all" and bool(hospital_options)
+        dashboard_can_select_staff = normalize_permission_role(base_scope.role) != "staff" and bool(dashboard_staff_options)
+        dashboard_hospital_name: str | None = None
         if selected_dashboard_hospital_code and selected_dashboard_hospital_code in hospital_option_map:
-            selected_trend_hospital_code = selected_dashboard_hospital_code
-        elif requested_hospital_code and requested_hospital_code in hospital_option_map:
-            selected_trend_hospital_code = requested_hospital_code
-    elif scope.role == "hospital_admin":
-        visit_trend_scope = "hospital"
-        selected_trend_hospital_code = scope.hospital_code
-
-    if selected_trend_hospital_code and selected_trend_hospital_code in hospital_option_map:
-        selected_trend_hospital_name = hospital_option_map[selected_trend_hospital_code].hospital_name
-    elif selected_trend_hospital_code:
-        selected_trend_hospital_name = (
-            (getattr(current_user, "hospital_name", None) or "").strip()
-            or selected_trend_hospital_code
+            dashboard_hospital_name = hospital_option_map[selected_dashboard_hospital_code].hospital_name
+        elif scope.role == "hospital_admin" and scope.hospital_code:
+            dashboard_hospital_name = (
+                hospital_option_map.get(scope.hospital_code).hospital_name
+                if scope.hospital_code in hospital_option_map
+                else ((getattr(current_user, "hospital_name", None) or "").strip() or scope.hospital_code)
+            )
+        dashboard_staff_name = (
+            dashboard_staff_option_map[selected_dashboard_staff_id].staff_name
+            if selected_dashboard_staff_id and selected_dashboard_staff_id in dashboard_staff_option_map
+            else None
         )
 
-    trend_conditions: list[Any] = [visit_scope_filter, *visit_date_filters]
-    if selected_trend_hospital_code:
-        trend_conditions.append(_visit_hospital_condition(selected_trend_hospital_code))
+        visit_trend_scope = "staff"
+        selected_trend_hospital_code: str | None = None
+        selected_trend_hospital_name: str | None = None
+        visit_trend_can_select_hospital = False
 
-    current_date = date.today()
-    current_week_start = current_date - timedelta(days=current_date.weekday())
-    trend_week_starts = [current_week_start - timedelta(weeks=offset) for offset in reversed(range(6))]
-    trend_counts: Counter[date] = Counter({week_start: 0 for week_start in trend_week_starts})
-    trend_period_start = trend_week_starts[0]
-    trend_period_end = current_week_start + timedelta(days=7)
-    trend_period_start_dt = datetime.combine(trend_period_start, datetime.min.time(), tzinfo=timezone.utc)
-    trend_period_end_dt = datetime.combine(trend_period_end, datetime.min.time(), tzinfo=timezone.utc)
+        if is_global_role(scope.role):
+            visit_trend_scope = "hospital"
+            visit_trend_can_select_hospital = bool(hospital_options)
+            if selected_dashboard_hospital_code and selected_dashboard_hospital_code in hospital_option_map:
+                selected_trend_hospital_code = selected_dashboard_hospital_code
+            elif requested_hospital_code and requested_hospital_code in hospital_option_map:
+                selected_trend_hospital_code = requested_hospital_code
+        elif scope.role == "hospital_admin":
+            visit_trend_scope = "hospital"
+            selected_trend_hospital_code = scope.hospital_code
 
-    trend_rows = (
-        await db.execute(
-            select(Visit.visit_date, Visit.created_at)
-            .where(
-                *trend_conditions,
-                or_(
-                    Visit.visit_date.between(trend_period_start, trend_period_end - timedelta(days=1)),
-                    and_(
-                        Visit.visit_date.is_(None),
-                        Visit.created_at >= trend_period_start_dt,
-                        Visit.created_at < trend_period_end_dt,
+        if selected_trend_hospital_code and selected_trend_hospital_code in hospital_option_map:
+            selected_trend_hospital_name = hospital_option_map[selected_trend_hospital_code].hospital_name
+        elif selected_trend_hospital_code:
+            selected_trend_hospital_name = (
+                (getattr(current_user, "hospital_name", None) or "").strip()
+                or selected_trend_hospital_code
+            )
+
+        trend_conditions: list[Any] = [visit_scope_filter, *visit_date_filters]
+        if selected_trend_hospital_code:
+            trend_conditions.append(_visit_hospital_condition(selected_trend_hospital_code))
+
+        current_date = date.today()
+        current_week_start = current_date - timedelta(days=current_date.weekday())
+        trend_week_starts = [current_week_start - timedelta(weeks=offset) for offset in reversed(range(6))]
+        trend_counts: Counter[date] = Counter({week_start: 0 for week_start in trend_week_starts})
+        trend_period_start = trend_week_starts[0]
+        trend_period_end = current_week_start + timedelta(days=7)
+        trend_period_start_dt = datetime.combine(trend_period_start, datetime.min.time(), tzinfo=timezone.utc)
+        trend_period_end_dt = datetime.combine(trend_period_end, datetime.min.time(), tzinfo=timezone.utc)
+
+        trend_rows = (
+            await db.execute(
+                select(Visit.visit_date, Visit.created_at)
+                .where(
+                    *trend_conditions,
+                    or_(
+                        Visit.visit_date.between(trend_period_start, trend_period_end - timedelta(days=1)),
+                        and_(
+                            Visit.visit_date.is_(None),
+                            Visit.created_at >= trend_period_start_dt,
+                            Visit.created_at < trend_period_end_dt,
+                        ),
                     ),
-                ),
+                )
             )
-        )
-    ).all()
+        ).all()
 
-    for visit_date, created_at in trend_rows:
-        resolved_date = visit_date or _to_local_date(created_at)
-        if not resolved_date:
-            continue
-        week_start = resolved_date - timedelta(days=resolved_date.weekday())
-        if week_start in trend_counts:
-            trend_counts[week_start] += 1
+        for visit_date, created_at in trend_rows:
+            resolved_date = visit_date or _to_local_date(created_at)
+            if not resolved_date:
+                continue
+            week_start = resolved_date - timedelta(days=resolved_date.weekday())
+            if week_start in trend_counts:
+                trend_counts[week_start] += 1
 
-    visit_trend = []
-    for week_start in trend_week_starts:
-        label, range_label = _week_label(week_start)
-        visit_trend.append(
-            VisitTrendItem(
-                week_start=week_start.isoformat(),
-                week_end=(week_start + timedelta(days=6)).isoformat(),
-                week_label=label,
-                range_label=range_label,
-                count=int(trend_counts.get(week_start, 0)),
+        visit_trend = []
+        for week_start in trend_week_starts:
+            label, range_label = _week_label(week_start)
+            visit_trend.append(
+                VisitTrendItem(
+                    week_start=week_start.isoformat(),
+                    week_end=(week_start + timedelta(days=6)).isoformat(),
+                    week_label=label,
+                    range_label=range_label,
+                    count=int(trend_counts.get(week_start, 0)),
+                )
             )
+
+        staff_stats_scope = scope if selected_dashboard_staff_id else _staff_stats_scope(scope)
+        staff_stats = await _build_staff_stats(
+            db,
+            scope=staff_stats_scope,
+            done_tasks=unique_done_tasks,
+            recording_meta_map=recording_meta_map,
+            date_from=date_from,
+            date_to=date_to,
+            sort_mode="business",
+            managed_staff_ids=managed_staff_ids,
+            visible_visit_ids=visible_visit_ids,
+        )
+        score_staff_stats = await _build_staff_stats(
+            db,
+            scope=scope,
+            done_tasks=unique_done_tasks,
+            recording_meta_map=recording_meta_map,
+            date_from=date_from,
+            date_to=date_to,
+            sort_mode="score",
+            managed_staff_ids=managed_staff_ids,
+            visible_visit_ids=visible_visit_ids,
         )
 
-    staff_stats_scope = scope if selected_dashboard_staff_id else _staff_stats_scope(scope)
-    staff_stats = await _build_staff_stats(
-        db,
-        scope=staff_stats_scope,
-        done_tasks=unique_done_tasks,
-        recording_meta_map=recording_meta_map,
-        date_from=date_from,
-        date_to=date_to,
-        sort_mode="business",
-        managed_staff_ids=managed_staff_ids,
-        visible_visit_ids=visible_visit_ids,
-    )
-    score_staff_stats = await _build_staff_stats(
-        db,
-        scope=scope,
-        done_tasks=unique_done_tasks,
-        recording_meta_map=recording_meta_map,
-        date_from=date_from,
-        date_to=date_to,
-        sort_mode="score",
-        managed_staff_ids=managed_staff_ids,
-        visible_visit_ids=visible_visit_ids,
-    )
-
-    # ── Recording counts (1 query) ──
-    rec_row = (await db.execute(
-        select(
-            func.count(Recording.id),
-            func.count(case((Recording.status != "filtered", 1))),
-            func.count(case((Recording.status == "uploaded", 1))),
-            func.count(case((Recording.status.in_(["transcribed", "analyzing", "analyzed"]), 1))),
-        )
-        .where(recording_scope_filter, *recording_date_filters)
-    )).one()
-    total_recordings = int(rec_row[1])
-    quality_passed_recordings = int(rec_row[1])
-    recordings_uploaded = int(rec_row[2])
-    recordings_transcribed = int(rec_row[3])
-
-    linked_rec_row = (
-        await db.execute(
-            select(func.count(func.distinct(Recording.id)))
-            .join(allowed_recordings_subquery, allowed_recordings_subquery.c.recording_id == Recording.id)
-            .outerjoin(RecordingVisitLink, RecordingVisitLink.recording_id == Recording.id)
-            .where(
-                Recording.status != "filtered",
-                or_(Recording.visit_id.is_not(None), RecordingVisitLink.visit_id.is_not(None)),
+        # ── Recording counts (1 query) ──
+        rec_row = (await db.execute(
+            select(
+                func.count(Recording.id),
+                func.count(case((Recording.status != "filtered", 1))),
+                func.count(case((Recording.status == "uploaded", 1))),
+                func.count(case((Recording.status.in_(["transcribed", "analyzing", "analyzed"]), 1))),
             )
-        )
-    ).scalar()
-    recordings_with_visits = int(linked_rec_row or 0)
+            .where(recording_scope_filter, *recording_date_filters)
+        )).one()
+        total_recordings = int(rec_row[1])
+        quality_passed_recordings = int(rec_row[1])
+        recordings_uploaded = int(rec_row[2])
+        recordings_transcribed = int(rec_row[3])
 
-    # ── Transcript & segment counts (1 query each) ──
-    ts_row = (await db.execute(
-        select(
-            func.count(Transcript.id),
-            func.count(case((Transcript.status == "completed", 1))),
-            func.count(case((Transcript.status == "failed", 1))),
-        )
-        .join(Recording, Recording.id == Transcript.recording_id)
-        .where(recording_scope_filter, *recording_date_filters)
-    )).one()
-    total_transcripts = int(ts_row[0])
-    transcripts_completed = int(ts_row[1])
-    transcripts_failed = int(ts_row[2])
+        linked_rec_row = (
+            await db.execute(
+                select(func.count(func.distinct(Recording.id)))
+                .join(allowed_recordings_subquery, allowed_recordings_subquery.c.recording_id == Recording.id)
+                .outerjoin(RecordingVisitLink, RecordingVisitLink.recording_id == Recording.id)
+                .where(
+                    Recording.status != "filtered",
+                    or_(Recording.visit_id.is_not(None), RecordingVisitLink.visit_id.is_not(None)),
+                )
+            )
+        ).scalar()
+        recordings_with_visits = int(linked_rec_row or 0)
 
-    seg_row = (await db.execute(
-        select(
-            func.count(Segment.id),
-            func.count(case((Segment.visit_id.isnot(None), 1))),
-        )
-        .join(Recording, Recording.id == Segment.recording_id)
-        .where(recording_scope_filter, *recording_date_filters)
-    )).one()
-    total_segments = int(seg_row[0])
-    segments_with_visit = int(seg_row[1])
+        # ── Transcript & segment counts (1 query each) ──
+        ts_row = (await db.execute(
+            select(
+                func.count(Transcript.id),
+                func.count(case((Transcript.status == "completed", 1))),
+                func.count(case((Transcript.status == "failed", 1))),
+            )
+            .join(Recording, Recording.id == Transcript.recording_id)
+            .where(recording_scope_filter, *recording_date_filters)
+        )).one()
+        total_transcripts = int(ts_row[0])
+        transcripts_completed = int(ts_row[1])
+        transcripts_failed = int(ts_row[2])
 
-    result = DashboardStats(
-        total_deal_amount=round(total_deal_amount, 2),
-        total_closed_won_visits=total_closed_won_visits,
-        total_closed_won_customers=total_closed_won_customers,
-        total_tasks=total,
-        done_count=done,
-        running_count=running,
-        failed_count=failed,
-        total_tag_count=total_tag_count,
-        avg_tag_count=round(avg_tag_count, 1),
-        total_indication_count=total_indication_count,
-        avg_indication_count=round(avg_indication_count, 1),
-        avg_score=round(avg_score, 1),
-        max_score=round(max_score, 1),
-        min_score=round(min_score, 1),
-        score_distribution=score_dist,
-        dimension_averages=dimension_avgs,
-        dialogue_types=dialogue_types,
-        concern_types=concern_types,
-        recent_low_scores=recent_low,
-        positive_example_recordings=positive_example_recordings,
-        negative_example_recordings=negative_example_recordings,
-        total_customers=total_customers,
-        total_visits=total_visits,
-        visit_status_dist=visit_status_dist,
-        visit_trend=visit_trend,
-        visit_trend_scope=visit_trend_scope,
-        visit_trend_hospital_code=selected_trend_hospital_code,
-        visit_trend_hospital_name=selected_trend_hospital_name,
-        visit_trend_can_select_hospital=visit_trend_can_select_hospital,
-        visit_trend_hospital_options=hospital_options,
-        score_trend=score_trend,
-        dashboard_scope=effective_scope_mode,
-        dashboard_can_select_scope=dashboard_can_select_scope,
-        dashboard_can_select_hospital=dashboard_can_select_hospital,
-        dashboard_hospital_code=selected_dashboard_hospital_code or scope.hospital_code,
-        dashboard_hospital_name=dashboard_hospital_name,
-        dashboard_hospital_options=hospital_options,
-        dashboard_can_select_staff=dashboard_can_select_staff,
-        dashboard_staff_id=selected_dashboard_staff_id,
-        dashboard_staff_name=dashboard_staff_name,
-        dashboard_staff_options=dashboard_staff_options,
-        staff_stats=staff_stats,
-        score_staff_stats=score_staff_stats,
-        total_recordings=total_recordings,
-        quality_passed_recordings=quality_passed_recordings,
-        recordings_with_visits=recordings_with_visits,
-        recordings_uploaded=recordings_uploaded,
-        recordings_transcribed=recordings_transcribed,
-        total_transcripts=total_transcripts,
-        transcripts_completed=transcripts_completed,
-        transcripts_failed=transcripts_failed,
-        total_segments=total_segments,
-        segments_with_visit=segments_with_visit,
-        tag_breakdown=tag_breakdown,
-        indication_breakdown=indication_breakdown,
-        result_analysis_modules=result_analysis_modules,
-        process_evaluation_summary=process_evaluation_summary,
-        process_evaluation_sections=process_evaluation_sections,
-        process_evaluation_issues=process_issue_items,
-    )
-    _cache[cache_key] = (now, result)
-    return result
+        seg_row = (await db.execute(
+            select(
+                func.count(Segment.id),
+                func.count(case((Segment.visit_id.isnot(None), 1))),
+            )
+            .join(Recording, Recording.id == Segment.recording_id)
+            .where(recording_scope_filter, *recording_date_filters)
+        )).one()
+        total_segments = int(seg_row[0])
+        segments_with_visit = int(seg_row[1])
+
+        result = DashboardStats(
+            total_deal_amount=round(total_deal_amount, 2),
+            total_closed_won_visits=total_closed_won_visits,
+            total_closed_won_customers=total_closed_won_customers,
+            total_tasks=total,
+            done_count=done,
+            running_count=running,
+            failed_count=failed,
+            total_tag_count=total_tag_count,
+            avg_tag_count=round(avg_tag_count, 1),
+            total_indication_count=total_indication_count,
+            avg_indication_count=round(avg_indication_count, 1),
+            avg_score=round(avg_score, 1),
+            max_score=round(max_score, 1),
+            min_score=round(min_score, 1),
+            score_distribution=score_dist,
+            dimension_averages=dimension_avgs,
+            dialogue_types=dialogue_types,
+            concern_types=concern_types,
+            recent_low_scores=recent_low,
+            positive_example_recordings=positive_example_recordings,
+            negative_example_recordings=negative_example_recordings,
+            total_customers=total_customers,
+            total_visits=total_visits,
+            visit_status_dist=visit_status_dist,
+            visit_trend=visit_trend,
+            visit_trend_scope=visit_trend_scope,
+            visit_trend_hospital_code=selected_trend_hospital_code,
+            visit_trend_hospital_name=selected_trend_hospital_name,
+            visit_trend_can_select_hospital=visit_trend_can_select_hospital,
+            visit_trend_hospital_options=hospital_options,
+            score_trend=score_trend,
+            dashboard_scope=effective_scope_mode,
+            dashboard_can_select_scope=dashboard_can_select_scope,
+            dashboard_can_select_hospital=dashboard_can_select_hospital,
+            dashboard_hospital_code=selected_dashboard_hospital_code or scope.hospital_code,
+            dashboard_hospital_name=dashboard_hospital_name,
+            dashboard_hospital_options=hospital_options,
+            dashboard_can_select_staff=dashboard_can_select_staff,
+            dashboard_staff_id=selected_dashboard_staff_id,
+            dashboard_staff_name=dashboard_staff_name,
+            dashboard_staff_options=dashboard_staff_options,
+            staff_stats=staff_stats,
+            score_staff_stats=score_staff_stats,
+            total_recordings=total_recordings,
+            quality_passed_recordings=quality_passed_recordings,
+            recordings_with_visits=recordings_with_visits,
+            recordings_uploaded=recordings_uploaded,
+            recordings_transcribed=recordings_transcribed,
+            total_transcripts=total_transcripts,
+            transcripts_completed=transcripts_completed,
+            transcripts_failed=transcripts_failed,
+            total_segments=total_segments,
+            segments_with_visit=segments_with_visit,
+            tag_breakdown=tag_breakdown,
+            indication_breakdown=indication_breakdown,
+            result_analysis_modules=result_analysis_modules,
+            process_evaluation_summary=process_evaluation_summary,
+            process_evaluation_sections=process_evaluation_sections,
+            process_evaluation_issues=process_issue_items,
+        )
+        _cache[cache_key] = (now, result)
+        await _redis_cache_set(cache_key, result)
+        return result

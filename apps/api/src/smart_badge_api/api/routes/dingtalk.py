@@ -410,14 +410,20 @@ async def _resolve_archive_analysis_result(
     recording_id = _clean_text(summary.get("recording_id"))
     raw_data = _load_archive_analysis_raw_data(recording_id)
 
-    file_payload = _refresh_archive_analysis_result(
+    refreshed_file_payload = _refresh_archive_analysis_result(
         analysis_path,
         _read_json_file(analysis_path) if analysis_path else None,
         raw=raw_data,
     )
+    file_payload = refreshed_file_payload
 
     if not recording_id:
         return file_payload
+
+    if isinstance(file_payload, dict):
+        file_payload = (
+            await attach_unlinked_sap_preview_to_result(db, recording_id, file_payload)
+        ) or file_payload
 
     latest_task = (
         await db.execute(
@@ -436,11 +442,18 @@ async def _resolve_archive_analysis_result(
     ).scalars().first()
 
     if latest_task is None or not isinstance(latest_task.result, dict):
+        if file_payload != refreshed_file_payload:
+            _write_json_file(analysis_path, file_payload)
+            settings = get_settings()
+            _write_json_file(settings.results_path / f"recording_{recording_id}.result.json", file_payload)
         return file_payload
 
     task_payload = _refresh_archive_analysis_result(None, latest_task.result, raw=raw_data)
     if task_payload is None:
         return file_payload
+    task_payload = (
+        await attach_unlinked_sap_preview_to_result(db, recording_id, task_payload)
+    ) or task_payload
 
     if task_payload != latest_task.result:
         latest_task.result = task_payload
@@ -1011,6 +1024,7 @@ class DingtalkArchiveRecordingOut(BaseModel):
     quality_reason: str | None = None
     error_message: str | None = None
     recording_id: str | None = None
+    is_split_hidden: bool = False
     visit_id: str | None = None
     linked_visit_ids: list[str] = Field(default_factory=list)
     linked_visit_order_refs: list[str] = Field(default_factory=list)
@@ -1097,6 +1111,7 @@ async def _attach_archive_recording_bindings(
             item["linked_visit_ids"] = []
             item["linked_visit_order_refs"] = []
             item["linked_customer_names"] = []
+            item["is_split_hidden"] = False
             item["has_visit_link"] = False
             item["needs_visit_link"] = bool(item.get("has_transcript")) and str(item.get("pipeline_status") or "") not in {"filtered", "failed"}
         return items
@@ -1130,6 +1145,19 @@ async def _attach_archive_recording_bindings(
     ).scalars().all()
 
     recording_ids = [recording.id for recording in recordings]
+    split_hidden_parent_ids: set[str] = set()
+    if recording_ids:
+        split_hidden_parent_ids = {
+            parent_id
+            for (parent_id,) in (
+                await db.execute(
+                    select(Recording.split_parent_recording_id).where(
+                        Recording.split_parent_recording_id.in_(recording_ids)
+                    )
+                )
+            ).all()
+            if parent_id
+        }
     transcribed_recording_ids: set[str] = set()
     if lightweight and recording_ids:
         transcribed_recording_ids = {
@@ -1300,6 +1328,7 @@ async def _attach_archive_recording_bindings(
             item["linked_visit_ids"] = []
             item["linked_visit_order_refs"] = []
             item["linked_customer_names"] = []
+            item["is_split_hidden"] = False
             item["has_visit_link"] = False
         else:
             binding = _serialize_archive_recording_binding(recording)
@@ -1353,6 +1382,7 @@ async def _attach_archive_recording_bindings(
             if recording_status == "filtered":
                 item["pipeline_status"] = recording_status
                 current_pipeline_status = recording_status
+            item["is_split_hidden"] = recording_status == "filtered" and recording.id in split_hidden_parent_ids
 
             if has_db_transcript:
                 item["has_transcript"] = True
@@ -2770,7 +2800,7 @@ async def get_audio_archive_sync_status(request: Request):
 async def _archive_managed_staff_ids_for_user(db: AsyncSession | None, user: User) -> set[str] | None:
     role = normalize_permission_role(user.role)
     staff_id = _clean_text(user.staff_id)
-    if role == "super_admin" and not staff_id:
+    if role in {"super_admin", "system_admin"}:
         return None
     if not staff_id:
         return set()

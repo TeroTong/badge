@@ -17,6 +17,7 @@ from smart_badge_api.api.data_scope import (
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user
+from smart_badge_api.api.hospital_scope import customer_hospital_condition, normalize_hospital_code, visit_hospital_condition
 from smart_badge_api.analysis.consultation_evaluation import normalize_consultation_dimension_name
 from smart_badge_api.core.permissions import normalize_permission_role, permission_role_level
 from smart_badge_api.db.default_data import ensure_tag_categories
@@ -180,7 +181,7 @@ def _clean_staff_id(value: str | None) -> str | None:
 async def _managed_staff_ids_for_user(db: AsyncSession, user) -> set[str] | None:
     role = normalize_permission_role(getattr(user, "role", None))
     staff_id = _clean_staff_id(getattr(user, "staff_id", None))
-    if role == "super_admin" and not staff_id:
+    if role in {"super_admin", "system_admin"}:
         return None
     if not staff_id:
         return set()
@@ -219,6 +220,7 @@ def _recording_customer_fast_id_stmt(
     *,
     visible_staff_ids: set[str] | None,
     consultant_id: str | None,
+    hospital_code: str | None,
     date_from: date | None,
     date_to: date | None,
 ):
@@ -226,6 +228,8 @@ def _recording_customer_fast_id_stmt(
     visit_filters = []
     if consultant_id:
         visit_filters.append(Visit.consultant_id == consultant_id)
+    if hospital_code:
+        visit_filters.append(visit_hospital_condition(hospital_code))
     if date_from:
         visit_filters.append(Visit.visit_date >= date_from)
     if date_to:
@@ -276,15 +280,136 @@ def _recording_customer_fast_id_stmt(
     )
 
 
+async def _visible_visit_customer_fast_id_stmt(
+    db: AsyncSession,
+    *,
+    visible_staff_ids: set[str] | None,
+    consultant_id: str | None,
+    hospital_code: str | None,
+    date_from: date | None,
+    date_to: date | None,
+):
+    visit_filters = []
+    if consultant_id:
+        visit_filters.append(Visit.consultant_id == consultant_id)
+    if hospital_code:
+        visit_filters.append(visit_hospital_condition(hospital_code))
+    if date_from:
+        visit_filters.append(Visit.visit_date >= date_from)
+    if date_to:
+        visit_filters.append(Visit.visit_date <= date_to)
+
+    def visit_row_select(*conditions):
+        return select(
+            Visit.customer_id.label("customer_id"),
+            Visit.visit_date.label("last_visit_at"),
+            Visit.created_at.label("last_visit_created_at"),
+        ).where(*conditions, *visit_filters)
+
+    if visible_staff_ids is None:
+        visible_visit_parts = [visit_row_select(true())]
+    elif not visible_staff_ids:
+        visible_visit_parts = [visit_row_select(false())]
+    else:
+        visible_visit_parts = [
+            visit_row_select(Visit.consultant_id.in_(visible_staff_ids)),
+            visit_row_select(Visit.doctor_id.in_(visible_staff_ids)),
+            select(
+                Visit.customer_id.label("customer_id"),
+                Visit.visit_date.label("last_visit_at"),
+                Visit.created_at.label("last_visit_created_at"),
+            )
+            .join(Recording, Recording.visit_id == Visit.id)
+            .where(Recording.staff_id.in_(visible_staff_ids), *visit_filters),
+            select(
+                Visit.customer_id.label("customer_id"),
+                Visit.visit_date.label("last_visit_at"),
+                Visit.created_at.label("last_visit_created_at"),
+            )
+            .select_from(RecordingVisitLink)
+            .join(Visit, Visit.id == RecordingVisitLink.visit_id)
+            .join(Recording, Recording.id == RecordingVisitLink.recording_id)
+            .where(Recording.staff_id.in_(visible_staff_ids), *visit_filters),
+        ]
+        staff_meta = (
+            await db.execute(
+                select(Staff.external_account, Staff.hospital_code).where(
+                    Staff.id.in_(visible_staff_ids),
+                    Staff.external_account.is_not(None),
+                    Staff.hospital_code.is_not(None),
+                )
+            )
+        ).all()
+        accounts_by_hospital: dict[str, list[str]] = {}
+        for external_account, hospital_code in staff_meta:
+            account = str(external_account or "").strip()
+            hospital = str(hospital_code or "").strip()
+            if not account or not hospital:
+                continue
+            accounts_by_hospital.setdefault(hospital, []).append(account)
+        for hospital_code, external_accounts in accounts_by_hospital.items():
+            visible_visit_parts.append(
+                select(
+                    Visit.customer_id.label("customer_id"),
+                    Visit.visit_date.label("last_visit_at"),
+                    Visit.created_at.label("last_visit_created_at"),
+                )
+                .join(VisitOrder, VisitOrder.dzdh == Visit.external_visit_order_no)
+                .where(
+                    Visit.external_visit_order_no.is_not(None),
+                    VisitOrder.jgbm == hospital_code,
+                    or_(
+                        VisitOrder.fzuer.in_(external_accounts),
+                        VisitOrder.d_fzuer.in_(external_accounts),
+                        VisitOrder.fzr_id_dq.in_(external_accounts),
+                        VisitOrder.advxc.in_(external_accounts),
+                        VisitOrder.assxc.in_(external_accounts),
+                        VisitOrder.advyq.in_(external_accounts),
+                        VisitOrder.yyuer.in_(external_accounts),
+                        VisitOrder.vipkf.in_(external_accounts),
+                        VisitOrder.d_vipkf.in_(external_accounts),
+                    ),
+                    *visit_filters,
+                )
+            )
+
+    visible_visits = union_all(*visible_visit_parts).subquery()
+    latest_visit_sub = (
+        select(
+            visible_visits.c.customer_id,
+            func.max(visible_visits.c.last_visit_at).label("last_visit_at"),
+            func.max(visible_visits.c.last_visit_created_at).label("last_visit_created_at"),
+        )
+        .where(visible_visits.c.customer_id.is_not(None))
+        .group_by(visible_visits.c.customer_id)
+        .subquery()
+    )
+    return (
+        select(
+            Customer.id.label("customer_id"),
+            latest_visit_sub.c.last_visit_at.label("last_visit_at"),
+        )
+        .join(latest_visit_sub, latest_visit_sub.c.customer_id == Customer.id)
+        .order_by(
+            latest_visit_sub.c.last_visit_at.desc().nulls_last(),
+            latest_visit_sub.c.last_visit_created_at.desc().nulls_last(),
+            Customer.id.asc(),
+        )
+    )
+
+
 def _fast_customer_visible_visit_rows(
     *,
     customer_ids: list[str],
     visible_staff_ids: set[str] | None,
+    hospital_code: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ):
     recording_scope = _recording_staff_scope_condition(visible_staff_ids)
     visit_filters = [Visit.customer_id.in_(customer_ids)]
+    if hospital_code:
+        visit_filters.append(visit_hospital_condition(hospital_code))
     if date_from:
         visit_filters.append(Visit.visit_date >= date_from)
     if date_to:
@@ -325,6 +450,7 @@ async def _fast_customer_visit_stats_map(
     db: AsyncSession,
     customer_ids: list[str],
     visible_staff_ids: set[str] | None,
+    hospital_code: str | None = None,
 ) -> dict[str, dict[str, int | float | None]]:
     if not customer_ids:
         return {}
@@ -332,6 +458,7 @@ async def _fast_customer_visit_stats_map(
     visible_visit_rows = _fast_customer_visible_visit_rows(
         customer_ids=customer_ids,
         visible_staff_ids=visible_staff_ids,
+        hospital_code=hospital_code,
     )
     dedup_visits = (
         select(
@@ -371,6 +498,7 @@ async def _fast_customer_latest_visit_map(
     customer_ids: list[str],
     visible_staff_ids: set[str] | None,
     *,
+    hospital_code: str | None = None,
     date_from: date | None,
     date_to: date | None,
 ) -> dict[str, datetime]:
@@ -380,6 +508,7 @@ async def _fast_customer_latest_visit_map(
     visible_visit_rows = _fast_customer_visible_visit_rows(
         customer_ids=customer_ids,
         visible_staff_ids=visible_staff_ids,
+        hospital_code=hospital_code,
         date_from=date_from,
         date_to=date_to,
     )
@@ -408,18 +537,22 @@ async def _fast_customer_recording_count_map(
     db: AsyncSession,
     customer_ids: list[str],
     visible_staff_ids: set[str] | None,
+    hospital_code: str | None = None,
 ) -> dict[str, int]:
     if not customer_ids:
         return {}
 
     recording_scope = _recording_staff_scope_condition(visible_staff_ids)
+    visit_filters = [Visit.customer_id.in_(customer_ids)]
+    if hospital_code:
+        visit_filters.append(visit_hospital_condition(hospital_code))
     direct_recordings = (
         select(
             Visit.customer_id.label("customer_id"),
             Recording.id.label("recording_id"),
         )
         .join(Visit, Visit.id == Recording.visit_id)
-        .where(Visit.customer_id.in_(customer_ids), recording_scope)
+        .where(recording_scope, *visit_filters)
     )
     linked_recordings = (
         select(
@@ -428,7 +561,7 @@ async def _fast_customer_recording_count_map(
         )
         .join(Visit, Visit.id == RecordingVisitLink.visit_id)
         .join(Recording, Recording.id == RecordingVisitLink.recording_id)
-        .where(Visit.customer_id.in_(customer_ids), recording_scope)
+        .where(recording_scope, *visit_filters)
     )
     recording_rows = union_all(direct_recordings, linked_recordings).subquery()
     rows = (
@@ -465,9 +598,9 @@ async def _customer_type_map(
                 Visit.visit_date,
                 Visit.created_at,
                 VisitOrder.jgbm,
-                VisitOrder.kutyp_dq,
-                VisitOrder.kutyp_dq_txt,
-                VisitOrder.khlx,
+                VisitOrder.kut30_dq,
+                VisitOrder.kut30_dq_txt,
+                VisitOrder.khlx_t30,
                 VisitOrder.sjrq,
                 VisitOrder.crtdt,
                 VisitOrder.crttm,
@@ -483,15 +616,15 @@ async def _customer_type_map(
         visit_date,
         visit_created_at,
         institution_code,
-        kutyp_dq,
-        kutyp_dq_txt,
-        khlx,
+        kut30_dq,
+        kut30_dq_txt,
+        khlx_t30,
         order_sjrq,
         order_crtdt,
         order_crttm,
     ) in rows:
-        code = _normalize_customer_type_code(kutyp_dq) or _normalize_customer_type_code(khlx)
-        label = _normalize_customer_type_label(code, kutyp_dq_txt)
+        code = _normalize_customer_type_code(kut30_dq) or _normalize_customer_type_code(khlx_t30)
+        label = _normalize_customer_type_label(code, kut30_dq_txt or khlx_t30)
         if not label:
             continue
         payload = {
@@ -540,11 +673,13 @@ def _won_count_subquery(scope):
     )
 
 
-def _last_visit_subquery(scope, *, date_from: date | None = None, date_to: date | None = None):
+def _last_visit_subquery(scope, *, hospital_code: str | None = None, date_from: date | None = None, date_to: date | None = None):
     conditions = [
         visit_scope_condition(scope),
         _visit_has_visible_recordings_condition(scope),
     ]
+    if hospital_code:
+        conditions.append(visit_hospital_condition(hospital_code))
     if date_from:
         conditions.append(Visit.visit_date >= date_from)
     if date_to:
@@ -652,10 +787,18 @@ async def _customer_visit_stats_map(
     db: AsyncSession,
     customer_ids: list[str],
     scope,
+    hospital_code: str | None = None,
 ) -> dict[str, dict[str, int | float | None]]:
     if not customer_ids:
         return {}
 
+    conditions = [
+        Visit.customer_id.in_(customer_ids),
+        visit_scope_condition(scope),
+        _visit_has_visible_recordings_condition(scope),
+    ]
+    if hospital_code:
+        conditions.append(visit_hospital_condition(hospital_code))
     rows = (
         await db.execute(
             select(
@@ -664,11 +807,7 @@ async def _customer_visit_stats_map(
                 func.sum(case((Visit.status == "closed_won", 1), else_=0)).label("closed_won_count"),
                 func.sum(Visit.deposit_principal).label("total_deposit_principal"),
             )
-            .where(
-                Visit.customer_id.in_(customer_ids),
-                visit_scope_condition(scope),
-                _visit_has_visible_recordings_condition(scope),
-            )
+            .where(*conditions)
             .group_by(Visit.customer_id)
         )
     ).all()
@@ -688,10 +827,14 @@ async def _customer_recording_count_map(
     db: AsyncSession,
     customer_ids: list[str],
     scope,
+    hospital_code: str | None = None,
 ) -> dict[str, int]:
     if not customer_ids:
         return {}
 
+    visit_filters = [Visit.customer_id.in_(customer_ids)]
+    if hospital_code:
+        visit_filters.append(visit_hospital_condition(hospital_code))
     direct_recordings = (
         select(
             Visit.customer_id.label("customer_id"),
@@ -699,9 +842,9 @@ async def _customer_recording_count_map(
         )
         .join(Visit, Visit.id == Recording.visit_id)
         .where(
-            Visit.customer_id.in_(customer_ids),
             visit_scope_condition(scope),
             recording_scope_condition(scope),
+            *visit_filters,
         )
     )
 
@@ -713,9 +856,9 @@ async def _customer_recording_count_map(
         .join(Visit, Visit.id == RecordingVisitLink.visit_id)
         .join(Recording, Recording.id == RecordingVisitLink.recording_id)
         .where(
-            Visit.customer_id.in_(customer_ids),
             visit_scope_condition(scope),
             recording_scope_condition(scope),
+            *visit_filters,
         )
     )
 
@@ -1239,6 +1382,7 @@ async def list_customers(
     has_visits: bool | None = Query(None),
     has_recordings: bool | None = Query(None),
     has_positive_recharge: bool | None = Query(None),
+    hospital_code: str | None = Query(None),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     include_date_summaries: bool = Query(True),
@@ -1252,11 +1396,27 @@ async def list_customers(
     use_fast_page = fast_page is True
     include_summaries = include_date_summaries is not False and not use_fast_page
     has_date_filter = bool(date_from or date_to)
+    requested_hospital_code = normalize_hospital_code(hospital_code)
 
+    # Performance: the recording-based fast id stmt is semantically equivalent
+    # to the heavy scope-aware id stmt for users with a staff_id, because
+    # `customer_scope_condition` already requires the customer to have at
+    # least one visible visit (= visit with a recording reachable through
+    # the staff management chain). We previously gated it on `fast_page`
+    # only because it skipped COUNT(*); we now also use it when COUNT is
+    # required (the fast id stmt is still ~50x cheaper to count).
+    # Fast path is only safe when caller explicitly asks for customers that
+    # have recordings — it otherwise hides customers reachable via
+    # consultant/doctor relations that have no recordings yet.
     use_recording_fast_path = (
-        use_fast_page
-        and not include_summaries
-        and has_recordings is not False
+        not include_summaries
+        and has_recordings is True
+        and has_visits is None
+        and has_positive_recharge is None
+    )
+    use_visible_visit_fast_path = (
+        not include_summaries
+        and has_recordings is None
         and has_visits is None
         and has_positive_recharge is None
     )
@@ -1267,11 +1427,27 @@ async def list_customers(
         id_stmt = _recording_customer_fast_id_stmt(
             visible_staff_ids=fast_visible_staff_ids,
             consultant_id=consultant_id,
+            hospital_code=requested_hospital_code,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    elif use_visible_visit_fast_path:
+        visible_staff_ids = await _managed_staff_ids_for_user(db, current_user)
+        id_stmt = await _visible_visit_customer_fast_id_stmt(
+            db,
+            visible_staff_ids=visible_staff_ids,
+            consultant_id=consultant_id,
+            hospital_code=requested_hospital_code,
             date_from=date_from,
             date_to=date_to,
         )
     else:
-        last_visit_sub = _last_visit_subquery(scope, date_from=date_from, date_to=date_to)
+        last_visit_sub = _last_visit_subquery(
+            scope,
+            hospital_code=requested_hospital_code,
+            date_from=date_from,
+            date_to=date_to,
+        )
         scoped_recordings_exists = _customer_has_scoped_recordings(scope)
         scoped_visits_exists = _customer_has_scoped_visits(scope)
         positive_recharge_exists = _customer_has_positive_recharge(scope)
@@ -1289,10 +1465,12 @@ async def list_customers(
             id_stmt = id_stmt.where(last_visit_sub.c.last_visit_at.is_not(None))
         else:
             id_stmt = id_stmt.where(customer_scope_condition(scope))
+        if requested_hospital_code:
+            id_stmt = id_stmt.where(customer_hospital_condition(requested_hospital_code))
 
     if is_active is not None:
         id_stmt = id_stmt.where(Customer.is_active == is_active)
-    if consultant_id and not use_recording_fast_path:
+    if consultant_id and not (use_recording_fast_path or use_visible_visit_fast_path):
         id_stmt = id_stmt.where(
             select(Visit.id)
             .where(
@@ -1315,9 +1493,9 @@ async def list_customers(
         id_stmt = id_stmt.where(positive_recharge_exists)
     if has_positive_recharge is False and not use_recording_fast_path:
         id_stmt = id_stmt.where(~positive_recharge_exists)
-    if date_from and not use_recording_fast_path:
+    if date_from and not (use_recording_fast_path or use_visible_visit_fast_path):
         id_stmt = id_stmt.where(last_visit_sub.c.last_visit_at >= date_from)
-    if date_to and not use_recording_fast_path:
+    if date_to and not (use_recording_fast_path or use_visible_visit_fast_path):
         id_stmt = id_stmt.where(last_visit_sub.c.last_visit_at <= date_to)
 
     if keyword:
@@ -1364,22 +1542,35 @@ async def list_customers(
         ).scalars().all()
         customers_by_id = {customer.id: customer for customer in customers}
         if use_recording_fast_path:
-            visit_stats_map = await _fast_customer_visit_stats_map(db, customer_ids, fast_visible_staff_ids)
+            visit_stats_map = await _fast_customer_visit_stats_map(
+                db,
+                customer_ids,
+                fast_visible_staff_ids,
+                hospital_code=requested_hospital_code,
+            )
             latest_visit_map = await _fast_customer_latest_visit_map(
                 db,
                 customer_ids,
                 fast_visible_staff_ids,
+                hospital_code=requested_hospital_code,
                 date_from=date_from,
                 date_to=date_to,
             )
-            recording_count_map = await _fast_customer_recording_count_map(db, customer_ids, fast_visible_staff_ids)
+            recording_count_map = await _fast_customer_recording_count_map(
+                db,
+                customer_ids,
+                fast_visible_staff_ids,
+                hospital_code=requested_hospital_code,
+            )
         else:
-            visit_stats_map = await _customer_visit_stats_map(db, customer_ids, scope)
+            visit_stats_map = await _customer_visit_stats_map(db, customer_ids, scope, hospital_code=requested_hospital_code)
             latest_visit_conditions = [
                 Visit.customer_id.in_(customer_ids),
                 visit_scope_condition(scope),
                 _visit_has_visible_recordings_condition(scope),
             ]
+            if requested_hospital_code:
+                latest_visit_conditions.append(visit_hospital_condition(requested_hospital_code))
             if date_from:
                 latest_visit_conditions.append(Visit.visit_date >= date_from)
             if date_to:
@@ -1398,7 +1589,7 @@ async def list_customers(
                 current = latest_visit_map.get(customer_id)
                 if current is None or _timestamp_key(resolved_at) > _timestamp_key(current):
                     latest_visit_map[customer_id] = resolved_at
-            recording_count_map = await _customer_recording_count_map(db, customer_ids, scope)
+            recording_count_map = await _customer_recording_count_map(db, customer_ids, scope, hospital_code=requested_hospital_code)
     customer_type_map = {} if use_fast_page else await _customer_type_map(db, customer_ids, scope)
 
     results = []
@@ -2218,8 +2409,8 @@ async def get_customer_visit_orders(
             visit_date=primary.sjrq or primary.jzrq,
             consultant_name=_first_non_empty(primary.advxc_long, primary.advyq_name),
             status_text=_first_non_empty(primary.jcsta_txt, primary.dzsta_txt),
-            customer_type=primary.khlx,
-            customer_type_t30=primary.khlx_t30,
+            customer_type=_first_non_empty(primary.kut30_dq_txt, primary.khlx_t30),
+            customer_type_t30=_first_non_empty(primary.kut30_dq_txt, primary.khlx_t30),
             member_level=primary.kulvl_dq,
             remark=_first_non_empty(primary.remark_dz),
             items=sub_items if len(sub_items) > 1 else [],

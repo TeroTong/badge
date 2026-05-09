@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     wecom_corp_id: str = ""
     wecom_agent_id: str = ""
     wecom_agent_secret: str = ""
+    wecom_callback_token: str = ""
+    wecom_callback_aes_key: str = ""
     wecom_api_base_url: str = "https://qyapi.weixin.qq.com"
     wecom_oauth_base_url: str = "https://open.weixin.qq.com"
     wecom_default_redirect_path: str = "/wecom/badge"
@@ -64,9 +66,9 @@ class Settings(BaseSettings):
 
     database_url: str = f"sqlite+aiosqlite:///{(API_ROOT / 'smart_badge.db').as_posix()}"
     database_echo: bool = False
-    database_pool_size: int = 10
-    database_max_overflow: int = 20
-    database_pool_timeout_seconds: float = 10.0
+    database_pool_size: int = 20
+    database_max_overflow: int = 40
+    database_pool_timeout_seconds: float = 30.0
     database_pool_recycle_seconds: int = 1800
     database_pool_pre_ping: bool = True
     hot_read_cache_enabled: bool = True
@@ -116,6 +118,7 @@ class Settings(BaseSettings):
     sap_rfc_auto_push_retry_delay_seconds: int = 1800
     sap_rfc_auto_push_stale_seconds: int = 1800
     sap_rfc_auto_push_limit_per_run: int = 20
+    sap_rfc_summary_disabled_hospital_codes: str = ""
     sap_rfc_use_yybm_as_jgbm: bool = True
     sap_rfc_mode: str = "U"
     sap_rfc_override_kunr: str = "70000088"

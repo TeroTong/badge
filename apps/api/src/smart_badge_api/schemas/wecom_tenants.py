@@ -11,6 +11,8 @@ class WecomTenantCreate(BaseModel):
     corp_id: str | None = None
     agent_id: str | None = None
     agent_secret: str | None = None
+    callback_token: str | None = None
+    callback_aes_key: str | None = None
     frontend_url: str | None = None
     default_hospital_code: str
     default_hospital_name: str | None = None
@@ -18,6 +20,7 @@ class WecomTenantCreate(BaseModel):
     sap_summary_template_version: str | None = None
     sap_summary_template: str | None = None
     sap_summary_prompt: str | None = None
+    sap_summary_enabled: bool = True
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool = False
     is_active: bool = True
@@ -29,6 +32,8 @@ class WecomTenantUpdate(BaseModel):
     corp_id: str | None = None
     agent_id: str | None = None
     agent_secret: str | None = None
+    callback_token: str | None = None
+    callback_aes_key: str | None = None
     frontend_url: str | None = None
     default_hospital_code: str | None = None
     default_hospital_name: str | None = None
@@ -36,6 +41,7 @@ class WecomTenantUpdate(BaseModel):
     sap_summary_template_version: str | None = None
     sap_summary_template: str | None = None
     sap_summary_prompt: str | None = None
+    sap_summary_enabled: bool | None = None
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool | None = None
     is_active: bool | None = None
@@ -48,12 +54,14 @@ class WecomTenantOut(BaseModel):
     corp_id: str | None
     agent_id: str | None
     frontend_url: str | None
+    callback_configured: bool
     default_hospital_code: str | None
     default_hospital_name: str | None
     sap_summary_template_name: str | None
     sap_summary_template_version: str | None
     sap_summary_template: str | None
     sap_summary_prompt: str | None
+    sap_summary_enabled: bool
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool
     is_active: bool

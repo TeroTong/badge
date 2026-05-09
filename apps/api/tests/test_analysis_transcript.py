@@ -1928,6 +1928,101 @@ def test_main_fact_floor_requires_sparse_medical_business_scene() -> None:
     assert pipeline._allows_main_fact_floor(sparse_medical_segments) is True
 
 
+def test_analyze_transcript_backfills_outer_c_primary_demand_when_indication_exists(tmp_path, monkeypatch) -> None:
+    transcript_path = tmp_path / "sample_outer_c_primary_demand.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "payload": {
+                    "transcribeResult": [
+                        {
+                            "role": "badge_owner",
+                            "speaker_label": "李宇晴（工牌本人）",
+                            "begin": 0,
+                            "end": 5_000,
+                            "text": "你好，医生帮你看一下。",
+                        },
+                        {
+                            "role": "doctor",
+                            "speaker_label": "医生",
+                            "begin": 20_000,
+                            "end": 25_000,
+                            "text": "你是瑞德喜打的框外C和眉尾。",
+                        },
+                        {
+                            "role": "primary_customer",
+                            "speaker_label": "主客户",
+                            "begin": 77_000,
+                            "end": 90_000,
+                            "text": "但是现在目前我的感受就是，因为之前我和你面诊的时候，我的主诉求是想打外框C。",
+                        },
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_analyze_single",
+        lambda *args, **kwargs: {
+            "customer_primary_demands": {"summary": "", "items": []},
+            "standardized_indications": {
+                "summary": "识别出1项适应症：塑美（眶外C线（小O））",
+                "items": [
+                    {
+                        "department_code": "Y2",
+                        "department_name": "微创",
+                        "indication_code": "SYZ2001",
+                        "indication_name": "塑美",
+                        "body_part_code": "BW2019",
+                        "body_part_name": "眶外C线（小O）",
+                        "evidence": "[00:20] 医生: 你是瑞德喜打的框外C和眉尾。",
+                    }
+                ],
+            },
+            "consultation_result": {
+                "chief_complaint_and_indications": {
+                    "summary": "识别出1项适应症：塑美（眶外C线（小O））",
+                    "primary_demands": [],
+                    "standardized_indications": ["微创（Y2）｜塑美（SYZ2001）｜眶外C线（小O）（BW2019）"],
+                }
+            },
+            "consumption_intent": {"budget": None, "willingness": "未明确", "decision_factors": [], "evidence": []},
+            "staff_recommendations": {"summary": "", "items": []},
+            "customer_demands": {"focus_areas": [], "expectation": {"turning_points": []}},
+            "customer_concerns": {"summary": "", "items": []},
+            "customer_profile": {"tags": []},
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "rebuild_consultation_evaluation",
+        lambda *args, **kwargs: {"overall_summary": "", "dimensions": []},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "rebuild_consultation_process_evaluation",
+        lambda *args, **kwargs: {
+            "total_score": 0,
+            "max_total_score": 9,
+            "overall_score": 0,
+            "overall_summary": "",
+            "sections": [],
+        },
+    )
+
+    result = pipeline.analyze_transcript(transcript_path)
+    result_dict = result.model_dump(mode="json")
+    demand_texts = [item["demand"] for item in result_dict["customer_primary_demands"]["items"]]
+
+    assert demand_texts == ["调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调"]
+    assert result_dict["customer_primary_demands"]["summary"] == "调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调"
+    assert result_dict["consultation_result"]["chief_complaint_and_indications"]["primary_demands"] == demand_texts
+
+
 def test_sanitize_drops_face_wrinkle_indication_from_prior_botulinum_history() -> None:
     raw = {
         "payload": {

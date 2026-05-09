@@ -15,6 +15,7 @@ from smart_badge_api.api.data_scope import (
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user
+from smart_badge_api.api.hospital_scope import normalize_hospital_code, visit_hospital_condition
 from smart_badge_api.core.permissions import normalize_permission_role
 from smart_badge_api.customer_type import (
     customer_type_from_visit_order,
@@ -74,6 +75,8 @@ async def _resolve_visible_visit_ids_for_scope(
 
     Returns None only when there's no staff_id (caller falls back to EXISTS).
     """
+    if normalize_permission_role(scope.role) in {"super_admin", "system_admin"}:
+        return None
     if not scope.staff_id:
         return None
     managed_ids = await _resolve_managed_staff_ids_for_scope(db, scope)
@@ -129,6 +132,8 @@ async def _resolve_visible_visit_ids_for_scope(
 
 
 async def _resolve_managed_staff_ids_for_scope(db: AsyncSession, scope) -> list[str]:
+    if normalize_permission_role(scope.role) in {"super_admin", "system_admin"}:
+        return []
     if not scope.staff_id:
         return []
     if scope.role == "single_staff":
@@ -170,8 +175,8 @@ def _visit_order_summary_subquery():
         select(
             VisitOrder.dzdh.label("dzdh"),
             func.max(VisitOrder.remark_dz).label("project_hint"),
-            func.max(VisitOrder.kutyp_dq).label("customer_type_code"),
-            func.max(VisitOrder.kutyp_dq_txt).label("customer_type_text"),
+            func.max(VisitOrder.kut30_dq).label("customer_type_code"),
+            func.max(VisitOrder.kut30_dq_txt).label("customer_type_text"),
         )
         .group_by(VisitOrder.dzdh)
         .subquery()
@@ -495,6 +500,7 @@ async def list_visits(
     consultant_id: str | None = Query(None),
     participant_staff_id: str | None = Query(None),
     source: str | None = Query(None),
+    hospital_code: str | None = Query(None),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     has_recordings: bool | None = Query(None),
@@ -511,6 +517,7 @@ async def list_visits(
     consultant_id = consultant_id if isinstance(consultant_id, str) else None
     participant_staff_id = participant_staff_id if isinstance(participant_staff_id, str) else None
     source = source if isinstance(source, str) else None
+    requested_hospital_code = normalize_hospital_code(hospital_code)
     scope = await build_permission_scope(current_user)
     visible_visit_ids = await _resolve_visible_visit_ids_for_scope(db, scope)
     recording_count_sub = _recording_count_subquery(scope)
@@ -570,6 +577,8 @@ async def list_visits(
         )
     if source:
         stmt = stmt.where(Customer.source == source)
+    if requested_hospital_code:
+        stmt = stmt.where(visit_hospital_condition(requested_hospital_code))
     if date_from:
         stmt = stmt.where(Visit.visit_date >= date_from)
     if date_to:
@@ -920,8 +929,8 @@ async def get_visit(
             await db.execute(
                 select(
                     func.max(VisitOrder.remark_dz).label("project_hint"),
-                    func.max(VisitOrder.kutyp_dq).label("customer_type_code"),
-                    func.max(VisitOrder.kutyp_dq_txt).label("customer_type_text"),
+                    func.max(VisitOrder.kut30_dq).label("customer_type_code"),
+                    func.max(VisitOrder.kut30_dq_txt).label("customer_type_text"),
                 ).where(
                     VisitOrder.dzdh == visit.external_visit_order_no,
                     visit_order_scope_condition(scope),

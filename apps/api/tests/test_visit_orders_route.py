@@ -42,8 +42,10 @@ def test_build_daily_visit_order_items_includes_companion_visits() -> None:
         dzseg="1",
         kunr="60504241",
         ninam="玲",
-        kutyp_dq="V",
-        kutyp_dq_txt="会员/老客",
+        kutyp_dq="Q",
+        kutyp_dq_txt="潜客/新客",
+        kut30_dq="V",
+        kut30_dq_txt="会员/老客",
         remark_dz="同行72175385",
     )
     companion_order = VisitOrder(

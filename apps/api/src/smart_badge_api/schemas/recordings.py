@@ -121,6 +121,7 @@ class ArchiveRecordingOut(BaseModel):
     quality_reason: str | None = None
     error_message: str | None = None
     recording_id: str | None = None
+    is_split_hidden: bool = False
     visit_id: str | None = None
     linked_visit_ids: list[str] = []
     linked_visit_order_refs: list[str] = []

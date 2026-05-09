@@ -65,10 +65,34 @@ _PRIMARY_DEMAND_SEED_HINTS: tuple[tuple[str, str | None, tuple[str, ...]], ...] 
 )
 
 _PRIMARY_DEMAND_ISSUE_HINTS: tuple[tuple[str, str | None, tuple[str, ...]], ...] = (
+    (
+        "调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调",
+        "眶外C线/眉尾",
+        (
+            "眶外C",
+            "眶外c",
+            "框外C",
+            "框外c",
+            "外框C",
+            "外框c",
+            "髋外C",
+            "髋外c",
+            "外科C",
+            "外科c",
+            "外方C",
+            "外方c",
+            "外方斜",
+            "眉尾",
+            "眉弓",
+            "颞区",
+        ),
+    ),
     ("改善泪沟/眼周凹陷，希望恢复平整自然", "眼部", ("泪沟", "眼下凹", "眼下凹陷", "眼眶", "眼眶子", "卧蚕")),
     ("改善鼻基底/中面部衔接，希望恢复平整自然", "鼻基底/面中", ("鼻基底", "鼻翼基底", "鼻子底", "鼻底", "中面部", "面中", "八字纹")),
     ("改善口周/唇部状态，希望自然轻度改善", "口周/唇部", ("口周", "嘴唇", "嘴巴", "唇部", "嘴角", "口下", "鼻基底", "仙人掌", "唇纹", "干瘪", "馒化")),
     ("改善面部松弛下垂", "面部", ("松弛下垂", "松弛", "下垂", "松垮", "往下走", "脸很垮", "脸也很垮", "脸垮", "很垮", "老态", "年轻")),
+    ("想做拉皮修复，改善既往拉皮效果不佳", "面部", ("拉皮修复", "想要做修复", "做修复", "没有拉到", "又垮了", "又垮")),
+    ("改善面部松弛/法令纹嘴角下垂，希望做拉皮提升", "面部", ("小拉皮", "拉皮", "面部提升", "提升手术", "法令纹", "嘴角下垂")),
     ("改善面部纹路和细纹", "面部", ("法令纹", "皱纹", "纹路", "干纹", "细纹", "薇旖美")),
     ("改善单眼皮，想让眼睛更有神", "眼部", ("单眼皮", "双眼皮", "眼睛没精神", "眼睛无神")),
     ("改善眼袋泪沟疲态", "眼部", ("眼袋", "泪沟")),
@@ -135,6 +159,8 @@ _PLAN_CONTEXT_PRIMARY_DEMAND_KEYWORDS = (
 )
 
 _BODY_PART_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("眶外C线（小O）", ("眶外C", "眶外c", "框外C", "框外c", "外框C", "外框c", "髋外C", "髋外c", "外科C", "外科c", "外方C", "外方c", "外方斜", "眉尾")),
+    ("颞区（大O）", ("颞区", "太阳穴", "眉弓")),
     ("面部", ("面部", "中面部", "面中", "苹果肌", "法令纹", "嘴角囊带", "鼻基底", "鼻翼基底", "八字纹", "外轮廓线", "全脸", "脸")),
     ("眼部", ("眼部", "眼尾", "眼周", "眼睛", "双眼皮", "单眼皮", "泪沟", "卧蚕", "眼袋", "眶周", "眉下", "上眼睑", "眼型", "美杜莎")),
     ("鼻部", ("鼻部", "鼻子", "鼻综合", "山根", "鼻头", "鼻翼")),
@@ -243,7 +269,7 @@ _INDICATION_HINTS: tuple[dict[str, Any], ...] = (
         "department_name": "外科",
         "indication_name": "双眼皮",
         "default_body_part": "眼部",
-        "keywords": ("双眼皮", "单眼皮", "全切", "埋线", "开眼角", "三点定位", "眼型", "美杜莎"),
+        "keywords": ("双眼皮", "重睑", "全切重睑", "单眼皮", "全切", "埋线", "开眼角", "三点定位", "眼型", "美杜莎", "大眼综合", "去皮去脂", "肌力矫正"),
     },
     {
         "department_name": "外科",
@@ -297,6 +323,9 @@ _INDICATION_HINTS: tuple[dict[str, Any], ...] = (
         "default_body_part": "唇部（D）",
         "keywords": (
             "卧蚕", "泪沟填充", "泪沟注射", "眼周填充", "眼下填充", "嗨体", "福曼",
+            "眶外C线", "眶外C", "眶外c", "框外C", "框外c", "外框C", "外框c",
+            "髋外C", "髋外c", "外科C", "外科c", "外方C", "外方c", "外方斜",
+            "眉尾", "眉弓", "颞区",
             "瘦肩", "肩颈", "斜方肌", "斜方肌肉毒", "肉毒瘦肩", "瘦肩针",
             "口周", "嘴唇", "唇部", "唇形", "丰唇", "唇珠", "唇纹", "嘴角", "口下",
             "仙人掌", "注射嘴唇", "溶解", "溶解酶",
@@ -336,7 +365,7 @@ _INDICATION_HINTS: tuple[dict[str, Any], ...] = (
         "department_name": "外科",
         "indication_name": "隆胸",
         "default_body_part": "胸部",
-        "keywords": ("隆胸", "假体隆胸", "假体丰胸", "自体脂肪丰胸", "丰胸"),
+        "keywords": ("隆胸", "假体隆胸", "假体丰胸", "自体脂肪丰胸", "丰胸", "曼托", "假体更换", "假体置换", "更换假体", "乳房假体", "光面圆形"),
     },
     {
         "department_name": "外科",
@@ -2065,6 +2094,23 @@ def _append_standardized_indication_item(
     return False
 
 
+def _primary_demand_has_high_confidence_indication_phrase(demand_text: str) -> bool:
+    compact = re.sub(r"\s+", "", _clean_text(demand_text))
+    if not compact:
+        return False
+    high_confidence_terms = (
+        "全切重睑",
+        "大眼综合",
+        "去皮去脂",
+        "肌力矫正",
+        "曼托光面圆形假体更换",
+        "假体更换",
+        "假体置换",
+        "童颜水光",
+    )
+    return any(term in compact for term in high_confidence_terms)
+
+
 def _standardized_indication_items_from_primary_demands(
     primary_demand_payload: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -2084,7 +2130,11 @@ def _standardized_indication_items_from_primary_demands(
         evidence = _clean_text(demand_item.get("evidence"))
         if not demand_text or not evidence:
             continue
-        if not _looks_like_primary_demand_evidence(evidence, demand=demand_text, allow_weak_staff_inference=True):
+        if not _looks_like_primary_demand_evidence(
+            evidence,
+            demand=demand_text,
+            allow_weak_staff_inference=True,
+        ) and not _primary_demand_has_high_confidence_indication_phrase(demand_text):
             continue
 
         context = f"{demand_text} {body_part} {evidence}"
@@ -5052,6 +5102,10 @@ def _looks_like_prior_treatment_only_statement(text: str, keywords: tuple[str, .
         "这次想",
         "今天想",
         "还想",
+        "想要做",
+        "想要修复",
+        "想要调整",
+        "要做修复",
         "想改善",
         "想修复",
         "想调整",
@@ -5112,14 +5166,16 @@ def _looks_like_eyelid_shape_indication_statement(text: str) -> bool:
     has_strong_double_eyelid_repair_intent = bool(
         re.search(r"(?:想|要|考虑|打算|准备).{0,8}(?:做|割|修复|改善|调整).{0,8}双眼皮", compact)
         or re.search(r"双眼皮.{0,10}(?:修复|重做|重新做|变宽|变窄|塌陷|肉条|不满意|三角眼|手术)", compact)
+        or any(keyword in compact for keyword in ("全切重睑", "大眼综合", "去皮去脂", "肌力矫正"))
     )
     if has_negated_double_eyelid and not has_strong_double_eyelid_repair_intent:
         return False
     has_positive_double_eyelid_action = bool(
         re.search(r"(?:想做|要做|考虑做|打算做|准备做|想割|要割|全切|埋线|修复|改善|调整).{0,8}双眼皮", compact)
         or re.search(r"双眼皮.{0,10}(?:修复|变宽|变窄|手术|效果|好吗|怎么样|多少钱|价格|恢复|方案|适合|可以)", compact)
+        or any(keyword in compact for keyword in ("全切重睑", "大眼综合", "去皮去脂", "肌力矫正"))
     )
-    if "双眼皮" in normalized and has_positive_double_eyelid_action:
+    if any(keyword in normalized for keyword in ("双眼皮", "重睑", "大眼综合", "去皮去脂", "肌力矫正")) and has_positive_double_eyelid_action:
         return True
     if any(keyword in normalized for keyword in ("单眼皮", "内双")):
         return any(
@@ -5189,12 +5245,17 @@ def _primary_demand_required_evidence_groups(demand: str) -> tuple[tuple[str, ..
         groups.append(("泪沟", "眼下凹", "眼下凹陷", "凹陷", "凹的地方"))
     if any(keyword in compact for keyword in ("眼周凹陷", "眼眶空", "眼眶子空", "眼眶凹", "卧蚕")):
         groups.append(("眼周", "眼眶", "眼眶子", "卧蚕", "泪沟", "眼下凹", "凹陷", "空"))
+    if any(keyword in compact for keyword in ("眶外C", "框外C", "外框C", "髋外C", "外科C", "外方C", "外方斜", "眉尾", "眉弓", "颞区")):
+        groups.append(("眶外C", "眶外c", "框外C", "框外c", "外框C", "外框c", "髋外C", "髋外c", "外科C", "外科c", "外方C", "外方c", "外方斜", "眉尾", "眉弓", "颞区"))
     if any(keyword in compact for keyword in ("疲态", "疲惫", "没精神", "倦容")):
         groups.append(("疲态", "疲惫", "没精神", "倦容", "显老", "憔悴"))
     if "有神" in compact:
         groups.append(("有神", "没精神", "无神"))
     if any(keyword in compact for keyword in ("松弛", "下垂", "下垮", "脸垮", "老态", "紧致")):
         groups.append(("松弛", "下垂", "松垮", "下垮", "脸很垮", "脸也很垮", "脸垮", "很垮", "老态", "紧致"))
+    if "拉皮修复" in compact or ("拉皮" in compact and "修复" in compact):
+        groups.append(("拉皮", "小拉皮", "大拉皮"))
+        groups.append(("修复", "没效果", "没有拉到", "又垮", "垮了"))
     if "鼻" in compact:
         groups.append(("鼻子", "鼻部", "鼻综合", "隆鼻", "山根", "鼻头", "鼻翼", "鼻孔", "鼻型", "鼻基底", "鼻翼基底", "鼻子底", "鼻底"))
     if any(keyword in compact for keyword in ("中面部", "面中", "八字纹", "衔接")):
@@ -5421,7 +5482,23 @@ def _looks_like_dryness_indication_statement(text: str) -> bool:
     if not compact:
         return False
     dry_cues = ("干燥", "缺水", "补水", "保湿", "水润", "又干", "皮肤干", "比较干", "确实很干")
-    if any(keyword in compact for keyword in ("水光", "水光针", "童颜水光")) and not any(cue in compact for cue in dry_cues):
+    waterlight_terms = ("水光", "水光针", "童颜水光")
+    waterlight_intent_cues = (
+        "做水光",
+        "做个水光",
+        "做一下水光",
+        "打水光",
+        "打个水光",
+        "打这个基础水光",
+        "做童颜水光",
+        "打童颜水光",
+        "水光方案",
+        "水光项目",
+        "补水水光",
+    )
+    if any(keyword in compact for keyword in waterlight_terms) and any(cue in compact for cue in waterlight_intent_cues):
+        return True
+    if any(keyword in compact for keyword in waterlight_terms) and not any(cue in compact for cue in dry_cues):
         return False
     return any(cue in compact for cue in dry_cues)
 
@@ -6074,6 +6151,79 @@ def _sanitize_customer_primary_demands(result_dict: dict[str, Any], *, raw: dict
     result_dict["customer_primary_demands"] = payload
     _sync_chief_complaint_primary_demands(result_dict)
     return True
+
+
+def _backfill_empty_customer_primary_demands(result_dict: dict[str, Any], *, raw: dict[str, Any]) -> bool:
+    payload = _as_dict(result_dict.get("customer_primary_demands"))
+    if _as_list(payload.get("items")):
+        return False
+    segments = _consultation_segments(raw)
+    if not segments:
+        return False
+
+    backfilled_payload: dict[str, Any] = {"items": []}
+    if not _backfill_primary_demands(backfilled_payload, segments=segments):
+        lift_repair_evidence = _find_lift_repair_primary_demand_evidence(segments)
+        if not lift_repair_evidence:
+            return False
+        backfilled_payload["items"] = [
+            {
+                "priority": 1,
+                "demand": "想做拉皮修复，改善既往拉皮效果不佳",
+                "body_part": "面部",
+                "evidence": lift_repair_evidence,
+            }
+        ]
+    backfilled_items = [
+        item
+        for item in _as_list(backfilled_payload.get("items"))
+        if isinstance(item, dict) and _looks_like_primary_demand_evidence(
+            _clean_text(item.get("evidence")),
+            demand=_clean_text(item.get("demand")),
+        )
+    ]
+    if not backfilled_items:
+        lift_repair_evidence = _find_lift_repair_primary_demand_evidence(segments)
+        if not lift_repair_evidence:
+            return False
+        backfilled_items = [
+            {
+                "priority": 1,
+                "demand": "想做拉皮修复，改善既往拉皮效果不佳",
+                "body_part": "面部",
+                "evidence": lift_repair_evidence,
+            }
+        ]
+    kept, _dedupe_changed = _dedupe_primary_demand_items(backfilled_items)
+    if not kept:
+        return False
+    kept = kept[:3]
+    for priority, item in enumerate(kept, start=1):
+        item["priority"] = priority
+    payload["items"] = kept
+    payload["summary"] = "；".join(_clean_text(item.get("demand")) for item in kept)
+    result_dict["customer_primary_demands"] = payload
+    _sync_chief_complaint_primary_demands(result_dict)
+    return True
+
+
+def _find_lift_repair_primary_demand_evidence(segments: list[dict[str, Any]]) -> str | None:
+    demand = "想做拉皮修复，改善既往拉皮效果不佳"
+    for segment in segments[_find_consultation_start_index(segments):]:
+        text = _clean_text(segment.get("text"))
+        compact = re.sub(r"\s+", "", text)
+        if not compact or "拉皮" not in compact:
+            continue
+        if not any(cue in compact for cue in ("想要做修复", "想修复", "做修复", "没有拉到", "没效果", "又垮")):
+            continue
+        evidence = _segment_evidence(segment)
+        if _looks_like_primary_demand_evidence(
+            evidence,
+            demand=demand,
+            allow_weak_staff_inference=True,
+        ):
+            return evidence
+    return None
 
 
 def _sanitize_standardized_indications(result_dict: dict[str, Any], *, raw: dict[str, Any]) -> bool:
@@ -7630,6 +7780,7 @@ def sanitize_analysis_result_with_raw(result_dict: dict[str, Any], *, raw: dict[
     changed = _sanitize_consumption_intent(result_dict, raw=raw) or changed
     changed = _sanitize_customer_concerns(result_dict, raw=raw) or changed
     changed = _force_sparse_medical_business_main_facts(result_dict, raw=raw) or changed
+    changed = _backfill_empty_customer_primary_demands(result_dict, raw=raw) or changed
     changed = _sync_consultation_result_recommended_plan(result_dict) or changed
     return changed
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -12,8 +13,9 @@ from smart_badge_api.api.deps import get_db
 from smart_badge_api.api.routes.visit_order_push import require_sap_hana_push_api_key
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.base import Base
-from smart_badge_api.db.models import AuditLog, SapHanaVisitOrder, VisitOrder
+from smart_badge_api.db.models import AuditLog, SapHanaVisitOrder, Staff, User, VisitOrder, VisitOrderAdvisorNotification, WecomTenant
 from smart_badge_api.schemas.visit_order_push import SapHanaVisitOrderPushIn
+from smart_badge_api.visit_order_notifications import notify_pushed_visit_order_advisors
 from smart_badge_api.visit_order_push_service import (
     _build_sap_hana_visit_order_values,
     upsert_sap_hana_visit_orders,
@@ -50,7 +52,7 @@ def test_require_sap_hana_push_api_key_rejects_invalid_key() -> None:
         try:
             require_sap_hana_push_api_key("wrong-key")
         except Exception as exc:
-            assert "X-API-Key 无效" in str(exc)
+            assert "invalid X-API-Key" in str(exc)
         else:
             raise AssertionError("invalid API key should be rejected")
     finally:
@@ -196,6 +198,103 @@ def test_upsert_sap_hana_visit_orders_creates_and_updates_snapshot_rows() -> Non
     asyncio.run(scenario())
 
 
+def test_notify_pushed_visit_order_advisors_sends_wecom_card_once() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                staff = Staff(
+                    id="staff_001",
+                    name="Advisor A",
+                    external_account="81034062",
+                    wecom_user_id="advisor_a",
+                    wecom_corp_id="ww6101",
+                    hospital_code="6101",
+                    hospital_short_name="Test Hospital",
+                    permission_role="staff",
+                    is_active=True,
+                )
+                user = User(
+                    username="81034062",
+                    hashed_password="hashed",
+                    display_name="Advisor A",
+                    staff_id=staff.id,
+                    role="staff",
+                    hospital_code="6101",
+                    hospital_name="Test Hospital",
+                    is_active=True,
+                )
+                tenant = WecomTenant(
+                    name="Test Hospital",
+                    host="wx.example.com",
+                    corp_id="ww6101",
+                    agent_id="1000001",
+                    agent_secret="secret",
+                    frontend_url="https://wx.example.com",
+                    default_hospital_code="6101",
+                    default_hospital_name="Test Hospital",
+                    is_active=True,
+                    is_default=True,
+                )
+                db.add_all([staff, user, tenant])
+                await db.commit()
+
+                payload = SapHanaVisitOrderPushIn(
+                    JGBM="6101",
+                    DZDH="DZ1003",
+                    CRTDT="20260509",
+                    CRTTM="101010",
+                    KUNR="70000123",
+                    NINAM="Customer A",
+                    KUT30_DQ="V",
+                    FZDATA=[
+                        {
+                            "FZDH": "FZ1003-001",
+                            "ADVXC": "81034062",
+                            "ADVXC_LONG": "Advisor A",
+                            "FZSJ": "102030",
+                        }
+                    ],
+                )
+
+                with patch(
+                    "smart_badge_api.visit_order_notifications.send_wecom_button_interaction_card",
+                    new=AsyncMock(return_value={"errcode": 0, "response_code": "resp-001"}),
+                ) as send_mock:
+                    sent = await notify_pushed_visit_order_advisors(db, [payload])
+                    sent_again = await notify_pushed_visit_order_advisors(db, [payload])
+
+                assert sent == 1
+                assert sent_again == 0
+                assert send_mock.await_count == 1
+                _, kwargs = send_mock.await_args
+                assert kwargs["to_user"] == "advisor_a"
+                assert kwargs["title"].startswith("新的待接诊客户")
+                assert "｜" in kwargs["title"]
+                assert kwargs["horizontal_content_list"][0]["keyname"] == "客户类型"
+                assert kwargs["horizontal_content_list"][0]["value"]
+                assert kwargs["task_id"].startswith("vor_")
+                assert kwargs["buttons"][0]["text"] == "开始录音"
+                assert kwargs["buttons"][0]["key"].startswith("visit_order_recording__start__")
+
+                logs = (await db.execute(select(VisitOrderAdvisorNotification))).scalars().all()
+                assert len(logs) == 1
+                assert logs[0].status == "sent"
+                assert logs[0].advisor_staff_id == staff.id
+                assert logs[0].visit_order_no == "DZ1003"
+                assert logs[0].wecom_task_id.startswith("vor_")
+                assert logs[0].wecom_response_code == "resp-001"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_push_visit_orders_from_sap_hana_returns_success_ack_without_writing_audit_log() -> None:
     async def scenario() -> None:
         _set_push_api_key()
@@ -238,7 +337,7 @@ def test_push_visit_orders_from_sap_hana_returns_success_ack_without_writing_aud
                 assert response.status_code == 200
                 body = response.json()
                 assert body["STATE"] == "S"
-                assert "接收成功" in body["MSG"]
+                assert "received=1" in body["MSG"]
 
             async with session_factory() as db:
                 rows = (
@@ -278,7 +377,7 @@ def test_push_visit_orders_from_sap_hana_http_returns_ack_for_invalid_key_and_pa
                 assert invalid_key_response.status_code == 401
                 assert invalid_key_response.json() == {
                     "STATE": "E",
-                    "MSG": "X-API-Key 无效",
+                    "MSG": "invalid X-API-Key",
                 }
 
                 invalid_payload_response = client.post(
@@ -289,7 +388,7 @@ def test_push_visit_orders_from_sap_hana_http_returns_ack_for_invalid_key_and_pa
                 assert invalid_payload_response.status_code == 400
                 body = invalid_payload_response.json()
                 assert body["STATE"] == "E"
-                assert "请求参数校验失败" in body["MSG"]
+                assert "request validation failed" in body["MSG"]
         finally:
             _clear_push_api_key()
             await engine.dispose()

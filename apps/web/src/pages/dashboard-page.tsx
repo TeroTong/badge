@@ -553,7 +553,7 @@ export function DashboardPage() {
               value={formatInteger(recordingsWithVisits)}
             />
             <OverviewMetricCard
-              label="客户数量"
+              label="到院次数"
               tone="amber"
               value={formatInteger(dashboard.total_customers)}
             />

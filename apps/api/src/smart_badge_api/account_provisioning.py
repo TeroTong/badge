@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from smart_badge_api.core.permissions import normalize_permission_role, permission_role_level
+from smart_badge_api.core.permissions import is_global_role, normalize_permission_role, permission_role_level
 from smart_badge_api.core.security import hash_password
 from smart_badge_api.db.models import Staff, User
 
@@ -84,8 +84,12 @@ def sync_user_scope_from_staff(
         user.role = current_role
     else:
         user.role = next_role
-    user.hospital_code = staff.hospital_code
-    user.hospital_name = staff.hospital_short_name
+    if is_global_role(user.role):
+        user.hospital_code = None
+        user.hospital_name = "所有机构"
+    else:
+        user.hospital_code = staff.hospital_code
+        user.hospital_name = staff.hospital_short_name
 
 
 def resolve_staff_account_identifier(staff: Staff) -> StaffAccountIdentifier:
@@ -290,6 +294,8 @@ async def reset_staff_account_password(
     user.hashed_password = hash_password(temporary_password)
     await db.commit()
     await db.refresh(user)
+    from smart_badge_api.api.deps import invalidate_user_cache  # local import avoids cycle
+    await invalidate_user_cache(user.id)
     return StaffAccountProvisionResult(
         user=user,
         created=False,
@@ -316,4 +322,6 @@ async def set_staff_account_active(
         user.is_active = is_active
         await db.commit()
         await db.refresh(user)
+        from smart_badge_api.api.deps import invalidate_user_cache  # local import avoids cycle
+        await invalidate_user_cache(user.id)
     return user

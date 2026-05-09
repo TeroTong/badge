@@ -230,73 +230,6 @@ function formatRecordingStatus(status: string | null | undefined) {
   return RECORDING_STATUS_LABELS[status] ?? status
 }
 
-function formatSapConsultationDisplayText(text: string | null | undefined) {
-  const normalized = String(text || '').trim()
-  if (!normalized) return ''
-  return normalized
-    .replace(/\r\n/g, '\n')
-    .replace(/\s*●/g, '\n●')
-    .replace(/^\n+/, '')
-    .replace(/\n{2,}/g, '\n')
-    .trim()
-}
-
-function buildVisitSapConsultationTextFallback(visit: CustomerDetail['visits'][number]) {
-  const recordingsWithAnalysis = visit.recordings.filter(
-    (recording) =>
-      recording.analysis_status === 'done' ||
-      recording.analysis_summary ||
-      recording.analysis_primary_demands.length > 0 ||
-      recording.analysis_concerns.length > 0 ||
-      recording.analysis_recommendations.length > 0,
-  )
-  const primaryRecording = recordingsWithAnalysis[0] ?? visit.recordings[0] ?? null
-  const consultantName = visit.consultant_name || primaryRecording?.staff_name || '无'
-  const fallbackAnalysis = primaryRecording ? buildFallbackAnalysisDetail(primaryRecording) : null
-  const primaryDemand =
-    fallbackAnalysis?.consultation_result?.chief_complaint_and_indications.summary
-    || primaryRecording?.analysis_primary_demands[0]
-    || visit.arrival_purpose
-    || visit.project_needs
-    || '无'
-  const recommendations =
-    fallbackAnalysis?.consultation_result?.recommended_plan.summary
-    || primaryRecording?.analysis_recommendations.join('；')
-    || visit.project_needs
-    || '无'
-  const overallEvaluation =
-    fallbackAnalysis?.consultation_process_evaluation?.overall_summary
-    || fallbackAnalysis?.consultation_evaluation?.overall_summary
-    || primaryRecording?.analysis_summary
-    || visit.notes
-    || '无'
-  const concerns =
-    fallbackAnalysis?.consultation_result?.deal_factors.concerns
-    || primaryRecording?.analysis_concerns
-    || []
-  const budget = fallbackAnalysis?.consultation_result?.deal_factors.budget || '无'
-
-  const effectConcerns = concerns.filter((item) => /效果|恢复|维持|风险|副作用/.test(item))
-  const priceConcerns = concerns.filter((item) => /价格|预算|费用|贵|优惠/.test(item))
-  const comparisonConcerns = concerns.filter((item) => /对比|别家|其他机构|其它机构|同行/.test(item))
-  const otherConcerns = concerns.filter(
-    (item) => !effectConcerns.includes(item) && !priceConcerns.includes(item) && !comparisonConcerns.includes(item),
-  )
-
-  return [
-    `●接诊人员：${consultantName}`,
-    `●客户主诉：${primaryDemand || '无'}`,
-    `●本次预算：${budget || '无'}`,
-    '●客户顾虑点:',
-    `1、效果类：${effectConcerns.join('；') || '无'}`,
-    `2、价格类：${priceConcerns.join('；') || '无'}`,
-    `3、对比机构类：${comparisonConcerns.join('；') || '无'}`,
-    `4、其他：${otherConcerns.join('；') || visit.notes || '无'}`,
-    `●推荐方案：${recommendations || '无'}`,
-    `●咨询师评价：${overallEvaluation || '无'}`,
-  ].join('\n')
-}
-
 function buildFallbackAnalysisDetail(
   recording: CustomerDetail['visits'][number]['recordings'][number],
 ): AnalysisDetail | null {
@@ -716,20 +649,10 @@ export function WecomCustomerDetailPage() {
                         )}
                       </div>
 
-                      {visit.recordings.length > 0 || (visit.sap_consultation_texts?.length ?? 0) > 0 ? (
+                      {visit.recordings.length > 0 ? (
                         <div className="wc-customer-detail-page__latest-visit-analysis">
                           <div className="wc-customer-timeline-card__recordings-head">
                             <strong>本次来访分析</strong>
-                          </div>
-                          <div className="wc-summary-block__stack">
-                            {((visit.sap_consultation_texts?.length ?? 0) > 0
-                              ? visit.sap_consultation_texts ?? []
-                              : [buildVisitSapConsultationTextFallback(visit)]).map((text, textIndex) => (
-                                <div key={`${visit.id}-sap-${textIndex}`} className="wc-summary-block">
-                                  <label>SAP回传信息</label>
-                                  <p className="wc-summary-block__multiline">{formatSapConsultationDisplayText(text)}</p>
-                                </div>
-                              ))}
                           </div>
                           <div className="wc-customer-detail-page__latest-visit-analysis-list">
                             {visit.recordings.map((recording) => {

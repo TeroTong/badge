@@ -79,6 +79,24 @@ def _to_out(transcript: Transcript) -> TranscriptOut:
     )
 
 
+def _to_out_slim(transcript: Transcript) -> TranscriptOut:
+    """List-view variant that drops the heavy full_text/utterances fields."""
+    return TranscriptOut(
+        id=transcript.id,
+        recording_id=transcript.recording_id,
+        recording_file_name=transcript.recording.file_name if transcript.recording else None,
+        asr_provider=transcript.asr_provider,
+        asr_task_id=transcript.asr_task_id,
+        status=transcript.status,
+        full_text=None,
+        utterances=None,
+        duration_ms=transcript.duration_ms,
+        error_message=transcript.error_message,
+        created_at=transcript.created_at.isoformat() if transcript.created_at else "",
+        completed_at=transcript.completed_at.isoformat() if transcript.completed_at else None,
+    )
+
+
 def _is_under_allowed_root(path: Path, roots: list[Path]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
@@ -592,6 +610,7 @@ async def list_transcripts(
     status: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    include_text: bool = Query(False, description="Include full_text/utterances payload (large)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -611,7 +630,14 @@ async def list_transcripts(
     rows = (
         await db.execute(stmt.options(*_load_opts()).offset((page - 1) * page_size).limit(page_size))
     ).scalars().all()
-    return make_page_response([_to_out(item) for item in rows], total, page, page_size)
+    # Slim payload: per-recording detail pages pass recording_id and need
+    # full_text/utterances; the global list view does not. Stripping the heavy
+    # JSON payload reduces /transcripts response size from ~MBs to ~KBs.
+    if recording_id is None and not include_text:
+        items = [_to_out_slim(item) for item in rows]
+    else:
+        items = [_to_out(item) for item in rows]
+    return make_page_response(items, total, page, page_size)
 
 
 @router.get("/{transcript_id}", response_model=TranscriptOut)

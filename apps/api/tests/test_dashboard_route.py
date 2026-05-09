@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from smart_badge_api.api.routes import dashboard as dashboard_routes
@@ -10,6 +11,21 @@ from smart_badge_api.api.routes.dashboard import get_dashboard
 from smart_badge_api.db.base import Base
 from smart_badge_api.core.permissions import PermissionScope
 from smart_badge_api.db.models import AnalysisTask, Customer, Recording, RecordingVisitLink, Staff, StaffManagementRelation, User, Visit, VisitOrder
+
+
+@pytest.fixture(autouse=True)
+def disable_dashboard_l2_cache(monkeypatch):
+    async def _get_none(cache_key: str):
+        return None
+
+    async def _set_noop(cache_key: str, value):
+        return None
+
+    monkeypatch.setattr(dashboard_routes, "_redis_cache_get", _get_none)
+    monkeypatch.setattr(dashboard_routes, "_redis_cache_set", _set_noop)
+    dashboard_routes._cache.clear()
+    yield
+    dashboard_routes._cache.clear()
 
 
 def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> None:
@@ -57,18 +73,24 @@ def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> No
                 visit_a = Visit(
                     id="visit_a",
                     customer_id=customer_a.id,
+                    external_visit_order_no="DZ_A",
+                    external_visit_order_seg="001",
                     consultant_id=staff_a.id,
                     status="consulting",
                 )
                 visit_b = Visit(
                     id="visit_b",
                     customer_id=customer_b.id,
+                    external_visit_order_no="DZ_B",
+                    external_visit_order_seg="001",
                     consultant_id=staff_b.id,
                     status="consulting",
                 )
                 visit_outside = Visit(
                     id="visit_outside",
                     customer_id=customer_outside.id,
+                    external_visit_order_no="DZ_OUT",
+                    external_visit_order_seg="001",
                     consultant_id=staff_outside.id,
                     status="consulting",
                 )
@@ -121,6 +143,9 @@ def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> No
                     visit_a,
                     visit_b,
                     visit_outside,
+                    VisitOrder(id="order_a", dzdh="DZ_A", dzseg="001", jgbm="6101", dymd="A", dymd_txt="咨询"),
+                    VisitOrder(id="order_b", dzdh="DZ_B", dzseg="001", jgbm="6101", dymd="B", dymd_txt="治疗"),
+                    VisitOrder(id="order_out", dzdh="DZ_OUT", dzseg="001", jgbm="6101", dymd="A", dymd_txt="咨询"),
                     recording_a,
                     recording_b,
                     recording_outside,
@@ -142,6 +167,7 @@ def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> No
                     hospital_code=None,
                     scope_mode="all",
                     staff_id=None,
+                    detail_level=None,
                     date_from=None,
                     date_to=None,
                     db=db,
@@ -158,6 +184,7 @@ def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> No
                     hospital_code=None,
                     scope_mode="all",
                     staff_id=staff_a.id,
+                    detail_level=None,
                     date_from=None,
                     date_to=None,
                     db=db,
@@ -173,6 +200,132 @@ def test_dashboard_supports_filtering_single_staff_within_hospital_scope() -> No
                 assert dashboard_single.total_customers == 1
                 assert [item.staff_id for item in dashboard_single.staff_stats] == [staff_a.id]
                 assert dashboard_single.staff_stats[0].linked_visit_count == 1
+        finally:
+            dashboard_routes._cache.clear()
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_total_customers_counts_real_arrival_orders() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        dashboard_routes._cache.clear()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                staff = Staff(
+                    id="staff_a",
+                    name="顾问A",
+                    external_account="ADV001",
+                    hospital_code="6501",
+                    permission_role="staff",
+                )
+                manager_staff = Staff(
+                    id="manager_staff",
+                    name="Manager",
+                    external_account="M001",
+                    hospital_code="6501",
+                    permission_role="hospital_admin",
+                )
+                current_user = User(
+                    username="manager",
+                    hashed_password="hashed",
+                    display_name="机构管理员",
+                    role="hospital_admin",
+                    staff_id="manager_staff",
+                    hospital_code="6501",
+                    hospital_name="测试机构",
+                    is_active=True,
+                )
+                customers = [
+                    Customer(id="cust_real", name="真实到院客户"),
+                    Customer(id="cust_remote", name="未到院购买客户"),
+                    Customer(id="cust_other", name="其他客户"),
+                    Customer(id="cust_unknown", name="未知目的客户"),
+                ]
+                visits = [
+                    Visit(
+                        id="visit_real_1",
+                        customer_id="cust_real",
+                        consultant_id=staff.id,
+                        external_visit_order_no="DZ_REAL_1",
+                        external_visit_order_seg="001",
+                        visit_date=date(2026, 5, 7),
+                    ),
+                    Visit(
+                        id="visit_real_2",
+                        customer_id="cust_real",
+                        consultant_id=staff.id,
+                        external_visit_order_no="DZ_REAL_2",
+                        external_visit_order_seg="001",
+                        visit_date=date(2026, 5, 8),
+                    ),
+                    Visit(
+                        id="visit_remote",
+                        customer_id="cust_remote",
+                        consultant_id=staff.id,
+                        external_visit_order_no="DZ_REMOTE",
+                        external_visit_order_seg="001",
+                        visit_date=date(2026, 5, 7),
+                    ),
+                    Visit(
+                        id="visit_other",
+                        customer_id="cust_other",
+                        consultant_id=staff.id,
+                        external_visit_order_no="DZ_OTHER",
+                        external_visit_order_seg="001",
+                        visit_date=date(2026, 5, 7),
+                    ),
+                    Visit(
+                        id="visit_unknown",
+                        customer_id="cust_unknown",
+                        consultant_id=staff.id,
+                        external_visit_order_no="DZ_UNKNOWN",
+                        external_visit_order_seg="001",
+                        visit_date=date(2026, 5, 7),
+                    ),
+                ]
+                orders = [
+                    VisitOrder(id="order_real_1", dzdh="DZ_REAL_1", dzseg="001", jgbm="6501", dymd="A", dymd_txt="咨询"),
+                    VisitOrder(id="order_real_2", dzdh="DZ_REAL_2", dzseg="001", jgbm="6501", dymd="B", dymd_txt="治疗"),
+                    VisitOrder(id="order_remote", dzdh="DZ_REMOTE", dzseg="001", jgbm="6501", dymd="X", dymd_txt="未到院购买"),
+                    VisitOrder(id="order_other", dzdh="DZ_OTHER", dzseg="001", jgbm="6501", dymd="Z", dymd_txt="其他"),
+                    VisitOrder(id="order_unknown", dzdh="DZ_UNKNOWN", dzseg="001", jgbm="6501"),
+                ]
+
+                db.add_all([
+                    staff,
+                    manager_staff,
+                    current_user,
+                    *customers,
+                    *visits,
+                    *orders,
+                    StaffManagementRelation(
+                        hospital_code="6501",
+                        manager_staff_id=manager_staff.id,
+                        subordinate_staff_id=staff.id,
+                    ),
+                ])
+                await db.commit()
+
+                dashboard = await get_dashboard(
+                    hospital_code=None,
+                    scope_mode="all",
+                    staff_id=None,
+                    detail_level=None,
+                    date_from=date(2026, 5, 1),
+                    date_to=date(2026, 5, 31),
+                    db=db,
+                    current_user=current_user,
+                )
+
+                assert dashboard.total_visits == 5
+                assert dashboard.total_customers == 2
         finally:
             dashboard_routes._cache.clear()
             await engine.dispose()
@@ -329,6 +482,7 @@ def test_dashboard_result_stats_dedupe_duplicate_done_tasks_for_same_recording()
                     hospital_code=None,
                     scope_mode="all",
                     staff_id=None,
+                    detail_level=None,
                     date_from=None,
                     date_to=None,
                     db=db,
@@ -416,6 +570,7 @@ def test_dashboard_quality_passed_recordings_excludes_filtered_recordings() -> N
                     hospital_code=None,
                     scope_mode="all",
                     staff_id=None,
+                    detail_level=None,
                     date_from=None,
                     date_to=None,
                     db=db,

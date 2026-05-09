@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from smart_badge_api.api.data_scope import build_permission_scope
 from smart_badge_api.api.routes import analysis as analysis_routes
 from smart_badge_api.api.routes.analysis import get_result, list_results
 from smart_badge_api.api.routes.customers import (
@@ -23,6 +24,277 @@ from smart_badge_api.api.routes.visit_orders import list_visit_orders
 from smart_badge_api.db.base import Base
 from smart_badge_api.db.models import AnalysisTask, Customer, Recording, Segment, Staff, StaffManagementRelation, Transcript, User, Visit, VisitOrder
 from smart_badge_api.visit_linking import sync_recording_visit_links
+
+
+def test_global_admin_scope_belongs_to_all_institutions() -> None:
+    async def scenario() -> None:
+        for role in ("super_admin", "system_admin"):
+            user = User(
+                username=role,
+                hashed_password="hashed",
+                display_name=role,
+                staff_id=f"{role}_staff",
+                role=role,
+                hospital_code="6501",
+                hospital_name="长沙雅美",
+            )
+            scope = await build_permission_scope(user)
+            assert scope.role == role
+            assert scope.staff_id == f"{role}_staff"
+            assert scope.hospital_code is None
+
+    asyncio.run(scenario())
+
+
+def test_super_admin_recordings_can_filter_unmanaged_hospital() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                manager = Staff(id="admin_6501", name="Tero", hospital_code="6501", permission_role="super_admin")
+                milan_staff = Staff(id="staff_6101", name="米兰员工", hospital_code="6101", permission_role="staff")
+                yamei_staff = Staff(id="staff_6501", name="雅美员工", hospital_code="6501", permission_role="staff")
+                user = User(
+                    username="super_admin",
+                    hashed_password="hashed",
+                    display_name="Tero",
+                    staff_id=manager.id,
+                    role="super_admin",
+                    is_active=True,
+                )
+                db.add_all(
+                    [
+                        manager,
+                        milan_staff,
+                        yamei_staff,
+                        user,
+                        StaffManagementRelation(
+                            hospital_code="6501",
+                            manager_staff_id=manager.id,
+                            subordinate_staff_id=yamei_staff.id,
+                        ),
+                        Recording(
+                            id="rec_6101",
+                            staff_id=milan_staff.id,
+                            file_name="0509_175739.mp3",
+                            file_path="recordings/0509_175739.mp3",
+                            status="analyzed",
+                            created_at=datetime(2026, 5, 9, 9, 57, tzinfo=timezone.utc),
+                        ),
+                        Recording(
+                            id="rec_6501",
+                            staff_id=yamei_staff.id,
+                            file_name="0509_174953.mp3",
+                            file_path="recordings/0509_174953.mp3",
+                            status="analyzed",
+                            created_at=datetime(2026, 5, 9, 9, 49, tzinfo=timezone.utc),
+                        ),
+                    ]
+                )
+                await db.commit()
+
+                recordings = await list_recordings(
+                    visit_id=None,
+                    staff_id=None,
+                    hospital_code="6101",
+                    status=None,
+                    keyword=None,
+                    customer_keyword=None,
+                    badge_id=None,
+                    role=None,
+                    has_visit=None,
+                    date_from=None,
+                    date_to=None,
+                    page=1,
+                    page_size=20,
+                    fast_page=True,
+                    db=db,
+                    current_user=user,
+                )
+
+            assert recordings.total == 1
+            assert [item.id for item in recordings.items] == ["rec_6101"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_super_admin_can_filter_unmanaged_hospital_across_core_pages() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                super_staff = Staff(id="admin_6501", name="Tero", hospital_code="6501", permission_role="super_admin")
+                yamei_staff = Staff(id="staff_6501", name="雅美员工", hospital_code="6501", permission_role="staff")
+                milan_staff = Staff(
+                    id="staff_6101",
+                    name="米兰员工",
+                    external_account="ADV6101",
+                    hospital_code="6101",
+                    permission_role="staff",
+                )
+                user = User(
+                    username="super_admin",
+                    hashed_password="hashed",
+                    display_name="Tero",
+                    staff_id=super_staff.id,
+                    role="super_admin",
+                    hospital_code="6501",
+                    is_active=True,
+                )
+                milan_customer = Customer(id="cust_6101", name="米兰客户", external_customer_code="K6101")
+                yamei_customer = Customer(id="cust_6501", name="雅美客户", external_customer_code="K6501")
+                milan_visit = Visit(
+                    id="visit_6101",
+                    customer_id=milan_customer.id,
+                    consultant_id=milan_staff.id,
+                    external_visit_order_no="DZ6101",
+                    visit_date=date(2026, 5, 9),
+                    status="consulting",
+                )
+                yamei_visit = Visit(
+                    id="visit_6501",
+                    customer_id=yamei_customer.id,
+                    consultant_id=yamei_staff.id,
+                    external_visit_order_no="DZ6501",
+                    visit_date=date(2026, 5, 9),
+                    status="consulting",
+                )
+                milan_recording = Recording(
+                    id="rec_6101",
+                    visit_id=milan_visit.id,
+                    staff_id=milan_staff.id,
+                    file_name="0509_175739.mp3",
+                    file_path="recordings/0509_175739.mp3",
+                    status="analyzed",
+                    created_at=datetime(2026, 5, 9, 9, 57, tzinfo=timezone.utc),
+                )
+                yamei_recording = Recording(
+                    id="rec_6501",
+                    visit_id=yamei_visit.id,
+                    staff_id=yamei_staff.id,
+                    file_name="0509_174953.mp3",
+                    file_path="recordings/0509_174953.mp3",
+                    status="analyzed",
+                    created_at=datetime(2026, 5, 9, 9, 49, tzinfo=timezone.utc),
+                )
+                milan_order = VisitOrder(
+                    id="vo_6101",
+                    dzdh="DZ6101",
+                    dzseg="110",
+                    jgbm="6101",
+                    kunr="K6101",
+                    ninam="米兰客户",
+                    advxc="ADV6101",
+                    crtdt="2026-05-09",
+                    sjrq="2026-05-09",
+                    fzsj="17:57:39",
+                )
+                yamei_order = VisitOrder(
+                    id="vo_6501",
+                    dzdh="DZ6501",
+                    dzseg="110",
+                    jgbm="6501",
+                    kunr="K6501",
+                    ninam="雅美客户",
+                    crtdt="2026-05-09",
+                    sjrq="2026-05-09",
+                    fzsj="17:49:53",
+                )
+                db.add_all(
+                    [
+                        super_staff,
+                        yamei_staff,
+                        milan_staff,
+                        user,
+                        milan_customer,
+                        yamei_customer,
+                        milan_visit,
+                        yamei_visit,
+                        milan_recording,
+                        yamei_recording,
+                        milan_order,
+                        yamei_order,
+                        StaffManagementRelation(
+                            hospital_code="6501",
+                            manager_staff_id=super_staff.id,
+                            subordinate_staff_id=yamei_staff.id,
+                        ),
+                    ]
+                )
+                await db.flush()
+                await sync_recording_visit_links(db, milan_recording, [milan_visit.id], primary_visit_id=milan_visit.id, source="test")
+                await sync_recording_visit_links(db, yamei_recording, [yamei_visit.id], primary_visit_id=yamei_visit.id, source="test")
+                await db.commit()
+
+                visits = await list_visits(
+                    customer_id=None,
+                    status=None,
+                    has_recharge=None,
+                    keyword=None,
+                    consultant_id=None,
+                    participant_staff_id=None,
+                    source=None,
+                    hospital_code="6101",
+                    date_from=None,
+                    date_to=None,
+                    has_recordings=None,
+                    include_date_summaries=False,
+                    fast_page=True,
+                    page=1,
+                    page_size=20,
+                    db=db,
+                    current_user=user,
+                )
+                customers = await list_customers(
+                    keyword="",
+                    is_active=None,
+                    consultant_id=None,
+                    has_visits=None,
+                    has_recordings=None,
+                    has_positive_recharge=None,
+                    hospital_code="6101",
+                    date_from=None,
+                    date_to=None,
+                    include_date_summaries=False,
+                    fast_page=True,
+                    page=1,
+                    page_size=20,
+                    db=db,
+                    current_user=user,
+                )
+                visit_orders = await list_visit_orders(
+                    db=db,
+                    page=1,
+                    page_size=20,
+                    keyword=None,
+                    fzuer=None,
+                    hospital_code="6101",
+                    sjrq_start=None,
+                    sjrq_end=None,
+                    jcsta_txt=None,
+                    fast_page=True,
+                    current_user=user,
+                )
+
+            assert [item.id for item in visits.items] == ["visit_6101"]
+            assert [item.id for item in customers.items] == ["cust_6101"]
+            assert [item.id for item in visit_orders["items"]] == ["vo_6101"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_staff_scope_limits_lists_and_detail_access() -> None:

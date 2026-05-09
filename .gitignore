@@ -45,3 +45,39 @@ apps/api/asr_v2_test.log
 .env
 apps/api/.env
 apps/web/.env
+
+# Local sync exclusions
+# Documents supplied outside the source repo
+/docs/
+*.pdf
+*.PDF
+*.docx
+*.DOCX
+*.xlsx
+*.XLSX
+*.xls
+*.XLS
+*.csv
+*.CSV
+
+# Local backups and generated artifacts
+.bak/
+.bak*/
+backups/
+source_sync_backups/
+exports/
+logs/
+remote/
+*.bak
+*.bak*
+*.review_*
+apps/web/dist.bak*/
+
+# Local investigation scripts and reports
+stress_report.json
+*_summary.json
+tmp_*.py
+apps/api/tmp_*.py
+apps/api/.tmp_*.py
+apps/api/.debug_*.py
+apps/api/.tmp_*.json

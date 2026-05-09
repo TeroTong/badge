@@ -131,57 +131,13 @@ function getVisitAnalysisStatusLabel(status: string) {
   return '待确认'
 }
 
-function normalizeRecordingSummaryPart(value: string | null | undefined) {
-  return String(value ?? '')
-    .replace(/\s+/g, ' ')
-    .replace(/；+/g, '；')
-    .trim()
+function sapPreviewValue(value: unknown): string {
+  return String(value ?? '').trim()
 }
 
-function buildRecordingRecallSummary(detail: AnalysisDetail | null | undefined) {
-  if (!detail) return null
-
-  const candidateLines = [
-    {
-      label: '主诉',
-      value: normalizeRecordingSummaryPart(
-        detail.consultation_result?.chief_complaint_and_indications?.summary
-        || detail.primary_demand_summary,
-      ),
-    },
-    {
-      label: '顾虑',
-      value: normalizeRecordingSummaryPart(
-        detail.customer_concerns?.summary
-        || detail.consultation_result?.deal_factors?.summary,
-      ),
-    },
-    {
-      label: '方案',
-      value: normalizeRecordingSummaryPart(detail.consultation_result?.recommended_plan?.summary),
-    },
-    {
-      label: '结果',
-      value: normalizeRecordingSummaryPart(detail.consultation_result?.deal_outcome?.summary),
-    },
-  ]
-
-  const usedValues = new Set<string>()
-  const lines = candidateLines.flatMap((item) => {
-    if (!item.value || usedValues.has(item.value)) return []
-    usedValues.add(item.value)
-    return [`${item.label}：${item.value}`]
-  })
-
-  if (lines.length > 0) {
-    return lines.join('\n')
-  }
-
-  return normalizeRecordingSummaryPart(
-    detail.consultation_process_evaluation?.overall_summary
-    || detail.consultation_evaluation?.overall_summary
-    || detail.overall_summary,
-  ) || null
+function sapPreviewText(value: AnalysisDetail['sap_consultation_preview']): string {
+  const firstPayload = value?.payloads?.find((item) => Boolean(item && typeof item === 'object'))
+  return sapPreviewValue(firstPayload?.text)
 }
 
 function getMatchMethodLabel(method: string) {
@@ -640,9 +596,9 @@ export function WecomRecordingDetailPage() {
   })
   const archiveAnalysisDetail = useMemo(() => buildArchiveAnalysisDetail(archiveRecording), [archiveRecording])
   const resolvedAnalysisDetail = analysisDetail ?? archiveAnalysisDetail
-  const recordingRecallSummary = useMemo(
-    () => buildRecordingRecallSummary(resolvedAnalysisDetail),
-    [resolvedAnalysisDetail],
+  const sapPrewriteText = useMemo(
+    () => sapPreviewText(resolvedAnalysisDetail?.sap_consultation_preview),
+    [resolvedAnalysisDetail?.sap_consultation_preview],
   )
 
   const { data: transcriptsData } = useQuery({
@@ -1299,15 +1255,18 @@ export function WecomRecordingDetailPage() {
           <div className="wc-match-panel__section wc-match-panel__section--summary">
             <div className="wc-match-panel__section-head">
               <div className="wc-match-panel__summary-head">
-                <strong>录音摘要</strong>
+                <strong>SAP预回写内容</strong>
+                <span>咨询备注</span>
               </div>
             </div>
             {analysisDetailLoading ? (
-              <div className="wc-match-panel__summary-empty">正在整理录音摘要…</div>
-            ) : recordingRecallSummary ? (
-              <p className="wc-match-panel__summary-text">{recordingRecallSummary}</p>
+              <div className="wc-match-panel__summary-empty">正在加载SAP预回写内容…</div>
+            ) : sapPrewriteText ? (
+              <p className="wc-match-panel__summary-text">{sapPrewriteText}</p>
             ) : (
-              <div className="wc-match-panel__summary-empty">当前录音还没有可用摘要，可先查看转写原文后再关联。</div>
+              <div className="wc-match-panel__summary-empty">
+                暂未生成SAP预回写内容。录音完成LLM分析后会在这里展示预回写给SAP的咨询备注。
+              </div>
             )}
           </div>
 

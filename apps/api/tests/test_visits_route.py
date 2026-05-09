@@ -13,8 +13,10 @@ def test_build_visit_order_context_includes_line_items_for_merged_dzdh() -> None
             fzsj="08:45:15",
             fzsta_txt="已分诊",
             jcsta_txt="已成交",
-            kutyp_dq="V",
-            kutyp_dq_txt="会员/老客",
+            kutyp_dq="Q",
+            kutyp_dq_txt="潜客/新客",
+            kut30_dq="V",
+            kut30_dq_txt="会员/老客",
             remark_dz="双眼皮咨询",
         ),
         VisitOrder(
@@ -42,7 +44,7 @@ def test_build_visit_order_context_includes_line_items_for_merged_dzdh() -> None
     assert context.line_items[1].note_summary == "眼综合"
 
 
-def test_visit_out_normalizes_customer_type_from_kutyp() -> None:
+def test_visit_out_normalizes_customer_type_from_kut30() -> None:
     visit = Visit(id="visit001", customer_id="cust001", status="consulted")
 
     payload = _to_out(

@@ -247,8 +247,16 @@ export async function fetchAnalysisResults(
   sortOrder = 'desc',
   page = 1,
   pageSize = 20,
+  hospitalCode?: string | null,
 ): Promise<AnalysisListResponse> {
-  return api.get('analysis/results', { searchParams: { sort_by: sortBy, sort_order: sortOrder, page, page_size: pageSize } }).json()
+  const searchParams: Record<string, string | number> = {
+    sort_by: sortBy,
+    sort_order: sortOrder,
+    page,
+    page_size: pageSize,
+  }
+  if (hospitalCode) searchParams.hospital_code = hospitalCode
+  return api.get('analysis/results', { searchParams }).json()
 }
 
 export async function fetchAnalysisDetail(fileId: string): Promise<AnalysisDetail> {

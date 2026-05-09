@@ -72,7 +72,7 @@ const STATUS_OPTIONS = [
   { value: 'all', label: '全部状态' },
   { value: 'transcribing', label: '转写中' },
   { value: 'analyzed', label: '已分析' },
-  { value: 'filtered', label: '已过滤' },
+  { value: 'filtered', label: '已过滤/裁切隐藏' },
   { value: 'failed', label: '失败' },
 ]
 
@@ -80,7 +80,7 @@ const FOCUS_OPTIONS = [
   { value: 'needs_link', label: '待关联优先' },
   { value: 'processable', label: '全部有效录音' },
   { value: 'linked', label: '已关联到诊单' },
-  { value: 'filtered', label: '已过滤/失败' },
+  { value: 'filtered', label: '过滤/失败/裁切' },
   { value: 'all', label: '全部录音' },
 ]
 
@@ -95,6 +95,24 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
   analyzed: { label: '已分析', color: 'success' },
   filtered: { label: '已过滤', color: 'gold' },
   failed: { label: '失败', color: 'error' },
+}
+
+function isSplitHiddenRecording(record: Pick<DingtalkArchiveRecording, 'pipeline_status' | 'is_split_hidden'>): boolean {
+  return record.pipeline_status === 'filtered' && Boolean(record.is_split_hidden)
+}
+
+function getArchiveStatusMeta(record: DingtalkArchiveRecording) {
+  if (isSplitHiddenRecording(record)) {
+    return { label: '已裁切隐藏', color: 'purple' }
+  }
+  return STATUS_META[record.pipeline_status ?? 'archived'] ?? STATUS_META.archived
+}
+
+function getArchiveStatusNotice(record: DingtalkArchiveRecording): string | null {
+  if (isSplitHiddenRecording(record)) {
+    return '原录音已裁切为片段，原始长录音已隐藏，请使用裁切后的录音片段关联到诊单。'
+  }
+  return record.quality_reason || null
 }
 
 function formatDateTime(value?: string | null): string {
@@ -405,6 +423,7 @@ function canRecommendLink(record: DingtalkArchiveRecording): boolean {
 
 function recommendDisabledReason(record: DingtalkArchiveRecording): string | null {
   if (!record.has_transcript) return '当前录音还没有 ASR 转写结果'
+  if (isSplitHiddenRecording(record)) return '原录音已裁切隐藏，请使用裁切后的录音片段关联到诊单'
   if (record.pipeline_status === 'filtered') return '当前录音已被质检过滤，不适合推荐关联'
   if (record.pipeline_status === 'failed') return '当前录音处理失败，暂不能推荐关联'
   return null
@@ -421,6 +440,12 @@ function getLinkStatus(record: DingtalkArchiveRecording) {
     return {
       label: '待关联',
       color: 'processing' as const,
+    }
+  }
+  if (isSplitHiddenRecording(record)) {
+    return {
+      label: '已裁切隐藏',
+      color: 'purple' as const,
     }
   }
   if (record.pipeline_status === 'filtered') {
@@ -442,7 +467,7 @@ function getLinkStatus(record: DingtalkArchiveRecording) {
 }
 
 function getStatusTags(record: DingtalkArchiveRecording) {
-  const meta = STATUS_META[record.pipeline_status ?? 'archived'] ?? STATUS_META.archived
+  const meta = getArchiveStatusMeta(record)
   const tags = [<Tag key="pipeline" color={meta.color}>{meta.label}</Tag>]
   const pipelineStatus = record.pipeline_status ?? 'archived'
 
@@ -507,7 +532,7 @@ export default function DingtalkAudioArchivePage() {
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [hospitalFilter, setHospitalFilter] = useState<string | undefined>()
-  const [focusMode, setFocusMode] = useState('needs_link')
+  const [focusMode, setFocusMode] = useState('filtered')
   const [status, setStatus] = useState('all')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -869,14 +894,15 @@ export default function DingtalkAudioArchivePage() {
       key: 'status',
       width: 190,
       render: (_, record) => {
+        const statusNotice = getArchiveStatusNotice(record)
         return (
           <div className="archive-recordings-page__cell-block">
             <Space wrap size={[4, 4]}>
               {getStatusTags(record)}
             </Space>
-            {record.quality_reason ? (
+            {statusNotice ? (
               <div className="archive-recordings-page__status-note archive-recordings-page__status-note--warning">
-                {record.quality_reason}
+                {statusNotice}
               </div>
             ) : null}
             {record.error_message ? (
@@ -1104,7 +1130,14 @@ export default function DingtalkAudioArchivePage() {
           <Empty description="暂无详情" />
         ) : (
           <div style={{ display: 'grid', gap: 16 }}>
-            {detail.quality_reason ? (
+            {isSplitHiddenRecording(detail) ? (
+              <Alert
+                type="info"
+                showIcon
+                message="原录音已裁切隐藏"
+                description="这条原始录音已被裁切成片段，原始长录音不再用于关联到诊单。请在列表中使用裁切后的录音片段。"
+              />
+            ) : detail.quality_reason ? (
               <Alert type="warning" showIcon message="该录音已被质检过滤" description={detail.quality_reason} />
             ) : null}
             {detail.error_message ? (
@@ -1121,9 +1154,7 @@ export default function DingtalkAudioArchivePage() {
                 <Descriptions.Item label="录音时长">{formatDurationMs(detail.duration_ms, detail.duration_seconds)}</Descriptions.Item>
                 <Descriptions.Item label="文件大小">{formatFileSize(detail.file_size)}</Descriptions.Item>
                 <Descriptions.Item label="处理状态">
-                  <Tag color={(STATUS_META[detail.pipeline_status ?? 'archived'] ?? STATUS_META.archived).color}>
-                    {(STATUS_META[detail.pipeline_status ?? 'archived'] ?? STATUS_META.archived).label}
-                  </Tag>
+                  <Tag color={getArchiveStatusMeta(detail).color}>{getArchiveStatusMeta(detail).label}</Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label="stageKey">{detail.stage_key || '-'}</Descriptions.Item>
               </Descriptions>
@@ -1757,7 +1788,7 @@ export default function DingtalkAudioArchivePage() {
             <Descriptions.Item label="数据日期">{visitOrderDetail?.sjrq || '-'}</Descriptions.Item>
             <Descriptions.Item label="客户姓名">{visitOrderDetail?.ninam || '-'}</Descriptions.Item>
             <Descriptions.Item label="客户编码">{visitOrderDetail?.kunr || '-'}</Descriptions.Item>
-            <Descriptions.Item label="客户属性">{visitOrderDetail?.kutyp_dq_txt || visitOrderDetail?.kut30_dq_txt || visitOrderDetail?.kusta_dq_txt || visitOrderDetail?.kusex_txt || '-'}</Descriptions.Item>
+            <Descriptions.Item label="客户属性">{visitOrderDetail?.kut30_dq_txt || visitOrderDetail?.kusta_dq_txt || visitOrderDetail?.kusex_txt || '-'}</Descriptions.Item>
             <Descriptions.Item label="机构编码">{visitOrderDetail?.jgbm || '-'}</Descriptions.Item>
             <Descriptions.Item label="接诊顾问">{visitOrderDetail?.fzuer_long || visitOrderDetail?.fzuer || '-'}</Descriptions.Item>
             <Descriptions.Item label="客服">{visitOrderDetail?.vipkf || visitOrderDetail?.d_vipkf || '-'}</Descriptions.Item>

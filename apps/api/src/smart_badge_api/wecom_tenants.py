@@ -54,6 +54,8 @@ def _tenant_to_config(row: WecomTenant) -> WecomTenantConfig:
         agent_id=agent_id,
         agent_secret=agent_secret,
         frontend_url=frontend_url,
+        callback_token=str(row.callback_token or "").strip() or None,
+        callback_aes_key=str(row.callback_aes_key or "").strip() or None,
         host=row.host,
         is_default=bool(row.is_default),
         api_base_url=get_settings().wecom_api_base_url,

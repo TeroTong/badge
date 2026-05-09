@@ -288,6 +288,8 @@ class WecomTenant(Base):
     corp_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     agent_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    callback_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    callback_aes_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     frontend_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     default_hospital_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     default_hospital_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -295,6 +297,7 @@ class WecomTenant(Base):
     sap_summary_template_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     sap_summary_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     sap_summary_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sap_summary_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     department_assistant_match_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -558,6 +561,50 @@ class SapHanaVisitOrder(Base):
     last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class VisitOrderAdvisorNotification(Base):
+    __tablename__ = "visit_order_advisor_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "hospital_code",
+            "visit_order_no",
+            "visit_order_seg",
+            "advisor_staff_id",
+            name="uq_visit_order_advisor_notifications_target",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_new_id)
+    hospital_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    visit_order_no: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    visit_order_seg: Mapped[str] = mapped_column(String(9), nullable=False)
+    triage_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    advisor_code: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    advisor_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    advisor_staff_id: Mapped[str | None] = mapped_column(ForeignKey("staff.id", ondelete="SET NULL"), nullable=True, index=True)
+    wecom_user_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    wecom_task_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    wecom_response_code: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    recording_start_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    recording_start_staff_id: Mapped[str | None] = mapped_column(ForeignKey("staff.id", ondelete="SET NULL"), nullable=True, index=True)
+    recording_start_device_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    recording_start_device_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    auto_link_status: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    auto_link_recording_id: Mapped[str | None] = mapped_column(ForeignKey("recordings.id", ondelete="SET NULL"), nullable=True, index=True)
+    auto_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_link_message_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_link_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    customer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    advisor_staff: Mapped[Staff | None] = relationship(foreign_keys=[advisor_staff_id])
+    recording_start_staff: Mapped[Staff | None] = relationship(foreign_keys=[recording_start_staff_id])
 
 
 class Visit(Base):
@@ -827,6 +874,40 @@ class SapPushLog(Base):
 
     recording: Mapped[Recording | None] = relationship()
     visit: Mapped[Visit | None] = relationship()
+
+
+class SapConsultationReview(Base):
+    """到诊单级 SAP 咨询备注确认与人工编辑记录。"""
+
+    __tablename__ = "sap_consultation_reviews"
+    __table_args__ = (
+        UniqueConstraint("visit_id", name="uq_sap_consultation_reviews_visit"),
+    )
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True, default=_new_id)
+    visit_id: Mapped[str] = mapped_column(ForeignKey("visits.id", ondelete="CASCADE"), nullable=False, index=True)
+    visit_order_no: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    visit_order_seg: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    hospital_code: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    customer_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    recording_ids: Mapped[list] = mapped_column(JSON, default=list)
+    blocks: Mapped[list] = mapped_column(JSON, default=list)
+    generated_text: Mapped[str] = mapped_column(Text, default="")
+    effective_text: Mapped[str] = mapped_column(Text, default="")
+    indication_payload: Mapped[list] = mapped_column(JSON, default=list)
+    payload_snapshot: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False, index=True)
+    last_push_log_id: Mapped[str | None] = mapped_column(ForeignKey("sap_push_logs.id", ondelete="SET NULL"), nullable=True)
+    created_by_staff_id: Mapped[str | None] = mapped_column(ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
+    updated_by_staff_id: Mapped[str | None] = mapped_column(ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    visit: Mapped[Visit] = relationship()
+    last_push_log: Mapped[SapPushLog | None] = relationship(foreign_keys=[last_push_log_id])
+    created_by_staff: Mapped[Staff | None] = relationship(foreign_keys=[created_by_staff_id])
+    updated_by_staff: Mapped[Staff | None] = relationship(foreign_keys=[updated_by_staff_id])
 
 
 class RiskRecord(Base):

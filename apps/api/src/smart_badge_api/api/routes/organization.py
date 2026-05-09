@@ -81,7 +81,7 @@ async def _resolve_hospital_name(db: AsyncSession, hospital_code: str) -> str | 
 
 
 async def _pick_default_hospital_code(db: AsyncSession, user: User) -> str | None:
-    if _clean_text(user.hospital_code):
+    if not is_global_role(user.role) and _clean_text(user.hospital_code):
         return _clean_text(user.hospital_code)
 
     tenant_code = (

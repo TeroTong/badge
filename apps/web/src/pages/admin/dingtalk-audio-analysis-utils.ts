@@ -553,5 +553,6 @@ export function buildArchiveAnalysisDetail(detail: DingtalkArchiveRecordingDetai
     },
     consultation_result: consultationResult,
     consultation_process_evaluation: consultationProcessEvaluation,
+    sap_consultation_preview: result.sap_consultation_preview as AnalysisDetail['sap_consultation_preview'],
   }
 }

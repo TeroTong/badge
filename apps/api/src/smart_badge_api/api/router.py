@@ -29,6 +29,7 @@ from smart_badge_api.api.routes.risk_records import router as risk_records_route
 from smart_badge_api.api.routes.risk_rules import router as risk_rules_router
 from smart_badge_api.api.routes.rule_groups import router as rule_groups_router
 from smart_badge_api.api.routes.sap_hana_visit_orders import router as sap_hana_visit_orders_router
+from smart_badge_api.api.routes.sap_consultation_reviews import router as sap_consultation_reviews_router
 from smart_badge_api.api.routes.segments import router as segments_router
 from smart_badge_api.api.routes.staff import router as staff_router
 from smart_badge_api.api.routes.transcripts import router as transcripts_router
@@ -39,6 +40,7 @@ from smart_badge_api.api.routes.visits import router as visits_router
 from smart_badge_api.api.routes.visit_order_push import router as visit_order_push_router
 from smart_badge_api.api.routes.visit_orders import router as visit_orders_router
 from smart_badge_api.api.routes.voiceprints import router as voiceprints_router
+from smart_badge_api.api.routes.wecom_callback import router as wecom_callback_router
 from smart_badge_api.api.routes.wecom_menu import router as wecom_menu_router
 from smart_badge_api.api.routes.wecom_sdk import router as wecom_sdk_router
 from smart_badge_api.api.routes.wecom_tenants import router as wecom_tenants_router
@@ -52,6 +54,7 @@ api_router.include_router(auth_router)
 api_router.include_router(asr_public_router)
 api_router.include_router(visit_order_push_router)
 api_router.include_router(iot_callback_router)
+api_router.include_router(wecom_callback_router)
 
 # ── 所有已认证用户可访问（viewer / manager / admin）──
 _any_auth = APIRouter(dependencies=[Depends(get_current_user)])
@@ -68,6 +71,7 @@ _any_auth.include_router(segments_router)
 _any_auth.include_router(quality_results_router)
 _any_auth.include_router(risk_records_router)
 _any_auth.include_router(sap_hana_visit_orders_router)
+_any_auth.include_router(sap_consultation_reviews_router)
 _any_auth.include_router(visit_orders_router)
 _any_auth.include_router(wecom_sdk_router)
 

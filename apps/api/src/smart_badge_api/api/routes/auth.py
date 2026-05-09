@@ -16,7 +16,7 @@ from smart_badge_api.account_provisioning import (
 from smart_badge_api.api.audit import append_audit_log
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.core.permissions import normalize_permission_role
+from smart_badge_api.core.permissions import is_global_role, normalize_permission_role
 from smart_badge_api.core.security import (
     create_access_token,
     create_refresh_token,
@@ -50,19 +50,22 @@ WECOM_LOGIN_STATE = "smart_badge_wecom_login"
 
 async def _build_user_out(db: AsyncSession, user: User) -> UserOut:
     staff = await resolve_staff_for_user(db, user=user, persist_link=True)
+    role = normalize_permission_role(user.role)
+    hospital_code = None if is_global_role(role) else user.hospital_code
+    hospital_name = "所有机构" if is_global_role(role) else user.hospital_name
     return UserOut(
         id=user.id,
         username=user.username,
         display_name=user.display_name,
-        role=normalize_permission_role(user.role),
+        role=role,
         is_active=user.is_active,
         staff_id=user.staff_id,
         staff_name=staff.name if staff else None,
         staff_external_account=staff.external_account if staff else None,
         staff_wecom_user_id=staff.wecom_user_id if staff else None,
         staff_wecom_corp_id=staff.wecom_corp_id if staff else None,
-        hospital_code=user.hospital_code,
-        hospital_name=user.hospital_name,
+        hospital_code=hospital_code,
+        hospital_name=hospital_name,
     )
 
 
@@ -74,6 +77,29 @@ def _sanitize_redirect_path(raw_redirect: str | None) -> str:
     if not redirect.startswith("/") or redirect.startswith("//"):
         return default_path
     return redirect
+
+
+def _is_global_staff(staff: Staff) -> bool:
+    return is_global_role(normalize_permission_role(staff.permission_role))
+
+
+async def _sync_wecom_staff_binding(
+    db: AsyncSession,
+    staff: Staff,
+    identity: WecomMemberIdentity,
+    tenant: WecomTenantConfig,
+    *,
+    reason: str,
+) -> tuple[Staff, str | None]:
+    desired_corp_id = None if _is_global_staff(staff) else tenant.corp_id
+    if staff.wecom_user_id == identity.userid and staff.wecom_corp_id == desired_corp_id:
+        return staff, None
+
+    staff.wecom_user_id = identity.userid
+    staff.wecom_corp_id = desired_corp_id
+    await db.commit()
+    await db.refresh(staff)
+    return staff, reason
 
 
 async def _resolve_staff_for_wecom_identity(
@@ -92,7 +118,34 @@ async def _resolve_staff_for_wecom_identity(
         )
     ).scalar_one_or_none()
     if staff is not None:
-        return staff, None
+        return await _sync_wecom_staff_binding(
+            db,
+            staff,
+            identity,
+            tenant,
+            reason="同步企业微信成员绑定",
+        )
+
+    staff = (
+        await db.execute(
+            select(Staff)
+            .where(
+                Staff.wecom_user_id == identity.userid,
+                Staff.wecom_corp_id.is_(None),
+                Staff.permission_role.in_(("super_admin", "system_admin")),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if staff is not None:
+        return await _sync_wecom_staff_binding(
+            db,
+            staff,
+            identity,
+            tenant,
+            reason="匹配全局管理员企业微信成员",
+        )
+
     if tenant.is_default:
         staff = (
             await db.execute(
@@ -105,10 +158,13 @@ async def _resolve_staff_for_wecom_identity(
             )
         ).scalar_one_or_none()
         if staff is not None:
-            staff.wecom_corp_id = tenant.corp_id
-            await db.commit()
-            await db.refresh(staff)
-            return staff, "补全企业微信主体绑定"
+            return await _sync_wecom_staff_binding(
+                db,
+                staff,
+                identity,
+                tenant,
+                reason="补全企业微信主体绑定",
+            )
 
     if identity.mobile:
         phone_matches = (
@@ -122,13 +178,13 @@ async def _resolve_staff_for_wecom_identity(
         ).scalars().all()
         if len(phone_matches) == 1:
             staff = phone_matches[0]
-            if staff.wecom_user_id != identity.userid or staff.wecom_corp_id != tenant.corp_id:
-                staff.wecom_user_id = identity.userid
-                staff.wecom_corp_id = tenant.corp_id
-                await db.commit()
-                await db.refresh(staff)
-                return staff, "首次通过手机号自动绑定企业微信成员"
-            return staff, None
+            return await _sync_wecom_staff_binding(
+                db,
+                staff,
+                identity,
+                tenant,
+                reason="首次通过手机号自动绑定企业微信成员",
+            )
 
     external_account_matches = (
         await db.execute(
@@ -141,13 +197,13 @@ async def _resolve_staff_for_wecom_identity(
     ).scalars().all()
     if len(external_account_matches) == 1:
         staff = external_account_matches[0]
-        if staff.wecom_user_id != identity.userid or staff.wecom_corp_id != tenant.corp_id:
-            staff.wecom_user_id = identity.userid
-            staff.wecom_corp_id = tenant.corp_id
-            await db.commit()
-            await db.refresh(staff)
-            return staff, "首次通过员工账号自动绑定企业微信成员"
-        return staff, None
+        return await _sync_wecom_staff_binding(
+            db,
+            staff,
+            identity,
+            tenant,
+            reason="首次通过员工账号自动绑定企业微信成员",
+        )
 
     return None, None
 

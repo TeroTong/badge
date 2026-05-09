@@ -12,4 +12,4 @@ export DINGTALK_AUDIO_SYNC_ENABLED=false
 export DINGTALK_AUDIO_ARCHIVE_SYNC_ENABLED=false
 export DINGTALK_AUDIO_BACKLOG_SYNC_ENABLED=false
 
-exec /home/ymailancy/.local/bin/uv run uvicorn smart_badge_api.main:app --host 0.0.0.0 --port 8000
+exec /home/ymailancy/.local/bin/uv run uvicorn smart_badge_api.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4}

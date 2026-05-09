@@ -46,6 +46,7 @@ from smart_badge_api.dingtalk_audio_quality import (
 )
 from smart_badge_api.periodic_locks import DINGTALK_AUDIO_SYNC_LOCK_ID, periodic_advisory_lock
 from smart_badge_api.recording_analysis_service import build_analysis_payload_from_utterances
+from smart_badge_api.visit_order_card_recording_link import try_auto_link_visit_card_recording
 from smart_badge_api.visit_order_sync import retry_visit_order_sync, sync_visit_orders_for_recording
 
 logger = logging.getLogger("smart_badge.dingtalk_audio_sync")
@@ -1037,6 +1038,7 @@ async def _mark_manifest_filtered(
     async with _session_factory() as db:
         recording = await _ensure_recording_stub_from_manifest(db, manifest, status="filtered")
         if recording is not None:
+            await try_auto_link_visit_card_recording(db, recording)
             await db.commit()
 
 
@@ -1119,6 +1121,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
                         duration_ms=duration_ms or 0,
                         provider=provider,
                     )
+                    await try_auto_link_visit_card_recording(db, recording)
                     await db.commit()
         else:
             manifest["status"] = "transcribing"
@@ -1129,6 +1132,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
             async with _session_factory() as db:
                 recording = await _ensure_recording_stub_from_manifest(db, manifest, status="transcribing")
                 if recording is not None:
+                    await try_auto_link_visit_card_recording(db, recording)
                     await db.commit()
 
             provider = get_settings().asr_provider
@@ -1174,6 +1178,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
                         duration_ms=duration_ms,
                         provider=provider,
                     )
+                    await try_auto_link_visit_card_recording(db, recording)
                     await db.commit()
 
         post_decision = _post_asr_quality_decision(utterances, full_text)
@@ -1259,6 +1264,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
                     duration_ms=normalized_duration_ms or duration_ms,
                     utterance_count=len(utterances),
                 )
+                await try_auto_link_visit_card_recording(db, recording)
                 await db.commit()
     except Exception as exc:
         logger.exception("failed to process staged DingTalk audio %s: %s", stage_key, exc)
@@ -1268,6 +1274,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
         async with _session_factory() as db:
             recording = await _ensure_recording_stub_from_manifest(db, manifest, status="failed")
             if recording is not None:
+                await try_auto_link_visit_card_recording(db, recording)
                 await db.commit()
 
 
@@ -1555,6 +1562,8 @@ async def sync_dingtalk_audio_files(
                 _write_manifest(paths, manifest)
                 recording = await _ensure_recording_stub_from_manifest(db, manifest, status="uploaded")
                 recording_id = recording.id if recording is not None else None
+                if recording is not None:
+                    await try_auto_link_visit_card_recording(db, recording)
                 await db.commit()
                 if recording_id is not None:
                     await _sync_visit_orders_for_recording_context(db, recording_id)

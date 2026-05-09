@@ -138,6 +138,7 @@ export const VISIT_STATUS_MAP: Record<string, { label: string; color: string }> 
 
 export const fetchVisits = (params?: {
   customer_id?: string
+  hospital_code?: string
   status?: string
   has_recharge?: boolean
   keyword?: string
@@ -154,6 +155,7 @@ export const fetchVisits = (params?: {
 }) => {
   const sp = new URLSearchParams()
   if (params?.customer_id) sp.set('customer_id', params.customer_id)
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.status) sp.set('status', params.status)
   if (params?.has_recharge !== undefined) sp.set('has_recharge', String(params.has_recharge))
   if (params?.keyword) sp.set('keyword', params.keyword)

@@ -7,6 +7,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { Modal } from 'antd'
+import { useSearchParams } from 'react-router-dom'
 
 import {
   getManagedBadges,
@@ -209,10 +210,15 @@ function buildOptimisticRecordingState(
 export function WecomBadgePage() {
   const auth = useAuth()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [notice, setNotice] = useState<BadgeNotice | null>(null)
   const [pendingAction, setPendingAction] = useState<PendingBadgeAction>(null)
   const [pageVisible, setPageVisible] = useState(() => isPageVisible())
   const [optimisticRecordingState, setOptimisticRecordingState] = useState<OptimisticRecordingState | null>(null)
+  const [autoStartHandledKey, setAutoStartHandledKey] = useState<string | null>(null)
+  const autoStartRequested = searchParams.get('action') === 'start'
+  const autoStartVisitOrderNo = searchParams.get('visit_order_no')?.trim() ?? ''
+  const autoStartKey = autoStartRequested ? `start:${autoStartVisitOrderNo || 'unknown'}` : ''
 
   const badgeQuery = useQuery({
     queryKey: MY_BADGE_QUERY_KEY,
@@ -383,6 +389,96 @@ export function WecomBadgePage() {
       await queryClient.invalidateQueries({ queryKey: MY_BADGE_QUERY_KEY })
     },
   })
+
+  const clearAutoStartParams = () => {
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('action')
+    nextParams.delete('visit_order_no')
+    setSearchParams(nextParams, { replace: true })
+  }
+
+  useEffect(() => {
+    if (auth.status !== 'authenticated' || !autoStartRequested || !autoStartKey) return
+    if (autoStartHandledKey === autoStartKey) return
+    if (badgeQuery.isLoading || (!badgeQuery.data && badgeQuery.isFetching)) return
+
+    const badge = badgeQuery.data
+    setAutoStartHandledKey(autoStartKey)
+
+    if (!badge?.bound) {
+      Modal.warning({
+        title: '无法开始录音',
+        content: badge?.reason || '当前账号暂未绑定工牌',
+        okText: '我知道了',
+        centered: true,
+        wrapClassName: 'wc-badge-action-modal',
+        onOk: clearAutoStartParams,
+      })
+      return
+    }
+
+    if (badge.online === false) {
+      Modal.warning({
+        title: '工牌未开机',
+        content: getOfflinePrompt('start'),
+        okText: '我知道了',
+        centered: true,
+        wrapClassName: 'wc-badge-action-modal',
+        onOk: clearAutoStartParams,
+      })
+      return
+    }
+
+    if (!badge.can_control_recording) {
+      Modal.warning({
+        title: '当前无法开始录音',
+        content: '当前工牌还未完成绑定，暂时不能控制录音',
+        okText: '我知道了',
+        centered: true,
+        wrapClassName: 'wc-badge-action-modal',
+        onOk: clearAutoStartParams,
+      })
+      return
+    }
+
+    if (badge.is_recording) {
+      Modal.confirm({
+        title: '工牌正在录音',
+        content: autoStartVisitOrderNo
+          ? `到诊单 ${autoStartVisitOrderNo} 需要开始新录音。是否停止当前录音并开始新的录音？`
+          : '是否停止当前录音并开始新的录音？',
+        okText: '停止并开始新录音',
+        cancelText: '暂不处理',
+        centered: true,
+        wrapClassName: 'wc-badge-action-modal',
+        onOk: async () => {
+          try {
+            await stopMutation.mutateAsync()
+            await startMutation.mutateAsync()
+          } finally {
+            clearAutoStartParams()
+          }
+        },
+        onCancel: clearAutoStartParams,
+      })
+      return
+    }
+
+    void startMutation.mutateAsync().finally(clearAutoStartParams)
+  }, [
+    auth.status,
+    autoStartHandledKey,
+    autoStartKey,
+    autoStartRequested,
+    autoStartVisitOrderNo,
+    badgeQuery.data,
+    badgeQuery.isFetching,
+    badgeQuery.isLoading,
+    searchParams,
+    setSearchParams,
+    startMutation,
+    stopMutation,
+  ])
 
   if (auth.status !== 'authenticated') {
     return <div className="wc-empty">请先登录后查看工牌状态。</div>

@@ -180,6 +180,7 @@ export type CustomerMergedAnalysis = {
 
 export const fetchCustomers = (params?: {
   keyword?: string
+  hospital_code?: string
   is_active?: boolean
   consultant_id?: string
   has_visits?: boolean
@@ -194,6 +195,7 @@ export const fetchCustomers = (params?: {
 }) => {
   const sp = new URLSearchParams()
   if (params?.keyword) sp.set('keyword', params.keyword)
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.is_active !== undefined) sp.set('is_active', String(params.is_active))
   if (params?.consultant_id) sp.set('consultant_id', params.consultant_id)
   if (params?.has_visits !== undefined) sp.set('has_visits', String(params.has_visits))

@@ -26,12 +26,15 @@ type TenantFormValues = {
   corp_id: string
   agent_id: string
   agent_secret?: string
+  callback_token?: string
+  callback_aes_key?: string
   frontend_url: string
   default_hospital_code?: string
   sap_summary_template_name?: string
   sap_summary_template_version?: string
   sap_summary_template?: string
   sap_summary_prompt?: string
+  sap_summary_enabled: boolean
   is_default: boolean
   is_active: boolean
 }
@@ -120,12 +123,21 @@ function compactPayload(values: TenantFormValues, editing: boolean): WecomTenant
     sap_summary_template_version: values.sap_summary_template_version?.trim() || null,
     sap_summary_template: values.sap_summary_template?.trim() || null,
     sap_summary_prompt: values.sap_summary_prompt?.trim() || null,
+    sap_summary_enabled: values.sap_summary_enabled !== false,
     is_default: values.is_default,
     is_active: values.is_active,
   }
   const secret = values.agent_secret?.trim()
   if (secret || !editing) {
     payload.agent_secret = secret || null
+  }
+  const callbackToken = values.callback_token?.trim()
+  if (callbackToken || !editing) {
+    payload.callback_token = callbackToken || null
+  }
+  const callbackAesKey = values.callback_aes_key?.trim()
+  if (callbackAesKey || !editing) {
+    payload.callback_aes_key = callbackAesKey || null
   }
   return payload
 }
@@ -235,12 +247,15 @@ export function InstitutionsPage() {
       corp_id: tenant?.corp_id ?? '',
       agent_id: tenant?.agent_id ?? '',
       agent_secret: '',
+      callback_token: '',
+      callback_aes_key: '',
       frontend_url: tenant?.frontend_url ?? '',
       default_hospital_code: tenant?.default_hospital_code ?? '',
       sap_summary_template_name: tenant?.sap_summary_template_name ?? '',
       sap_summary_template_version: tenant?.sap_summary_template_version ?? '',
       sap_summary_template: tenant?.sap_summary_template ?? '',
       sap_summary_prompt: tenant?.sap_summary_prompt ?? '',
+      sap_summary_enabled: tenant?.sap_summary_enabled ?? true,
       is_default: tenant?.is_default ?? false,
       is_active: tenant?.is_active ?? true,
     })
@@ -439,6 +454,9 @@ export function InstitutionsPage() {
                   <Tag color={isWecomConfigured(row) ? 'green' : 'default'}>
                     {isWecomConfigured(row) ? '企微已配置' : '企微待补充'}
                   </Tag>
+                  <Tag color={row.callback_configured ? 'blue' : 'default'}>
+                    {row.callback_configured ? '回调已配置' : '回调未配置'}
+                  </Tag>
                 </Space>
               ),
             },
@@ -456,15 +474,18 @@ export function InstitutionsPage() {
               title: 'SAP总结模板',
               width: 220,
               render: (_value, row: WecomTenant) => {
-                const configured = Boolean(row.sap_summary_template || row.sap_summary_prompt)
+                const enabled = row.sap_summary_enabled !== false
+                const configured = enabled && Boolean(row.sap_summary_template || row.sap_summary_prompt)
                 return (
                   <Space direction="vertical" size={2}>
                     <Space wrap size={6}>
-                      <Tag color={configured ? 'purple' : 'default'}>{configured ? '已配置' : '未配置'}</Tag>
-                      {row.sap_summary_template_version ? <Tag>{row.sap_summary_template_version}</Tag> : null}
+                      <Tag color={!enabled ? 'red' : configured ? 'purple' : 'default'}>
+                        {!enabled ? '已禁用' : configured ? '已配置' : '未配置'}
+                      </Tag>
+                      {enabled && row.sap_summary_template_version ? <Tag>{row.sap_summary_template_version}</Tag> : null}
                     </Space>
                     <Text type="secondary" ellipsis>
-                      {row.sap_summary_template_name || '使用系统默认总结口径'}
+                      {enabled ? row.sap_summary_template_name || '使用系统默认总结口径' : '不回写SAP总结信息'}
                     </Text>
                   </Space>
                 )
@@ -569,34 +590,67 @@ export function InstitutionsPage() {
             <Input.Password autoComplete="new-password" />
           </Form.Item>
           <Form.Item
-            name="sap_summary_template_name"
-            label="SAP总结模板名称"
-            extra="便于区分不同机构的总结口径，不会直接回传给 SAP。"
+            name="callback_token"
+            label="接收消息 Token"
+            extra={editingTenant ? '编辑时留空表示不修改现有 Token。需与企业微信后台“接收消息”中的 Token 一致。' : '需与企业微信后台“接收消息”中的 Token 一致。'}
           >
-            <Input placeholder="例如：长沙雅美总结信息 v1" />
-          </Form.Item>
-          <Form.Item name="sap_summary_template_version" label="SAP总结模板版本">
-            <Input placeholder="例如：v1.0" />
+            <Input.Password autoComplete="new-password" />
           </Form.Item>
           <Form.Item
-            name="sap_summary_template"
-            label="SAP总结信息模板"
-            extra="用于描述本机构希望总结覆盖的大点、小点、顺序和写作风格。后续录音分析会把这段内容加入 system prompt。"
+            name="callback_aes_key"
+            label="接收消息 EncodingAESKey"
+            extra={editingTenant ? '编辑时留空表示不修改现有 EncodingAESKey。企业微信后台可随机生成，长度为 43 位。' : '企业微信后台可随机生成，长度为 43 位。'}
           >
-            <Input.TextArea
-              rows={7}
-              placeholder="例如：按客户背景、决策画像、方案反馈、成交与跟进等段落自然总结；不要机械重复前面的主诉、预算、顾虑、推荐方案。"
-            />
+            <Input.Password autoComplete="new-password" maxLength={43} />
           </Form.Item>
           <Form.Item
-            name="sap_summary_prompt"
-            label="SAP总结写作补充提示词"
-            extra="可填写更细的机构口径。若与系统默认口径冲突，以这里的机构配置优先。"
+            name="sap_summary_enabled"
+            label="SAP总结信息回写"
+            valuePropName="checked"
+            extra="关闭后，SAP咨询备注不会生成“●总结信息”段，也不会向分析提示词追加本机构总结模板。"
           >
-            <Input.TextArea
-              rows={5}
-              placeholder="例如：语言要像咨询复盘，不要写成字段堆砌；重点说明为什么推荐、客户怎么反应、下一步如何转化。"
-            />
+            <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.sap_summary_enabled !== cur.sap_summary_enabled}>
+            {({ getFieldValue }) => {
+              const summaryEnabled = getFieldValue('sap_summary_enabled') !== false
+              return (
+                <>
+                  <Form.Item
+                    name="sap_summary_template_name"
+                    label="SAP总结模板名称"
+                    extra="便于区分不同机构的总结口径，不会直接回传给 SAP。"
+                  >
+                    <Input disabled={!summaryEnabled} placeholder="例如：长沙雅美总结信息 v1" />
+                  </Form.Item>
+                  <Form.Item name="sap_summary_template_version" label="SAP总结模板版本">
+                    <Input disabled={!summaryEnabled} placeholder="例如：v1.0" />
+                  </Form.Item>
+                  <Form.Item
+                    name="sap_summary_template"
+                    label="SAP总结信息模板"
+                    extra="用于描述本机构希望总结覆盖的大点、小点、顺序和写作风格。后续录音分析会把这段内容加入 system prompt。"
+                  >
+                    <Input.TextArea
+                      disabled={!summaryEnabled}
+                      rows={7}
+                      placeholder="例如：按客户背景、决策画像、方案反馈、成交与跟进等段落自然总结；不要机械重复前面的主诉、预算、顾虑、推荐方案。"
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name="sap_summary_prompt"
+                    label="SAP总结写作补充提示词"
+                    extra="可填写更细的机构口径。若与系统默认口径冲突，以这里的机构配置优先。"
+                  >
+                    <Input.TextArea
+                      disabled={!summaryEnabled}
+                      rows={5}
+                      placeholder="例如：语言要像咨询复盘，不要写成字段堆砌；重点说明为什么推荐、客户怎么反应、下一步如何转化。"
+                    />
+                  </Form.Item>
+                </>
+              )
+            }}
           </Form.Item>
           <Space size="large">
             <Form.Item name="is_default" label="默认配置" valuePropName="checked">

@@ -63,9 +63,30 @@ from smart_badge_api.staff_sync import (
 
 router = APIRouter(prefix="/staff", tags=["人员管理"])
 logger = logging.getLogger("smart_badge.staff_routes")
+ALL_INSTITUTIONS_LABEL = "所有机构"
+
+
+def _is_global_permission_role(role: str | None) -> bool:
+    return is_global_role(normalize_permission_role(role))
+
+
+def _staff_scope_fields_for_role(
+    permission_role: str | None,
+    hospital_code: str | None,
+    hospital_short_name: str | None,
+) -> tuple[str | None, str | None]:
+    if _is_global_permission_role(permission_role):
+        return None, ALL_INSTITUTIONS_LABEL
+    return hospital_code, hospital_short_name
 
 
 def _to_out(staff: Staff, *, position_name: str | None) -> StaffOut:
+    permission_role = normalize_permission_role(getattr(staff, "permission_role", None))
+    hospital_code, hospital_short_name = _staff_scope_fields_for_role(
+        permission_role,
+        staff.hospital_code,
+        staff.hospital_short_name,
+    )
     return StaffOut(
         id=staff.id,
         name=staff.name,
@@ -74,12 +95,12 @@ def _to_out(staff: Staff, *, position_name: str | None) -> StaffOut:
         wecom_user_id=staff.wecom_user_id,
         wecom_corp_id=staff.wecom_corp_id,
         gender=staff.gender,
-        hospital_code=staff.hospital_code,
-        hospital_short_name=staff.hospital_short_name,
+        hospital_code=hospital_code,
+        hospital_short_name=hospital_short_name,
         position_id=staff.position_id,
         position_name=position_name,
         role=staff.role,
-        permission_role=normalize_permission_role(getattr(staff, "permission_role", None)),
+        permission_role=permission_role,
         badge_id=staff.badge_id,
         is_doctor=staff.is_doctor,
         is_nurse=staff.is_nurse,
@@ -140,13 +161,18 @@ def _to_badge_binding_candidate_out(
     position_name: str | None,
     account_user: User | None,
 ) -> StaffBadgeBindingCandidateOut:
+    hospital_code, hospital_short_name = _staff_scope_fields_for_role(
+        staff.permission_role,
+        staff.hospital_code,
+        staff.hospital_short_name,
+    )
     return StaffBadgeBindingCandidateOut(
         id=staff.id,
         name=staff.name,
         external_account=staff.external_account,
         badge_id=staff.badge_id,
-        hospital_code=staff.hospital_code,
-        hospital_short_name=staff.hospital_short_name,
+        hospital_code=hospital_code,
+        hospital_short_name=hospital_short_name,
         position_name=position_name,
         is_active=staff.is_active,
         account_opened=account_user is not None,
@@ -541,19 +567,26 @@ async def bulk_import_staff_rows(db: AsyncSession, rows: list[StaffImportRow]) -
             if hospital_code
             else None
         ) or _clean_text(row.hospital_short_name)
+        permission_role = normalize_permission_role(row.permission_role or (position.mapped_role if position else None))
+        wecom_corp_id = (hospital_identity or {}).get("corp_id") or row.wecom_corp_id or None
+        if _is_global_permission_role(permission_role):
+            hospital_code = None
+            hospital_short_name = ALL_INSTITUTIONS_LABEL
+            hospital_identity = None
+            wecom_corp_id = None
 
         staff = Staff(
             name=name,
             phone=row.phone or None,
             external_account=row.external_account or None,
             wecom_user_id=row.wecom_user_id or None,
-            wecom_corp_id=(hospital_identity or {}).get("corp_id") or row.wecom_corp_id or None,
+            wecom_corp_id=wecom_corp_id,
             gender=row.gender or None,
             hospital_code=hospital_code,
             hospital_short_name=hospital_short_name,
             position_id=position.id if position else None,
             role="consultant",
-            permission_role=normalize_permission_role(row.permission_role or (position.mapped_role if position else None)),
+            permission_role=permission_role,
             badge_id=None,
             is_active=row.is_active,
         )
@@ -770,6 +803,8 @@ async def create_staff(
         raise HTTPException(400, "未根据员工编号自动获取姓名，请手动填写姓名")
     if not hospital_code and identity and identity.hospital_code:
         hospital_code = _clean_text(identity.hospital_code)
+    if _is_global_permission_role(permission_role):
+        hospital_code = None
     _assert_create_permission(current_user, target_next_role=permission_role)
     _assert_scope_assignment(
         current_user,
@@ -778,6 +813,9 @@ async def create_staff(
     )
     await _ensure_super_admin_uniqueness(db, permission_role=permission_role)
     hospital_name, wecom_corp_id = await _resolve_institution_identity(db, hospital_code)
+    if _is_global_permission_role(permission_role):
+        hospital_name = ALL_INSTITUTIONS_LABEL
+        wecom_corp_id = None
     payload = body.model_dump(exclude={"role", "permission_role", "hospital_short_name", "wecom_corp_id"})
     payload["name"] = resolved_name
     payload["hospital_code"] = hospital_code
@@ -910,6 +948,7 @@ async def get_staff_directory_sync_status(
 @router.get("/badge-binding-candidates", response_model=list[StaffBadgeBindingCandidateOut])
 async def list_staff_badge_binding_candidates(
     keyword: str | None = Query(None),
+    hospital_code: str | None = Query(None),
     include_inactive: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -931,6 +970,10 @@ async def list_staff_badge_binding_candidates(
 
     if not include_inactive:
         stmt = stmt.where(Staff.is_active.is_(True))
+
+    normalized_hospital_code = _clean_text(hospital_code)
+    if normalized_hospital_code:
+        stmt = stmt.where(Staff.hospital_code == normalized_hospital_code)
 
     if keyword and keyword.strip():
         like = f"%{keyword.strip()}%"
@@ -1143,7 +1186,12 @@ async def update_staff(
         updates.get("permission_role", person.permission_role),
     )
     next_hospital_code = _clean_text(updates.get("hospital_code", person.hospital_code))
+    if _is_global_permission_role(next_permission_role):
+        next_hospital_code = None
     next_hospital_name, next_wecom_corp_id = await _resolve_institution_identity(db, next_hospital_code)
+    if _is_global_permission_role(next_permission_role):
+        next_hospital_name = ALL_INSTITUTIONS_LABEL
+        next_wecom_corp_id = None
     _assert_manage_permission(
         current_user,
         target_current_role=person.permission_role,
@@ -1173,6 +1221,12 @@ async def update_staff(
         await db.rollback()
         raise HTTPException(400, "人员更新失败，员工编号或企业微信 UserId 可能重复") from exc
     await db.refresh(person)
+    # If a linked user account exists for this staff, its cached scope/role
+    # may have changed — invalidate so all workers reload from DB.
+    _linked_user_after = await get_linked_user_by_staff_id(db, person.id)
+    if _linked_user_after is not None:
+        from smart_badge_api.api.deps import invalidate_user_cache
+        await invalidate_user_cache(_linked_user_after.id)
 
     position = await db.get(PositionProfile, person.position_id) if person.position_id else None
     await append_audit_log(
@@ -1202,11 +1256,15 @@ async def delete_staff(
     )
     name = person.name
     linked_user = await get_linked_user_by_staff_id(db, person.id)
+    linked_user_id = linked_user.id if linked_user is not None else None
     if linked_user is not None:
         linked_user.is_active = False
         linked_user.staff_id = None
     await db.delete(person)
     await db.commit()
+    if linked_user_id:
+        from smart_badge_api.api.deps import invalidate_user_cache
+        await invalidate_user_cache(linked_user_id)
     await append_audit_log(
         db,
         operator_name=current_user.display_name or current_user.username,

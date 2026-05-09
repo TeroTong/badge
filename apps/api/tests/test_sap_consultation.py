@@ -12,8 +12,15 @@ from smart_badge_api.db.models import (
     Recording,
     RecordingVisitAnalysis,
     RecordingVisitLink,
+    SapConsultationReview,
+    SapPushLog,
+    Staff,
     Visit,
     VisitOrder,
+)
+from smart_badge_api.api.routes.sap_consultation_reviews import (
+    _extract_consultation_no_from_push_log,
+    _status_from_review_and_log,
 )
 from smart_badge_api.sap_consultation import (
     _merge_analysis_results,
@@ -21,6 +28,146 @@ from smart_badge_api.sap_consultation import (
     build_consultation_text,
     generate_sap_consultation_payloads,
 )
+
+
+def test_sap_review_status_ignores_system_refresh_after_success() -> None:
+    pushed_at = datetime(2026, 5, 9, 9, 0, 0, tzinfo=timezone.utc)
+    review = SapConsultationReview(
+        id="review-status-001",
+        visit_id="visit-status-001",
+        status="succeeded",
+        blocks=[
+            {
+                "recording_id": "rec001",
+                "generated_body": "●顾客主诉：系统生成内容",
+                "edited_body": None,
+                "effective_body": "●顾客主诉：系统生成内容",
+            }
+        ],
+        generated_text="●备注人员：员工\n●顾客主诉：系统生成内容",
+        effective_text="●备注人员：员工\n●顾客主诉：系统生成内容",
+        updated_at=datetime(2026, 5, 9, 9, 0, 1, tzinfo=timezone.utc),
+    )
+    latest_log = SapPushLog(
+        id="log-status-001",
+        visit_id=review.visit_id,
+        status="succeeded",
+        sent_at=pushed_at,
+        updated_at=pushed_at,
+        created_at=pushed_at,
+    )
+
+    status, label, error, _last_push_at = _status_from_review_and_log(review, latest_log)
+
+    assert status == "succeeded"
+    assert label == "回传成功"
+    assert error is None
+
+
+def test_sap_review_status_marks_missing_review_as_pending() -> None:
+    status, label, error, last_push_at = _status_from_review_and_log(None, None)
+
+    assert status == "pending"
+    assert label == "待回传"
+    assert error is None
+    assert last_push_at is None
+
+
+def test_sap_review_status_distinguishes_system_pending_from_user_edit() -> None:
+    pushed_at = datetime(2026, 5, 9, 9, 0, 0, tzinfo=timezone.utc)
+    latest_log = SapPushLog(
+        id="log-status-002",
+        visit_id="visit-status-002",
+        status="succeeded",
+        sent_at=pushed_at,
+        updated_at=pushed_at,
+        created_at=pushed_at,
+    )
+    system_refreshed = SapConsultationReview(
+        id="review-status-002",
+        visit_id="visit-status-002",
+        status="pending",
+        blocks=[
+            {
+                "recording_id": "rec001",
+                "generated_body": "●顾客主诉：系统刷新后的内容",
+                "edited_body": None,
+                "effective_body": "●顾客主诉：系统刷新后的内容",
+            }
+        ],
+        updated_at=datetime(2026, 5, 9, 9, 30, 0, tzinfo=timezone.utc),
+    )
+    user_edited = SapConsultationReview(
+        id="review-status-003",
+        visit_id="visit-status-002",
+        status="modified",
+        blocks=[
+            {
+                "recording_id": "rec001",
+                "generated_body": "●顾客主诉：系统生成内容",
+                "edited_body": "●顾客主诉：人工编辑内容",
+                "effective_body": "●顾客主诉：人工编辑内容",
+            }
+        ],
+        updated_at=datetime(2026, 5, 9, 9, 30, 0, tzinfo=timezone.utc),
+    )
+
+    system_status, system_label, _error, _last_push_at = _status_from_review_and_log(system_refreshed, latest_log)
+    edited_status, edited_label, _error, _last_push_at = _status_from_review_and_log(user_edited, latest_log)
+
+    assert system_status == "pending"
+    assert system_label == "待回传"
+    assert edited_status == "modified_pending"
+    assert edited_label == "已修改未回传"
+
+
+def test_sap_review_extracts_success_consultation_no_from_response_body() -> None:
+    push_log = SapPushLog(
+        id="log-consultation-no-001",
+        status="succeeded",
+        response_items=[
+            {
+                "success": True,
+                "http_status_code": 200,
+                "gateway_code": 200,
+                "business_status": "S",
+                "business_message": "咨询单维护成功！",
+                "response_body": {
+                    "code": 200,
+                    "msg": '{"STATU":"S","REMSG":"咨询单维护成功！","ZXDH":"3121178353"}',
+                },
+            }
+        ],
+    )
+
+    assert _extract_consultation_no_from_push_log(push_log) == "3121178353"
+
+
+def test_sap_review_extracts_retry_consultation_no_from_existing_order_message() -> None:
+    push_log = SapPushLog(
+        id="log-consultation-no-002",
+        status="succeeded",
+        response_items=[
+            {
+                "success": False,
+                "http_status_code": 200,
+                "gateway_code": 200,
+                "business_status": "E",
+                "business_message": "分诊单【2118339661-110】已有咨询单【3121178353】，不能再创建！",
+            },
+            {
+                "success": True,
+                "http_status_code": 200,
+                "gateway_code": 200,
+                "business_status": "S",
+                "business_message": "咨询单维护成功！",
+                "response_body": {"code": 200, "msg": '{"STATU":"S","REMSG":"咨询单维护成功！"}'},
+                "retry_reason": "使用已有咨询单号 3121178353 改为修改模式回传",
+            },
+        ],
+    )
+
+    assert _extract_consultation_no_from_push_log(push_log) == "3121178353"
 
 
 def test_build_consultation_text_uses_new_consultation_result_structure() -> None:
@@ -56,7 +203,8 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
 
     text = build_consultation_text("兰四秀", result)
 
-    assert "●接诊人员：兰四秀" in text
+    assert "●备注人员：兰四秀" in text
+    assert "●接诊人员：" not in text
     assert "●顾客主诉：下巴后缩；希望更立体自然" in text
     assert "●本次预算：5000-8000" in text
     assert "●顾客顾虑：担心不自然；担心超预算" in text
@@ -108,6 +256,60 @@ def test_build_consultation_text_prefers_model_sap_summary_materials() -> None:
     assert "1、客户基础信息：客户为新客，既往未做医美，整体更需要先建立基础信任。" in text
     assert "2、需求与动机分析：客户主要想改善下巴轮廓，追求自然立体，当前阻力集中在是否自然和预算匹配。" in text
     assert "本次预算或金额线索为5000-8000" not in text
+
+
+def test_unlinked_sap_preview_uses_recording_staff_as_remark_person() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                staff = Staff(id="staff001", name="李玲玉")
+                recording = Recording(
+                    id="rec001",
+                    staff_id=staff.id,
+                    file_name="audio_001.mp3",
+                    file_path="uploads/recordings/audio_001.mp3",
+                    status="analyzed",
+                    created_at=datetime(2026, 4, 16, 9, 30, 0, tzinfo=timezone.utc),
+                )
+                task = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="uploads/analysis_input/recording_rec001.json",
+                    status="done",
+                    result={
+                        "consultation_result": {
+                            "chief_complaint_and_indications": {
+                                "primary_demands": ["改善鼻部线条"],
+                            },
+                            "deal_factors": {"concerns": ["担心价格"]},
+                            "recommended_plan": {"items": [{"plan": "鼻部玻尿酸塑形"}]},
+                            "deal_outcome": {"status": "未明确"},
+                        },
+                    },
+                )
+                db.add_all([staff, recording, task])
+                await db.commit()
+
+                preview = await generate_sap_consultation_payloads(
+                    db,
+                    recording.id,
+                    allow_unlinked_preview=True,
+                )
+
+                text = preview["payloads"][0]["text"]
+                assert preview["advisor_name"] == "李玲玉"
+                assert "●备注人员：李玲玉" in text
+                assert "●接诊人员：" not in text
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_build_consultation_text_formats_inline_model_sap_summary_points() -> None:
@@ -564,6 +766,7 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
             async with session_factory() as db:
                 customer_primary = Customer(id="cust001", name="主客户", external_customer_code="KH001")
                 customer_companion = Customer(id="cust002", name="同行客户", external_customer_code="KH002")
+                staff = Staff(id="staff001", name="李玲玉")
                 visit_primary = Visit(
                     id="visit001",
                     customer_id=customer_primary.id,
@@ -582,6 +785,7 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
                     file_name="audio_001.mp3",
                     file_path="uploads/recordings/audio_001.mp3",
                     status="analyzed",
+                    staff_id=staff.id,
                     created_at=datetime(2026, 4, 16, 9, 30, 0, tzinfo=timezone.utc),
                 )
                 link_primary = RecordingVisitLink(
@@ -679,6 +883,7 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
                     [
                         customer_primary,
                         customer_companion,
+                        staff,
                         visit_primary,
                         visit_companion,
                         recording,
@@ -707,6 +912,8 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
                 assert preview["payloads"][1]["zxxx"]["kunr"] == "KH002"
                 assert preview["payloads"][0]["zxxx"]["fzdh"] == "DZ001-110"
                 assert preview["payloads"][1]["zxxx"]["fzdh"] == "DZ002-110"
+                assert "●备注人员：李玲玉" in preview["payloads"][0]["text"]
+                assert "●接诊人员：" not in preview["payloads"][0]["text"]
                 assert "●顾客主诉：" in preview["payloads"][0]["text"]
                 assert "●本次预算：" in preview["payloads"][0]["text"]
                 assert "●顾客顾虑：" in preview["payloads"][0]["text"]
@@ -726,10 +933,19 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
     monkeypatch.setenv("SAP_RFC_OVERRIDE_USER", "")
     monkeypatch.setenv("SAP_RFC_OVERRIDE_ADVXC", "")
     monkeypatch.setenv("SAP_RFC_OVERRIDE_ZXDH", "")
-    monkeypatch.setattr(
-        "smart_badge_api.sap_consultation.chat_completion",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
-    )
+    def fake_chat_completion(*args, **kwargs) -> str:
+        return json.dumps(
+            {
+                "standardized_indications": {
+                    "items": [
+                        {"department_code": "Y3", "indication_code": "SYZ3001", "body_part_code": "BW3001"},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr("smart_badge_api.sap_consultation.chat_completion", fake_chat_completion)
     get_settings.cache_clear()
 
     async def scenario() -> None:
@@ -742,6 +958,8 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
         try:
             async with session_factory() as db:
                 customer = Customer(id="cust001", name="主客户", external_customer_code="KH001")
+                staff_one = Staff(id="staff001", name="李玲玉")
+                staff_two = Staff(id="staff002", name="王医生")
                 visit = Visit(
                     id="visit001",
                     customer_id=customer.id,
@@ -767,6 +985,7 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
                     file_name="consultant.mp3",
                     file_path="uploads/recordings/consultant.mp3",
                     status="analyzed",
+                    staff_id=staff_one.id,
                     created_at=datetime(2026, 4, 16, 9, 30, 0, tzinfo=timezone.utc),
                 )
                 recording_two = Recording(
@@ -775,6 +994,7 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
                     file_name="doctor.mp3",
                     file_path="uploads/recordings/doctor.mp3",
                     status="analyzed",
+                    staff_id=staff_two.id,
                     created_at=datetime(2026, 4, 16, 9, 45, 0, tzinfo=timezone.utc),
                 )
                 link_one = RecordingVisitLink(recording_id=recording_one.id, visit_id=visit.id, is_primary=True)
@@ -826,7 +1046,7 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
                     },
                     completed_at=datetime(2026, 4, 16, 10, 5, 0, tzinfo=timezone.utc),
                 )
-                db.add_all([customer, visit, order, recording_one, recording_two, link_one, link_two, task_one, task_two])
+                db.add_all([customer, staff_one, staff_two, visit, order, recording_one, recording_two, link_one, link_two, task_one, task_two])
                 await db.commit()
 
                 preview = await generate_sap_consultation_payloads(db, recording_one.id)
@@ -836,12 +1056,190 @@ def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_
                 assert preview["targets"][0]["recording_count"] == 2
                 assert len(preview["payloads"]) == 1
                 payload = preview["payloads"][0]
+                assert "●备注人员：李玲玉" in payload["text"]
+                assert "●备注人员：王医生" in payload["text"]
+                assert "●接诊人员：" not in payload["text"]
+                assert payload["text"].count("●备注人员：") == 2
+                assert payload["text"].index("●备注人员：李玲玉") < payload["text"].index("●备注人员：王医生")
                 assert "改善法令纹" in payload["text"]
                 assert "眼下轻度松弛，想显年轻" in payload["text"]
                 assert "玻尿酸填充法令纹" in payload["text"]
                 assert "眼周抗衰联合注射" in payload["text"]
-                assert "需要回去考虑价格" in payload["text"]
-                assert len(payload["TAB_SYZ"]) == 2
+                assert "●本次预算：无" in payload["text"]
+                assert "●本次预算：1万左右" in payload["text"]
+                assert payload["TAB_SYZ"] == [
+                    {"CCKS": "Y3", "CCSYZ": "SYZ3001", "CCBW": "BW3001"},
+                ]
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        get_settings.cache_clear()
+
+
+def test_generate_sap_consultation_payloads_refreshes_stale_review_with_new_recording(monkeypatch) -> None:
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_KUNR", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_USER", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ADVXC", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ZXDH", "")
+
+    def fake_chat_completion(*args, **kwargs) -> str:
+        return json.dumps(
+            {
+                "standardized_indications": {
+                    "items": [
+                        {"department_code": "Y3", "indication_code": "SYZ3001", "body_part_code": "BW3001"},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr("smart_badge_api.sap_consultation.chat_completion", fake_chat_completion)
+    get_settings.cache_clear()
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                customer = Customer(id="cust001", name="Customer", external_customer_code="KH001")
+                staff_one = Staff(id="staff001", name="Alice")
+                staff_two = Staff(id="staff002", name="Bob")
+                visit = Visit(
+                    id="visit001",
+                    customer_id=customer.id,
+                    external_visit_order_no="DZ001",
+                    external_visit_order_seg="110",
+                )
+                order = VisitOrder(
+                    id="vo001",
+                    dzdh="DZ001",
+                    dzseg="110",
+                    jgbm="6101",
+                    kunr="KH001",
+                    ninam="Customer",
+                    advxc="ADV001",
+                    advxc_long="Advisor",
+                    fzdh="DZ001-110",
+                    crtdt="20260416",
+                    crttm="173000",
+                )
+                recording_one = Recording(
+                    id="rec001",
+                    visit_id=visit.id,
+                    file_name="alice.mp3",
+                    file_path="uploads/recordings/alice.mp3",
+                    status="analyzed",
+                    staff_id=staff_one.id,
+                    created_at=datetime(2026, 4, 16, 9, 30, 0, tzinfo=timezone.utc),
+                )
+                recording_two = Recording(
+                    id="rec002",
+                    visit_id=visit.id,
+                    file_name="bob.mp3",
+                    file_path="uploads/recordings/bob.mp3",
+                    status="analyzed",
+                    staff_id=staff_two.id,
+                    created_at=datetime(2026, 4, 16, 9, 45, 0, tzinfo=timezone.utc),
+                )
+                task_one = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="uploads/analysis_input/recording_rec001.json",
+                    status="done",
+                    result={
+                        "consultation_result": {
+                            "chief_complaint_and_indications": {"primary_demands": ["A GENERATED DEMAND"]},
+                            "recommended_plan": {"items": [{"plan": "A GENERATED PLAN"}]},
+                            "deal_outcome": {"status": "未明确"},
+                        },
+                        "standardized_indications": {"items": []},
+                    },
+                    completed_at=datetime(2026, 4, 16, 10, 0, 0, tzinfo=timezone.utc),
+                )
+                task_two = AnalysisTask(
+                    id="task002",
+                    file_name="recording_rec002.json",
+                    file_path="uploads/analysis_input/recording_rec002.json",
+                    status="done",
+                    result={
+                        "consultation_result": {
+                            "chief_complaint_and_indications": {"primary_demands": ["B GENERATED DEMAND"]},
+                            "deal_factors": {"budget": "B BUDGET"},
+                            "recommended_plan": {"items": [{"plan": "B GENERATED PLAN"}]},
+                            "deal_outcome": {"status": "未明确"},
+                        },
+                        "standardized_indications": {
+                            "items": [
+                                {"department_code": "Y3", "indication_code": "SYZ3001", "body_part_code": "BW3001"},
+                            ]
+                        },
+                    },
+                    completed_at=datetime(2026, 4, 16, 10, 5, 0, tzinfo=timezone.utc),
+                )
+                edited_body = "●顾客主诉：A EDITED DEMAND\n●本次预算：A EDITED BUDGET\n●顾客顾虑：无\n●推荐方案：A EDITED PLAN"
+                review = SapConsultationReview(
+                    id="review001",
+                    visit_id=visit.id,
+                    visit_order_no="DZ001",
+                    visit_order_seg="110",
+                    recording_ids=[recording_one.id],
+                    blocks=[
+                        {
+                            "recording_id": recording_one.id,
+                            "file_name": recording_one.file_name,
+                            "staff_id": staff_one.id,
+                            "staff_name": staff_one.name,
+                            "locked_header": "●备注人员：Alice",
+                            "generated_body": "●顾客主诉：A GENERATED DEMAND",
+                            "edited_body": edited_body,
+                            "effective_body": edited_body,
+                            "sort_index": 1,
+                        }
+                    ],
+                    generated_text="●备注人员：Alice\n●顾客主诉：A GENERATED DEMAND",
+                    effective_text=f"●备注人员：Alice\n{edited_body}",
+                    status="succeeded",
+                )
+                db.add_all(
+                    [
+                        customer,
+                        staff_one,
+                        staff_two,
+                        visit,
+                        order,
+                        recording_one,
+                        recording_two,
+                        RecordingVisitLink(recording_id=recording_one.id, visit_id=visit.id, is_primary=True),
+                        RecordingVisitLink(recording_id=recording_two.id, visit_id=visit.id, is_primary=True),
+                        task_one,
+                        task_two,
+                        review,
+                    ]
+                )
+                await db.commit()
+
+                preview = await generate_sap_consultation_payloads(db, recording_two.id, target_visit_id=visit.id)
+
+                text = preview["payloads"][0]["text"]
+                assert "A EDITED DEMAND" in text
+                assert "A EDITED PLAN" in text
+                assert "A GENERATED DEMAND" not in text
+                assert "B GENERATED DEMAND" in text
+                assert "B GENERATED PLAN" in text
+                assert text.index("●备注人员：Alice") < text.index("●备注人员：Bob")
+
+                refreshed = await db.get(SapConsultationReview, "review001")
+                assert refreshed is not None
+                assert refreshed.recording_ids == ["rec001", "rec002"]
+                assert refreshed.effective_text == text
         finally:
             await engine.dispose()
 

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smart_badge_api.api.analysis_access import build_analysis_artifact_access, task_is_visible
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.api.deps import get_current_user
+from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.models import Recording
@@ -326,8 +327,14 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
 
                 with open(fp, encoding="utf-8") as f:
                     result_data = json.load(f)
+                # Match detail-page semantics: load raw_data and sanitize so
+                # tag counts / segment counts / duration fallbacks are
+                # consistent between list and detail views.
+                raw_data = _load_raw_data(file_id)
+                if raw_data:
+                    sanitize_analysis_result_with_raw(result_data, raw=raw_data)
                 result_data = normalize_analysis_result(result_data) or {}
-                summary = _build_summary(file_id, result_data, None, meta)
+                summary = _build_summary(file_id, result_data, raw_data, meta)
                 _analysis_summary_memo[full_key] = summary  # type: ignore[index]
                 items.append(summary)
             except Exception as e:
@@ -353,6 +360,7 @@ async def list_results(
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     min_score: float | None = Query(None, ge=0, le=10),
     max_score: float | None = Query(None, ge=0, le=10),
+    hospital_code: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -360,10 +368,26 @@ async def list_results(
 ):
     """获取所有分析结果列表。"""
     access = await build_analysis_artifact_access(db, current_user)
+    requested_hospital_code = normalize_hospital_code(hospital_code)
+    hospital_recording_ids: set[str] | None = None
+    if requested_hospital_code:
+        hospital_recording_ids = set(
+            (
+                await db.execute(
+                    select(Recording.id).where(
+                        recording_hospital_condition(requested_hospital_code),
+                        Recording.status != "filtered",
+                    )
+                )
+            ).scalars().all()
+        )
     items = []
     for summary in await _load_cached_analysis_result_summaries(db):
         file_id = str(summary.get("file_id") or "")
         if not task_is_visible(f"{file_id}.json", access):
+            continue
+        recording_id = _extract_recording_id(file_id)
+        if hospital_recording_ids is not None and recording_id not in hospital_recording_ids:
             continue
 
         # 分数过滤

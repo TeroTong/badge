@@ -32,6 +32,7 @@ from smart_badge_api.api.data_scope import (
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user, require_system_admin_or_above
+from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.core.permissions import normalize_permission_role, permission_role_level
 from smart_badge_api.asr.tencent_media_proxy import build_tencent_media_path
@@ -936,7 +937,7 @@ def _filter_recording_match_result_visit_ids(
 async def _archive_managed_staff_ids_for_user(db: AsyncSession | None, user: User) -> set[str] | None:
     role = normalize_permission_role(user.role)
     staff_id = _archive_clean_text(user.staff_id)
-    if role == "super_admin" and not staff_id:
+    if role in {"super_admin", "system_admin"}:
         return None
     if not staff_id:
         return set()
@@ -1234,14 +1235,15 @@ async def list_archive_recordings(
             items_to_sort.sort(key=_archive_item_sort_value, reverse=True)
 
     if fast_page and not include_date_summaries:
+        # Keep the first-pass candidate filter limited to fields that are
+        # reliable before DB binding. Staff, hospital and effective pipeline
+        # status can be filled or corrected by _attach_archive_recording_bindings
+        # from recordings/staff/devices; filtering them here can hide recently
+        # analyzed archive rows whose manifests still lack hospital metadata.
         candidates = [
             item
             for item in _load_archive_recording_raw_list_items()
             if _archive_item_matches_recorded_date_range(item, date_from=date_from, date_to=date_to)
-            and _archive_item_visible_to_staff_ids(item, visible_staff_ids)
-            and (not requested_staff_id or _archive_item_staff_id(item) == requested_staff_id)
-            and (not requested_hospital_code or archive_item_hospital_code(item) == requested_hospital_code)
-            and (not normalized_status or str(item.get("pipeline_status") or "").strip().lower() == normalized_status.lower())
         ]
         sort_archive_items(candidates)
         start = (page - 1) * page_size
@@ -1470,6 +1472,7 @@ async def get_archive_recording_media_url(
 async def list_recordings(
     visit_id: str | None = Query(None),
     staff_id: str | None = Query(None),
+    hospital_code: str | None = Query(None),
     status: str | None = Query(None),
     keyword: str | None = Query(None),
     customer_keyword: str | None = Query(None),
@@ -1485,6 +1488,7 @@ async def list_recordings(
     current_user: User = Depends(get_current_user),
 ):
     scope = await build_permission_scope(current_user)
+    requested_hospital_code = normalize_hospital_code(hospital_code)
     scope_filter = recording_scope_condition(scope)
     if fast_page:
         visible_staff_ids = await _archive_managed_staff_ids_for_user(db, current_user)
@@ -1530,6 +1534,10 @@ async def list_recordings(
     if staff_id:
         stmt = stmt.where(Recording.staff_id == staff_id)
         count_stmt = count_stmt.where(Recording.staff_id == staff_id)
+    if requested_hospital_code:
+        hospital_filter = recording_hospital_condition(requested_hospital_code)
+        stmt = stmt.where(hospital_filter)
+        count_stmt = count_stmt.where(hospital_filter)
     if status:
         stmt = stmt.where(Recording.status == status)
         count_stmt = count_stmt.where(Recording.status == status)

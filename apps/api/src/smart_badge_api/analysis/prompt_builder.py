@@ -120,6 +120,8 @@ async def _load_tenant_sap_summary_prompt(db: AsyncSession, hospital_code: str |
     ).scalar_one_or_none()
     if tenant is None:
         return ""
+    if not bool(getattr(tenant, "sap_summary_enabled", True)):
+        return ""
 
     template_name = _clean_text(tenant.sap_summary_template_name)
     template_version = _clean_text(tenant.sap_summary_template_version)

@@ -40,6 +40,7 @@ import { HTTPError } from 'ky'
 import * as adminApi from '@/api/admin'
 import * as dingtalkApi from '@/api/dingtalk'
 import { getApiErrorMessage } from '@/api/errors'
+import { useHospitalScopeFilter } from '@/hooks/use-hospital-scope-filter'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { formatBeijingTime } from '@/utils/time'
 
@@ -180,10 +181,11 @@ async function readDeviceBindingOverlapDetail(error: unknown): Promise<DeviceBin
 
 // ── device list + status ────────────────────────────────
 
-function useDevicesWithStatus(hospitalCode?: string) {
+function useDevicesWithStatus(hospitalCode?: string, enabled = true) {
   const devicesQuery = useQuery({
     queryKey: ['dingtalk', 'devices', hospitalCode || 'all'],
     queryFn: () => dingtalkApi.listDevices({ hospitalCode, syncStatus: true }),
+    enabled,
     staleTime: 0,
     refetchOnMount: 'always',
     refetchOnWindowFocus: true,
@@ -664,26 +666,22 @@ function DingtalkBindModal({
 // ── main page ───────────────────────────────────────────
 
 export default function DingtalkBadgePage() {
-  const [hospitalFilter, setHospitalFilter] = useState<string | undefined>()
-  const { devices: rawDevices, isLoading, isError, isRefetching, refetch } = useDevicesWithStatus(hospitalFilter)
+  const hospitalScope = useHospitalScopeFilter()
+  const activeHospitalCode = hospitalScope.hospitalCode
+  const devicesEnabled = hospitalScope.isReady && Boolean(activeHospitalCode)
+  const { devices: rawDevices, isLoading, isError, isRefetching, refetch } = useDevicesWithStatus(activeHospitalCode, devicesEnabled)
   const queryClient = useQueryClient()
 
   const [bindTarget, setBindTarget] = useState<MergedDevice | null>(null)
   const [audioTarget, setAudioTarget] = useState<MergedDevice | null>(null)
   const [dingtalkBindTarget, setDingtalkBindTarget] = useState<MergedDevice | null>(null)
   const staffBindingsQuery = useQuery({
-    queryKey: ['staff', 'badge-binding-candidates'],
-    queryFn: () => adminApi.fetchStaffBadgeBindingCandidates({ include_inactive: true }),
-  })
-  const hospitalOptionsQuery = useQuery({
-    queryKey: ['staff', 'hospital-options'],
-    queryFn: () => adminApi.fetchStaffHospitalOptions(),
+    queryKey: ['staff', 'badge-binding-candidates', activeHospitalCode ?? ''],
+    queryFn: () => adminApi.fetchStaffBadgeBindingCandidates({ hospital_code: activeHospitalCode, include_inactive: true }),
+    enabled: devicesEnabled,
   })
   const staffBindings = staffBindingsQuery.data ?? []
-  const hospitalOptions = (hospitalOptionsQuery.data ?? []).map((item) => ({
-    value: item.hospital_code,
-    label: `${item.hospital_name} (${item.hospital_code})`,
-  }))
+  const hospitalOptions = hospitalScope.selectOptions
   const devices = rawDevices
 
   const unbindSystemMutation = useMutation({
@@ -1002,15 +1000,14 @@ export default function DingtalkBadgePage() {
             <Tag color="orange">待绑钉钉</Tag>
           </div>
           <Select
-            allowClear
             showSearch
             className="badge-device-page__hospital-filter"
-            placeholder="全部机构"
-            value={hospitalFilter}
-            loading={hospitalOptionsQuery.isLoading}
+            placeholder="机构范围"
+            value={activeHospitalCode}
+            loading={hospitalScope.isLoading}
             options={hospitalOptions}
             optionFilterProp="label"
-            onChange={(value) => setHospitalFilter(value || undefined)}
+            onChange={(value) => hospitalScope.setHospitalCode(value)}
           />
           <Button icon={<ReloadOutlined />} loading={isRefetching} onClick={refetch}>
             刷新列表

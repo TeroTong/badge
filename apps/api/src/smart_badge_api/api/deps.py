@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from collections import OrderedDict
 from typing import Any
@@ -24,13 +25,88 @@ _user_token_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict(
 _user_token_cache_lock = asyncio.Lock()
 _user_token_load_locks: dict[str, asyncio.Lock] = {}
 
+# Cross-worker invalidation: after any User-mutating endpoint, callers should
+# `await invalidate_user_cache(user_id)` to ensure all uvicorn workers stop
+# serving the stale cached user. We use Redis as a small "version map":
+# `users:cache_version:<user_id>` -> monotonic-style tick. Each cache entry
+# remembers the version it was loaded at; on read we compare and drop on miss.
+_USER_CACHE_VERSION_KEY_PREFIX = "users:cache_version:"
+_invalidation_redis_client = None
+_invalidation_redis_disabled = False
+_invalidation_logger = logging.getLogger(__name__)
+# Local fallback when Redis unavailable.
+_local_user_cache_versions: dict[str, float] = {}
+
+
+async def _get_invalidation_redis():
+    global _invalidation_redis_client, _invalidation_redis_disabled
+    if _invalidation_redis_disabled:
+        return None
+    if _invalidation_redis_client is not None:
+        return _invalidation_redis_client
+    try:
+        import redis.asyncio as redis_asyncio  # type: ignore
+        _invalidation_redis_client = redis_asyncio.from_url(
+            get_settings().redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            health_check_interval=30,
+        )
+        await _invalidation_redis_client.ping()
+    except Exception as exc:
+        _invalidation_logger.warning("user-cache invalidation Redis disabled: %s", exc)
+        _invalidation_redis_client = None
+        _invalidation_redis_disabled = True
+        return None
+    return _invalidation_redis_client
+
+
+async def _read_user_cache_version(user_id: str) -> float:
+    cli = await _get_invalidation_redis()
+    if cli is not None:
+        try:
+            raw = await cli.get(f"{_USER_CACHE_VERSION_KEY_PREFIX}{user_id}")
+            if raw is None:
+                return 0.0
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+        except Exception as exc:
+            _invalidation_logger.warning("user-cache version read failed: %s", exc)
+    return _local_user_cache_versions.get(user_id, 0.0)
+
+
+async def invalidate_user_cache(user_id: str | None) -> None:
+    """Bump the cache version for a user so all workers reload from DB."""
+    if not user_id:
+        return
+    new_version = time.time()
+    _local_user_cache_versions[user_id] = new_version
+    cli = await _get_invalidation_redis()
+    if cli is not None:
+        try:
+            # 1h key TTL: any cached entry is itself bounded by
+            # auth_user_cache_ttl_seconds (defaults 15s).
+            await cli.set(f"{_USER_CACHE_VERSION_KEY_PREFIX}{user_id}", new_version, ex=3600)
+        except Exception as exc:
+            _invalidation_logger.warning("user-cache invalidation failed: %s", exc)
+    # Best-effort: drop local entries for this user immediately.
+    async with _user_token_cache_lock:
+        keys_to_drop = [
+            k for k, (_exp, payload) in _user_token_cache.items() if payload.get("id") == user_id
+        ]
+        for k in keys_to_drop:
+            _user_token_cache.pop(k, None)
+
+
 
 def _token_cache_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _user_cache_payload(user: User) -> dict[str, Any]:
-    return {
+    payload = {
         "id": user.id,
         "username": user.username,
         "hashed_password": user.hashed_password,
@@ -44,10 +120,13 @@ def _user_cache_payload(user: User) -> dict[str, Any]:
         "created_at": user.created_at,
         "updated_at": user.updated_at,
     }
+    return payload
 
 
 def _user_from_cache_payload(payload: dict[str, Any]) -> User:
-    return User(**payload)
+    # Strip cache-management fields before constructing the SQLAlchemy model.
+    clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+    return User(**clean)
 
 
 async def _get_cached_user(token: str) -> User | None:
@@ -66,7 +145,15 @@ async def _get_cached_user(token: str) -> User | None:
             _user_token_cache.pop(key, None)
             return None
         _user_token_cache.move_to_end(key)
-        return _user_from_cache_payload(payload)
+        cached_user_id = payload.get("id") or ""
+        cached_version = float(payload.get("_cache_version") or 0.0)
+    # version check happens outside the lock to avoid blocking under load.
+    current_version = await _read_user_cache_version(cached_user_id)
+    if current_version > cached_version:
+        async with _user_token_cache_lock:
+            _user_token_cache.pop(key, None)
+        return None
+    return _user_from_cache_payload(payload)
 
 
 async def _set_cached_user(token: str, user: User) -> None:
@@ -76,8 +163,10 @@ async def _set_cached_user(token: str, user: User) -> None:
         return
     key = _token_cache_key(token)
     max_items = max(1, settings.auth_user_cache_max_items)
+    payload = _user_cache_payload(user)
+    payload["_cache_version"] = await _read_user_cache_version(user.id)
     async with _user_token_cache_lock:
-        _user_token_cache[key] = (time.monotonic() + ttl, _user_cache_payload(user))
+        _user_token_cache[key] = (time.monotonic() + ttl, payload)
         _user_token_cache.move_to_end(key)
         while len(_user_token_cache) > max_items:
             _user_token_cache.popitem(last=False)

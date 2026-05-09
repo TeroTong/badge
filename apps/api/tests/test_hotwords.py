@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from smart_badge_api.api.routes.hotwords import _normalize_word
-from smart_badge_api.schemas.hotwords import HotwordCreate, HotwordGroupCreate
+from smart_badge_api.schemas.hotwords import HotwordBulkCreate, HotwordCreate, HotwordGroupCreate
 
 
 def test_hotword_group_defaults_include_scope_and_source() -> None:
@@ -19,6 +19,14 @@ def test_hotword_create_defaults_weight_to_ten() -> None:
 
     assert word.weight == 10
     assert word.is_active is True
+
+
+def test_hotword_bulk_create_defaults_weight_to_ten() -> None:
+    body = HotwordBulkCreate(words=["米兰柏羽", "热玛吉"])
+
+    assert body.weight == 10
+    assert body.is_active is True
+    assert body.words == ["米兰柏羽", "热玛吉"]
 
 
 def test_normalize_word_trims_and_rejects_empty_values() -> None:

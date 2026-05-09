@@ -15,6 +15,12 @@ class HotwordCreate(BaseModel):
     is_active: bool = True
 
 
+class HotwordBulkCreate(BaseModel):
+    words: list[str] = Field(min_length=1, max_length=500)
+    weight: int = Field(default=10, ge=1, le=100)
+    is_active: bool = True
+
+
 class HotwordUpdate(BaseModel):
     word: str | None = Field(default=None, min_length=1, max_length=200)
     weight: int | None = Field(default=None, ge=1, le=100)
@@ -30,6 +36,12 @@ class HotwordOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class HotwordBulkCreateResult(BaseModel):
+    created: list[HotwordOut] = Field(default_factory=list)
+    skipped_existing: list[str] = Field(default_factory=list)
+    skipped_duplicate: list[str] = Field(default_factory=list)
 
 
 class HotwordGroupCreate(BaseModel):

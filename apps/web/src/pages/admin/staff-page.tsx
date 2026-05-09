@@ -73,6 +73,13 @@ function asDisplayText(value: unknown, fallback = '-'): string {
   return asText(value) ?? fallback
 }
 
+const GLOBAL_PERMISSION_ROLES = new Set(['super_admin', 'system_admin'])
+const ALL_INSTITUTIONS_LABEL = '所有机构'
+
+function isGlobalPermissionRole(role: unknown): boolean {
+  return GLOBAL_PERMISSION_ROLES.has(normalizeRole(asText(role)))
+}
+
 function getAdvisorCode(staff: Pick<Staff, 'external_account' | 'badge_id'> | null | undefined): string | null {
   if (!staff) return null
 
@@ -203,6 +210,7 @@ export function StaffPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null)
   const [staffForm] = Form.useForm()
+  const selectedStaffFormPositionId = Form.useWatch('position_id', staffForm)
 
   const { data: staffData, isLoading } = useQuery({
     queryKey: ['staff', queryFilters, page, pageSize],
@@ -271,6 +279,13 @@ export function StaffPage() {
     const value = asText(item.id)
     return label && value ? [{ label, value }] : []
   })
+  const selectedStaffFormPosition = positions.find(
+    (item) => asText(item.id) === asText(selectedStaffFormPositionId),
+  )
+  const selectedStaffFormPermissionRole = normalizeRole(
+    asText(selectedStaffFormPosition?.mapped_role) ?? asText(editingStaff?.permission_role),
+  )
+  const isGlobalStaffFormRole = isGlobalPermissionRole(selectedStaffFormPermissionRole)
   const defaultStaffPositionId =
     asText(positions.find((item) => asText(item.name) === '普通员工')?.id) ||
     asText(positions.find((item) => asText(item.position_type) === 'staff' && asText(item.mapped_role) === 'staff')?.id) ||
@@ -346,7 +361,9 @@ export function StaffPage() {
       external_account: getAdvisorCode(staff) ?? '',
       wecom_user_id: staff?.wecom_user_id ?? '',
       gender: staff?.gender ?? undefined,
-      hospital_code: staff?.hospital_code ?? (isCreating && currentUserRole === 'hospital_admin' ? currentUserHospitalCode ?? '' : ''),
+      hospital_code: isGlobalPermissionRole(staff?.permission_role)
+        ? undefined
+        : staff?.hospital_code ?? (isCreating && currentUserRole === 'hospital_admin' ? currentUserHospitalCode ?? '' : ''),
       position_id: staff?.position_id ?? (isCreating ? defaultStaffPositionId ?? undefined : undefined),
     })
     setModalOpen(true)
@@ -361,7 +378,7 @@ export function StaffPage() {
     try {
       const identity = await lookupStaffIdentityMutation.mutateAsync({
         external_account: externalAccount,
-        hospital_code: staffForm.getFieldValue('hospital_code') || null,
+        hospital_code: isGlobalStaffFormRole ? null : staffForm.getFieldValue('hospital_code') || null,
       })
       const nextValues: Record<string, string> = {}
       if (identity.name && (!staffForm.getFieldValue('name') || !editingStaff)) {
@@ -370,7 +387,7 @@ export function StaffPage() {
       if (identity.phone && !staffForm.getFieldValue('phone')) {
         nextValues.phone = identity.phone
       }
-      if (identity.hospital_code && !staffForm.getFieldValue('hospital_code')) {
+      if (!isGlobalStaffFormRole && identity.hospital_code && !staffForm.getFieldValue('hospital_code')) {
         nextValues.hospital_code = identity.hospital_code
       }
       if (Object.keys(nextValues).length > 0) {
@@ -401,6 +418,13 @@ export function StaffPage() {
     }
   }, [currentUserHospitalCode, currentUserRole, defaultStaffPositionId, editingStaff, modalOpen, staffForm])
 
+  useEffect(() => {
+    if (!modalOpen || !isGlobalStaffFormRole) return
+    if (staffForm.getFieldValue('hospital_code')) {
+      staffForm.setFieldValue('hospital_code', undefined)
+    }
+  }, [isGlobalStaffFormRole, modalOpen, staffForm])
+
   const handleSaveStaff = async () => {
     try {
       const values = await staffForm.validateFields()
@@ -411,7 +435,7 @@ export function StaffPage() {
         external_account: values.external_account || null,
         wecom_user_id: values.wecom_user_id || null,
         gender: values.gender || null,
-        hospital_code: values.hospital_code || null,
+        hospital_code: isGlobalStaffFormRole ? null : values.hospital_code || null,
         position_id: values.position_id || null,
       }
 
@@ -951,17 +975,25 @@ export function StaffPage() {
           <Form.Item name="wecom_user_id" label="企业微信 UserId" extra="用于企业微信工作台免密登录绑定，可在企业微信管理后台或通讯录导出中获取。">
             <Input placeholder="例如 zhangsan" />
           </Form.Item>
-          <Form.Item name="hospital_code" label="机构编码">
-            <Select
-              allowClear
-              showSearch
-              placeholder="请选择机构编码"
-              optionFilterProp="label"
-              options={institutionOptions}
-            />
-          </Form.Item>
+          {isGlobalStaffFormRole ? (
+            <Form.Item label="机构归属">
+              <Input disabled value={ALL_INSTITUTIONS_LABEL} />
+            </Form.Item>
+          ) : (
+            <Form.Item name="hospital_code" label="机构编码">
+              <Select
+                allowClear
+                showSearch
+                placeholder="请选择机构编码"
+                optionFilterProp="label"
+                options={institutionOptions}
+              />
+            </Form.Item>
+          )}
           <p className="staff-page__form-note">
-            企业微信 CorpID 将根据所选机构编码自动读取，不能在人员资料中手动修改。
+            {isGlobalStaffFormRole
+              ? '超级管理员和系统管理员归属所有机构，不绑定单个机构或企微 CorpID。'
+              : '企业微信 CorpID 将根据所选机构编码自动读取，不能在人员资料中手动修改。'}
           </p>
           <Form.Item name="gender" label="性别">
             <Select allowClear options={GENDER_OPTIONS} />

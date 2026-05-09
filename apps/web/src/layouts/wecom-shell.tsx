@@ -1,5 +1,6 @@
 import {
   AudioOutlined,
+  FileTextOutlined,
   HomeOutlined,
   IdcardOutlined,
   LeftOutlined,
@@ -28,6 +29,7 @@ type WecomShellMeta = {
 const TAB_ITEMS: WecomTabItem[] = [
   { path: '/wecom/badge', label: '工牌', icon: MobileOutlined },
   { path: '/wecom/recordings', to: WECOM_RECORDINGS_TAB_PATH, label: '录音', icon: AudioOutlined },
+  { path: '/wecom/sap-reviews', label: 'SAP', icon: FileTextOutlined },
   { path: '/wecom/customers', label: '客户', icon: IdcardOutlined },
   { path: '/wecom/overview', label: '总览', icon: HomeOutlined },
 ]
@@ -50,6 +52,7 @@ function resolveShellMeta(pathname: string, search: string): WecomShellMeta {
   const inferActiveTabPath = (target: string | null | undefined) => {
     if (!target) return null
     if (target.startsWith('/wecom/recordings')) return '/wecom/recordings'
+    if (target.startsWith('/wecom/sap-reviews')) return '/wecom/sap-reviews'
     if (target.startsWith('/wecom/customers')) return '/wecom/customers'
     if (target.startsWith('/wecom/overview')) return '/wecom/overview'
     if (target.startsWith('/wecom/badge')) return '/wecom/badge'
@@ -131,6 +134,15 @@ function resolveShellMeta(pathname: string, search: string): WecomShellMeta {
       activeTabPath: inferActiveTabPath(explicitBackTarget) ?? '/wecom/customers',
     }
   }
+  if (/^\/wecom\/sap-reviews\/[^/]+$/.test(pathname)) {
+    return {
+      eyebrow: 'SAP回写',
+      title: '咨询备注',
+      backTarget: explicitBackTarget ?? '/wecom/sap-reviews',
+      showTabBar: true,
+      activeTabPath: '/wecom/sap-reviews',
+    }
+  }
   const matched = TAB_ITEMS.find(
     (item) => pathname === item.path || pathname.startsWith(`${item.path}/`),
   )
@@ -143,6 +155,9 @@ function resolveShellMeta(pathname: string, search: string): WecomShellMeta {
     }
     if (matched.path === '/wecom/customers') {
       return { eyebrow: '客户与画像', title: '客户档案', backTarget: null, showTabBar: true, activeTabPath: matched.path }
+    }
+    if (matched.path === '/wecom/sap-reviews') {
+      return { eyebrow: 'SAP回写', title: '咨询备注', backTarget: null, showTabBar: true, activeTabPath: matched.path }
     }
     if (matched.path === '/wecom/overview') {
       return { eyebrow: '数据看板', title: '业务总览', backTarget: null, showTabBar: true, activeTabPath: matched.path }

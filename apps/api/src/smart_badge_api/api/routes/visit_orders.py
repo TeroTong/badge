@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.api.data_scope import (
@@ -17,6 +17,7 @@ from smart_badge_api.api.data_scope import (
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user, get_db
+from smart_badge_api.api.hospital_scope import normalize_hospital_code
 from smart_badge_api.customer_type import customer_type_from_visit_order
 from smart_badge_api.db.models import Recording, RecordingVisitLink, Staff, User, Visit, VisitOrder
 from smart_badge_api.schemas.matching import VisitOrderRecordingMatchOut
@@ -164,6 +165,9 @@ def _business_date_from_datetime(value: datetime | None) -> str | None:
 
 
 async def _list_visit_order_scope_condition(db: AsyncSession, scope):
+    from smart_badge_api.core.permissions import normalize_permission_role
+    if normalize_permission_role(scope.role) in {"super_admin", "system_admin"}:
+        return true()
     if not scope.staff_id:
         return false()
 
@@ -318,6 +322,7 @@ async def list_visit_orders(
     page_size: int = Query(20, ge=1, le=100),
     keyword: str | None = None,
     fzuer: str | None = None,
+    hospital_code: str | None = None,
     sjrq_start: str | None = None,
     sjrq_end: str | None = None,
     jcsta_txt: str | None = None,
@@ -328,6 +333,7 @@ async def list_visit_orders(
     list_scope_condition = await _list_visit_order_scope_condition(db, scope)
     stmt = select(VisitOrder).where(list_scope_condition)
     count_stmt = select(func.count(VisitOrder.id)).where(list_scope_condition)
+    requested_hospital_code = normalize_hospital_code(hospital_code)
 
     if keyword:
         stmt = stmt.where(
@@ -346,6 +352,10 @@ async def list_visit_orders(
     if fzuer:
         stmt = stmt.where(VisitOrder.fzuer == fzuer)
         count_stmt = count_stmt.where(VisitOrder.fzuer == fzuer)
+
+    if requested_hospital_code:
+        stmt = stmt.where(VisitOrder.jgbm == requested_hospital_code)
+        count_stmt = count_stmt.where(VisitOrder.jgbm == requested_hospital_code)
 
     if sjrq_start:
         stmt = stmt.where(VisitOrder.sjrq >= sjrq_start)

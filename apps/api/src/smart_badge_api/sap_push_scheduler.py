@@ -7,9 +7,21 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import String, and_, cast, exists, func, literal, or_, select, text
 
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import AnalysisTask, Recording, RecordingVisitAnalysis, RecordingVisitLink, SapPushLog
+from smart_badge_api.db.models import (
+    AnalysisTask,
+    Recording,
+    RecordingVisitAnalysis,
+    RecordingVisitLink,
+    SapConsultationReview,
+    SapPushLog,
+)
 from smart_badge_api.db.session import _session_factory
-from smart_badge_api.sap_push_service import SapPushPreparationError, create_sap_push_log, execute_sap_push_log
+from smart_badge_api.sap_push_service import (
+    SapPushPreparationError,
+    create_sap_push_log,
+    execute_sap_push_log,
+    summarize_sap_push_log_result,
+)
 from smart_badge_api.task_queue import dispatch_sap_push_log
 
 logger = logging.getLogger("smart_badge.sap_push_scheduler")
@@ -66,6 +78,31 @@ def _is_push_log_blocking(log: SapPushLog | None, *, retry_after: datetime, stal
     if status in _AUTO_PUSH_RETRYABLE_STATUSES:
         return activity_at >= retry_after
     return False
+
+
+def _extract_request_text_from_push_log(log: SapPushLog | None) -> str:
+    if log is None:
+        return ""
+    for payload in log.request_payloads or []:
+        if not isinstance(payload, dict):
+            continue
+        text_value = str(payload.get("text") or "").strip()
+        if text_value:
+            return text_value
+    return ""
+
+
+def _review_effective_text_matches_push_log(review: SapConsultationReview, log: SapPushLog | None) -> bool:
+    review_text = str(review.effective_text or "").strip()
+    log_text = _extract_request_text_from_push_log(log)
+    return bool(review_text and log_text and review_text == log_text)
+
+
+def _is_effective_success_push_log(log: SapPushLog | None) -> bool:
+    if log is None:
+        return False
+    summary = summarize_sap_push_log_result(log)
+    return str(summary.get("effective_status") or log.status or "").strip() == "succeeded"
 
 
 async def _has_newer_push_log_for_same_scope(db, push_log: SapPushLog) -> bool:
@@ -197,6 +234,17 @@ async def _has_current_auto_push_log(
         link_change_stmt = link_change_stmt.where(RecordingVisitLink.visit_id == effective_visit_id)
     link_changed_at = (await db.execute(link_change_stmt)).scalar_one_or_none()
     changed_at = link_changed_at or recording.created_at or datetime.min.replace(tzinfo=timezone.utc)
+    if effective_visit_id:
+        review_changed_at = (
+            await db.execute(
+                select(SapConsultationReview.updated_at).where(
+                    SapConsultationReview.visit_id == effective_visit_id,
+                    SapConsultationReview.status == "pending",
+                )
+            )
+        ).scalar_one_or_none()
+        if review_changed_at and review_changed_at > changed_at:
+            changed_at = review_changed_at
 
     conditions = [
         SapPushLog.recording_id == recording_id,
@@ -216,6 +264,110 @@ async def _has_current_auto_push_log(
         )
     ).scalar_one_or_none()
     return _is_push_log_blocking(latest_log, retry_after=retry_after, stale_before=stale_before)
+
+
+def _first_review_recording_id(review: SapConsultationReview) -> str | None:
+    recording_ids = review.recording_ids if isinstance(review.recording_ids, list) else []
+    for value in recording_ids:
+        recording_id = str(value or "").strip()
+        if recording_id:
+            return recording_id
+
+    blocks = review.blocks if isinstance(review.blocks, list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        recording_id = str(block.get("recording_id") or "").strip()
+        if recording_id:
+            return recording_id
+    return None
+
+
+async def _find_pending_review_candidate_refs(
+    db,
+    *,
+    limit: int,
+    stable_before: datetime,
+    retry_after: datetime,
+    stale_before: datetime,
+    excluded_visit_ids: set[str],
+) -> list[tuple[str, str | None]]:
+    if limit <= 0:
+        return []
+
+    reviews = (
+        await db.execute(
+            select(SapConsultationReview)
+            .where(
+                SapConsultationReview.status == "pending",
+                SapConsultationReview.updated_at <= stable_before,
+            )
+            .order_by(SapConsultationReview.updated_at.asc(), SapConsultationReview.created_at.asc())
+            .limit(max(limit * 4, limit))
+        )
+    ).scalars().all()
+
+    refs: list[tuple[str, str | None]] = []
+    for review in reviews:
+        visit_id = str(review.visit_id or "").strip()
+        if not visit_id or visit_id in excluded_visit_ids:
+            continue
+        recording_id = _first_review_recording_id(review)
+        if not recording_id:
+            continue
+
+        recording = (
+            await db.execute(
+                select(Recording)
+                .join(RecordingVisitLink, RecordingVisitLink.recording_id == Recording.id)
+                .where(
+                    Recording.id == recording_id,
+                    Recording.status == "analyzed",
+                    RecordingVisitLink.visit_id == visit_id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if recording is None:
+            continue
+
+        latest_any_review_push = (
+            await db.execute(
+                select(SapPushLog)
+                .where(SapPushLog.visit_id == visit_id)
+                .order_by(SapPushLog.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if (
+            _is_effective_success_push_log(latest_any_review_push)
+            and _review_effective_text_matches_push_log(review, latest_any_review_push)
+        ):
+            review.last_push_log_id = latest_any_review_push.id
+            review.status = latest_any_review_push.status or "succeeded"
+            await db.commit()
+            continue
+
+        latest_review_push = (
+            await db.execute(
+                select(SapPushLog)
+                .where(
+                    SapPushLog.visit_id == visit_id,
+                    SapPushLog.created_at >= review.updated_at,
+                )
+                .order_by(SapPushLog.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if _is_push_log_blocking(latest_review_push, retry_after=retry_after, stale_before=stale_before):
+            continue
+
+        refs.append((recording_id, visit_id))
+        excluded_visit_ids.add(visit_id)
+        if len(refs) >= limit:
+            break
+
+    return refs
 
 
 async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | None]]:
@@ -421,7 +573,21 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             .limit(remaining_limit)
         )
         multi_refs = [(str(recording_id), str(visit_id)) for recording_id, visit_id in (await db.execute(multi_stmt)).all()]
-        return [*single_refs, *multi_refs]
+        refs = [*single_refs, *multi_refs]
+        remaining_review_limit = max(limit, 1) - len(refs)
+        if remaining_review_limit <= 0:
+            return refs
+
+        excluded_visit_ids = {str(visit_id) for _recording_id, visit_id in refs if visit_id}
+        review_refs = await _find_pending_review_candidate_refs(
+            db,
+            limit=remaining_review_limit,
+            stable_before=stable_before,
+            retry_after=retry_after,
+            stale_before=stale_before,
+            excluded_visit_ids=excluded_visit_ids,
+        )
+        return [*refs, *review_refs]
 
 
 async def _find_auto_push_candidate_ids(limit: int) -> list[str]:

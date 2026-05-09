@@ -109,6 +109,31 @@ def run_visit_order_push_materialization_actor(keys: list[list[str]]) -> None:
     asyncio.run(execute_visit_order_push_materialization(keys))
 
 
+async def execute_visit_order_advisor_notifications(keys: list[list[str]] | list[tuple[str, str]]) -> None:
+    from smart_badge_api.visit_order_notifications import notify_pushed_visit_order_advisors_for_keys
+
+    normalized_keys = {
+        (str(item[0] or "").strip(), str(item[1] or "").strip())
+        for item in keys
+        if len(item) >= 2 and str(item[0] or "").strip() and str(item[1] or "").strip()
+    }
+    if not normalized_keys:
+        return
+
+    async with _session_factory() as db:
+        try:
+            sent_count = await notify_pushed_visit_order_advisors_for_keys(db, normalized_keys)
+            if sent_count:
+                logger.info("SAP HANA visit order advisor notifications sent=%d keys=%s", sent_count, sorted(normalized_keys))
+        except Exception:
+            logger.exception("SAP HANA visit order advisor notification task failed keys=%s", sorted(normalized_keys))
+
+
+@dramatiq.actor(queue_name="visit_order", max_retries=0)
+def run_visit_order_advisor_notifications_actor(keys: list[list[str]]) -> None:
+    asyncio.run(execute_visit_order_advisor_notifications(keys))
+
+
 def get_dispatch_runtime() -> dict[str, str | bool | None]:
     mode = get_settings().task_dispatch_mode
     return {
@@ -189,3 +214,28 @@ async def dispatch_visit_order_push_materialization(keys: set[tuple[str, str]]) 
         return True
 
     raise RuntimeError(f"Unsupported visit-order push dispatch mode: {mode}")
+
+
+async def dispatch_visit_order_advisor_notifications(keys: set[tuple[str, str]]) -> bool:
+    payload = [[jgbm, dzdh] for jgbm, dzdh in sorted(keys) if jgbm and dzdh]
+    if not payload:
+        return False
+
+    mode = get_settings().task_dispatch_mode
+    if mode == "dramatiq":
+        try:
+            run_visit_order_advisor_notifications_actor.send(payload)
+        except Exception:
+            logger.exception("failed to dispatch visit-order advisor notifications to Dramatiq; falling back to background task")
+            asyncio.create_task(execute_visit_order_advisor_notifications(payload))
+        return False
+
+    if mode == "background":
+        asyncio.create_task(execute_visit_order_advisor_notifications(payload))
+        return False
+
+    if mode == "eager":
+        await execute_visit_order_advisor_notifications(payload)
+        return True
+
+    raise RuntimeError(f"Unsupported visit-order advisor notification dispatch mode: {mode}")

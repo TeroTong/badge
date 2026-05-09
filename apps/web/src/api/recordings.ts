@@ -198,6 +198,7 @@ export const STAFF_ROLE_MAP: Record<string, string> = {
 
 export const fetchRecordings = (params?: {
   visit_id?: string
+  hospital_code?: string
   staff_id?: string
   status?: string
   keyword?: string
@@ -213,6 +214,7 @@ export const fetchRecordings = (params?: {
 }) => {
   const sp = new URLSearchParams()
   if (params?.visit_id) sp.set('visit_id', params.visit_id)
+  if (params?.hospital_code) sp.set('hospital_code', params.hospital_code)
   if (params?.staff_id) sp.set('staff_id', params.staff_id)
   if (params?.status) sp.set('status', params.status)
   if (params?.keyword) sp.set('keyword', params.keyword)

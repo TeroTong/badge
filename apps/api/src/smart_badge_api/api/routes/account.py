@@ -724,6 +724,8 @@ async def update_account_profile(
         user.display_name = next_name
         await db.commit()
         await db.refresh(user)
+        from smart_badge_api.api.deps import invalidate_user_cache
+        await invalidate_user_cache(user.id)
         await append_audit_log(
             db,
             operator_name=user.display_name or user.username,
@@ -751,6 +753,8 @@ async def change_account_password(
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
     await db.refresh(user)
+    from smart_badge_api.api.deps import invalidate_user_cache
+    await invalidate_user_cache(user.id)
     await append_audit_log(
         db,
         operator_name=user.display_name or user.username,

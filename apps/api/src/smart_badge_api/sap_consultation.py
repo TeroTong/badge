@@ -30,6 +30,7 @@ from smart_badge_api.db.models import (
     Recording,
     RecordingVisitAnalysis,
     RecordingVisitLink,
+    SapConsultationReview,
     Staff,
     Visit,
     VisitOrder,
@@ -807,6 +808,7 @@ class SapSummaryTemplateConfig:
     template: str
     prompt: str
     sections: tuple[SapSummaryTemplateSection, ...]
+    enabled: bool = True
 
 
 _SAP_SUMMARY_TEMPLATE_LINE_RE = re.compile(r"^\s*(\d+)\s*[、.．]\s*([^：:\n]+?)\s*[：:]\s*(.*?)\s*$")
@@ -831,6 +833,40 @@ def _parse_sap_summary_template_sections(template: str | None) -> tuple[SapSumma
     return tuple(sorted(sections, key=lambda item: item.index))
 
 
+def _configured_sap_summary_disabled_hospital_codes() -> set[str]:
+    raw = get_settings().sap_rfc_summary_disabled_hospital_codes
+    return {code for code in re.split(r"[,;\s]+", str(raw or "")) if code}
+
+
+def _is_sap_summary_section_enabled(
+    visit_order: VisitOrder | None,
+    sap_summary_config: SapSummaryTemplateConfig | None,
+) -> bool:
+    if sap_summary_config is not None:
+        return sap_summary_config.enabled
+    hospital_code = str(getattr(sap_summary_config, "hospital_code", "") or "").strip()
+    if not hospital_code and visit_order is not None:
+        hospital_code = str(getattr(visit_order, "jgbm", "") or "").strip()
+    if not hospital_code:
+        return True
+    return hospital_code not in _configured_sap_summary_disabled_hospital_codes()
+
+
+def _strip_sap_summary_section(text: str) -> str:
+    lines: list[str] = []
+    skipping_summary = False
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        stripped = raw_line.strip()
+        if re.match(r"^●\s*总结信息\s*[：:]", stripped):
+            skipping_summary = True
+            continue
+        if skipping_summary and re.match(r"^●\s*[^：:\n]+?\s*[：:]", stripped):
+            skipping_summary = False
+        if not skipping_summary:
+            lines.append(raw_line.rstrip())
+    return "\n".join(lines).strip()
+
+
 async def _load_sap_summary_template_config(
     db: AsyncSession,
     hospital_code: str | None,
@@ -853,7 +889,19 @@ async def _load_sap_summary_template_config(
 
     template = _clean_summary_value(getattr(tenant, "sap_summary_template", None))
     prompt = _clean_summary_value(getattr(tenant, "sap_summary_prompt", None))
+    summary_enabled = bool(getattr(tenant, "sap_summary_enabled", True))
     sections = _parse_sap_summary_template_sections(template)
+    if not summary_enabled:
+        return SapSummaryTemplateConfig(
+            hospital_code=code,
+            tenant_name=_clean_summary_value(getattr(tenant, "name", None)),
+            template_name=_clean_summary_value(getattr(tenant, "sap_summary_template_name", None)),
+            template_version=_clean_summary_value(getattr(tenant, "sap_summary_template_version", None)),
+            template=template,
+            prompt=prompt,
+            sections=sections,
+            enabled=False,
+        )
     if not sections:
         return None
     return SapSummaryTemplateConfig(
@@ -864,6 +912,7 @@ async def _load_sap_summary_template_config(
         template=template,
         prompt=prompt,
         sections=sections,
+        enabled=True,
     )
 
 
@@ -931,10 +980,14 @@ def _safe_attr_text(obj: object | None, attr: str) -> str:
 
 
 def _collect_visit_customer_type_text(visit_order: VisitOrder | None) -> str:
-    text = _safe_attr_text(visit_order, "kutyp_dq_txt") or _safe_attr_text(visit_order, "khlx")
-    code = _safe_attr_text(visit_order, "kutyp_dq") or _safe_attr_text(visit_order, "khlx")
+    text = _safe_attr_text(visit_order, "kut30_dq_txt") or _safe_attr_text(visit_order, "khlx_t30")
+    code = _safe_attr_text(visit_order, "kut30_dq") or _safe_attr_text(visit_order, "khlx_t30")
     if text:
         return text
+    if code == "Q":
+        return "新客"
+    if code == "V":
+        return "老客"
     if code == "Q":
         return "新客"
     if code == "V":
@@ -2089,7 +2142,7 @@ def build_consultation_text(
 ) -> str:
     """
     按生产回传口径拼装咨询备注：
-    ●接诊人员
+    ●备注人员
     ●顾客主诉
     ●本次预算
     ●顾客顾虑
@@ -2097,24 +2150,25 @@ def build_consultation_text(
     ●未成交原因（仅当到诊单最终状态为未成交）
     ●总结信息
     """
-    lines = [f"●接诊人员：{_text_or_none(advisor_name)}"]
+    lines = [f"●备注人员：{_text_or_none(advisor_name)}"]
     lines.append(f"●顾客主诉：{_text_or_none(_collect_primary_demand_text(result))}")
     lines.append(f"●本次预算：{_text_or_none(_collect_budget_text(result))}")
     lines.append(f"●顾客顾虑：{_join_non_empty(_collect_concern_items(result))}")
     lines.append(f"●推荐方案：{_join_non_empty(_collect_recommendation_items(result))}")
     if _is_visit_order_final_not_deal(visit_order):
         lines.append(f"●未成交原因：{_join_non_empty(_collect_loss_reason_items(result))}")
-    summary_text = _format_sap_summary_text(
-        _collect_summary_text(
-            result,
-            visit_order,
-            transcript_full_text,
-            transcript_utterances,
-            advisor_name,
-            sap_summary_config,
+    if _is_sap_summary_section_enabled(visit_order, sap_summary_config):
+        summary_text = _format_sap_summary_text(
+            _collect_summary_text(
+                result,
+                visit_order,
+                transcript_full_text,
+                transcript_utterances,
+                advisor_name,
+                sap_summary_config,
+            )
         )
-    )
-    lines.append("●总结信息：\n" f"{_text_or_none(summary_text)}")
+        lines.append("\u25cf\u603b\u7ed3\u4fe1\u606f\uff1a\n" f"{_text_or_none(summary_text)}")
 
     return "\n".join(lines)
 
@@ -2229,6 +2283,17 @@ def _resolve_recording_date_time(recording: Recording | None) -> tuple[str, str]
     return recorded_at.strftime("%Y%m%d"), recorded_at.strftime("%H%M%S")
 
 
+def _recording_staff_name(recording: Recording | None) -> str:
+    if recording is None:
+        return ""
+    # Only read the relationship when it was eagerly loaded; async lazy loading
+    # from a formatter can fail outside greenlet context.
+    staff = recording.__dict__.get("staff")
+    if isinstance(staff, Staff):
+        return str(staff.name or "").strip()
+    return ""
+
+
 def build_unlinked_sap_preview_payload(
     recording: Recording | None,
     result: dict,
@@ -2238,7 +2303,7 @@ def build_unlinked_sap_preview_payload(
 ) -> dict:
     result_payload = _normalize_result_payload(_strip_embedded_sap_preview(result))
     text = build_consultation_text(
-        "",
+        _recording_staff_name(recording),
         result_payload,
         visit_order=None,
         transcript_full_text=transcript_full_text,
@@ -2280,19 +2345,22 @@ def build_sap_payload(
     transcript_full_text: str | None = None,
     transcript_utterances: list[dict] | None = None,
     sap_summary_config: SapSummaryTemplateConfig | None = None,
+    consultation_text_override: str | None = None,
 ) -> dict:
     """
     按接口文档生成单条 SAP 咨询单 payload。
     TAB_SYZ 中可包含多条适应症，仅保留文档要求的编码字段。
     """
-    text = build_consultation_text(
-        advisor_name,
-        result,
-        visit_order=visit_order,
-        transcript_full_text=transcript_full_text,
-        transcript_utterances=transcript_utterances,
-        sap_summary_config=sap_summary_config,
-    )
+    text = str(consultation_text_override or "").strip()
+    if not text:
+        text = build_consultation_text(
+            advisor_name,
+            result,
+            visit_order=visit_order,
+            transcript_full_text=transcript_full_text,
+            transcript_utterances=transcript_utterances,
+            sap_summary_config=sap_summary_config,
+        )
     field_overrides = _resolve_rfc_field_overrides(visit_order)
 
     tab_syz = _build_sap_indication_rows(result)
@@ -2317,6 +2385,207 @@ def build_sap_payload(
         },
         "TAB_SYZ": tab_syz,
     }
+
+
+def _extract_sap_preview_text(result: dict | None, recording: Recording | None = None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    preview = result.get(SAP_CONSULTATION_PREVIEW_RESULT_KEY)
+    if not isinstance(preview, dict):
+        return ""
+    payloads = preview.get("payloads")
+    if not isinstance(payloads, list):
+        return ""
+    for item in payloads:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if "●接诊人员" in text:
+            return ""
+        staff_name = _recording_staff_name(recording)
+        if staff_name and text.startswith("●备注人员：无"):
+            return re.sub(r"^●备注人员：[^\n]*", f"●备注人员：{staff_name}", text, count=1).strip()
+        return text
+    return ""
+
+
+def _build_recording_consultation_text_for_visit(
+    context: dict,
+    *,
+    sap_summary_config: SapSummaryTemplateConfig | None = None,
+) -> str:
+    result = context.get("result") if isinstance(context.get("result"), dict) else {}
+    recording = context.get("recording")
+    recording_obj = recording if isinstance(recording, Recording) else None
+
+    preview_text = _extract_sap_preview_text(result, recording_obj)
+    if preview_text:
+        if not _is_sap_summary_section_enabled(None, sap_summary_config):
+            return _strip_sap_summary_section(preview_text)
+        return preview_text
+
+    return build_consultation_text(
+        _recording_staff_name(recording_obj),
+        result,
+        visit_order=None,
+        transcript_full_text=str(context.get("transcript_full_text") or "") or None,
+        transcript_utterances=context.get("transcript_utterances") if isinstance(context.get("transcript_utterances"), list) else None,
+        sap_summary_config=sap_summary_config,
+    ).strip()
+
+
+def _build_multi_recording_consultation_text(
+    contexts: list[dict],
+    *,
+    sap_summary_config: SapSummaryTemplateConfig | None = None,
+) -> str:
+    blocks = [
+        _build_recording_consultation_text_for_visit(
+            context,
+            sap_summary_config=sap_summary_config,
+        )
+        for context in contexts
+    ]
+    return "\n\n".join(block for block in blocks if block.strip()).strip()
+
+
+def _sanitize_review_editable_body(value: str, *, include_summary: bool = True) -> str:
+    lines: list[str] = []
+    skipping_summary = False
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("●备注人员") or stripped.startswith("●接诊人员"):
+            continue
+        if not include_summary:
+            if re.match(r"^●\s*总结信息\s*[：:]", stripped):
+                skipping_summary = True
+                continue
+            if skipping_summary and re.match(r"^●\s*[^：:\n]+?\s*[：:]", stripped):
+                skipping_summary = False
+            if skipping_summary:
+                continue
+        lines.append(raw_line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _split_review_consultation_block(text: str, staff_name: str) -> tuple[str, str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    locked_header = f"●备注人员：{staff_name or '无'}"
+    if not normalized:
+        return locked_header, ""
+    lines = normalized.splitlines()
+    first = lines[0].strip() if lines else ""
+    if first.startswith("●备注人员") or first.startswith("●接诊人员"):
+        return locked_header, _sanitize_review_editable_body("\n".join(lines[1:]))
+    return locked_header, _sanitize_review_editable_body(normalized)
+
+
+def _compose_review_consultation_text(blocks: list[dict], *, generated: bool = False) -> str:
+    parts: list[str] = []
+    for block in sorted(blocks, key=lambda item: int(item.get("sort_index") or 0)):
+        header = str(block.get("locked_header") or "").strip()
+        body_key = "generated_body" if generated else "effective_body"
+        body = str(block.get(body_key) or "").strip()
+        if not header and not body:
+            continue
+        parts.append("\n".join(part for part in (header, body) if part).strip())
+    return "\n\n".join(parts).strip()
+
+
+async def _sync_review_effective_consultation_text(
+    db: AsyncSession,
+    visit_id: str | None,
+    contexts: list[dict],
+    *,
+    sap_summary_config: SapSummaryTemplateConfig | None = None,
+) -> str:
+    normalized_visit_id = str(visit_id or "").strip()
+    if not normalized_visit_id:
+        return ""
+    review = (
+        await db.execute(
+            select(SapConsultationReview).where(SapConsultationReview.visit_id == normalized_visit_id)
+        )
+    ).scalar_one_or_none()
+    if review is None:
+        return ""
+
+    existing_blocks = {
+        str(block.get("recording_id") or ""): block
+        for block in (review.blocks if isinstance(review.blocks, list) else [])
+        if isinstance(block, dict)
+    }
+
+    blocks: list[dict] = []
+    for index, context in enumerate(contexts, start=1):
+        recording = context.get("recording")
+        if not isinstance(recording, Recording):
+            continue
+        staff_name = _recording_staff_name(recording) or "无"
+        block_text = _build_recording_consultation_text_for_visit(
+            context,
+            sap_summary_config=sap_summary_config,
+        )
+        locked_header, generated_body = _split_review_consultation_block(block_text, staff_name)
+        previous = existing_blocks.get(recording.id) or {}
+        summary_enabled = _is_sap_summary_section_enabled(None, sap_summary_config)
+        edited_body = _sanitize_review_editable_body(
+            str(previous.get("edited_body") or ""),
+            include_summary=summary_enabled,
+        )
+        blocks.append(
+            {
+                "recording_id": recording.id,
+                "file_name": recording.file_name,
+                "staff_id": recording.staff_id,
+                "staff_name": staff_name,
+                "sap_summary_enabled": summary_enabled,
+                "locked_header": locked_header,
+                "generated_body": generated_body,
+                "edited_body": edited_body or None,
+                "effective_body": edited_body or generated_body,
+                "sort_index": index,
+            }
+        )
+
+    if not blocks:
+        return str(review.effective_text or "").strip()
+
+    generated_text = _compose_review_consultation_text(blocks, generated=True)
+    effective_text = _compose_review_consultation_text(blocks, generated=False)
+    recording_ids = [str(block["recording_id"]) for block in blocks]
+    changed = (
+        list(review.recording_ids or []) != recording_ids
+        or list(review.blocks or []) != blocks
+        or str(review.generated_text or "") != generated_text
+        or str(review.effective_text or "") != effective_text
+    )
+    if changed:
+        review.recording_ids = recording_ids
+        review.blocks = blocks
+        review.generated_text = generated_text
+        review.effective_text = effective_text
+        if any(block.get("edited_body") for block in blocks):
+            review.status = "modified"
+        elif review.status not in {"modified", "pushed", "sending", "queued"}:
+            review.status = "pending"
+        await db.flush()
+
+    return effective_text
+
+
+async def _load_review_effective_consultation_text(db: AsyncSession, visit_id: str | None) -> str:
+    normalized_visit_id = str(visit_id or "").strip()
+    if not normalized_visit_id:
+        return ""
+    review = (
+        await db.execute(
+            select(SapConsultationReview.effective_text).where(SapConsultationReview.visit_id == normalized_visit_id)
+        )
+    ).scalar_one_or_none()
+    return str(review or "").strip()
 
 
 def _visit_order_lookup_key(dzdh: str | None, dzseg: str | None) -> tuple[str, str | None] | None:
@@ -2782,6 +3051,7 @@ async def _load_recording_for_unlinked_preview(db: AsyncSession, recording_id: s
             select(Recording)
             .where(Recording.id == recording_id)
             .options(selectinload(Recording.transcript))
+            .options(selectinload(Recording.staff))
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -2813,7 +3083,7 @@ def _build_unlinked_sap_preview_response(recording: Recording, payload: dict) ->
         "visit_order_seg": None,
         "customer_name": "",
         "customer_code": "",
-        "advisor_name": "",
+        "advisor_name": _recording_staff_name(recording),
         "indication_count": len(payload.get("TAB_SYZ") or []),
         "recording_count": 1,
         "target_count": 0,
@@ -2880,6 +3150,7 @@ async def _load_visit_recording_contexts(db: AsyncSession, visit_id: str) -> tup
             .where(RecordingVisitLink.visit_id == visit_id, Recording.status != "filtered")
             .options(
                 selectinload(Recording.transcript),
+                selectinload(Recording.staff),
                 selectinload(Recording.visit_links),
             )
             .order_by(Recording.created_at.asc(), Recording.id.asc())
@@ -2929,7 +3200,11 @@ async def _load_visit_recording_contexts(db: AsyncSession, visit_id: str) -> tup
         contexts.append(
             {
                 "recording": linked_recording,
-                "result": _normalize_result_payload(result_payload),
+                # Visit-level SAP content must be regenerated from the latest
+                # analysis facts.  A recording can carry an older unlinked
+                # preview snapshot, and using it here would keep stale remarks
+                # after the analysis result has been repaired.
+                "result": _normalize_result_payload(_strip_embedded_sap_preview(result_payload)),
                 "transcript_full_text": linked_recording.transcript.full_text if linked_recording.transcript else None,
                 "transcript_utterances": linked_recording.transcript.utterances if linked_recording.transcript else None,
             }
@@ -2994,6 +3269,7 @@ async def generate_sap_consultation_payloads(
             .where(Recording.id == recording_id)
             .options(
                 selectinload(Recording.transcript),
+                selectinload(Recording.staff),
                 selectinload(Recording.visit_links)
                 .selectinload(RecordingVisitLink.visit),
             )
@@ -3073,11 +3349,26 @@ async def generate_sap_consultation_payloads(
             return error
         result_payload = await _synthesize_visit_analysis_results(contexts, visit_order)
         source_recording = contexts[0]["recording"] if contexts else recording
-        advisor_name = visit_order.advxc_long or ""
+        advisor_name = _recording_staff_name(recording) or _recording_staff_name(source_recording)
         consultation_date, consultation_time = _resolve_consultation_date_time(source_recording, visit, visit_order)
         hospital_code = str(visit_order.jgbm or "").strip()
         if hospital_code not in summary_config_cache:
             summary_config_cache[hospital_code] = await _load_sap_summary_template_config(db, hospital_code)
+        summary_config = summary_config_cache[hospital_code]
+        review_text_override = await _sync_review_effective_consultation_text(
+            db,
+            visit.id,
+            contexts,
+            sap_summary_config=summary_config,
+        )
+        consultation_text_override = (
+            review_text_override
+            or (
+                _build_multi_recording_consultation_text(contexts, sap_summary_config=summary_config)
+                if len(contexts) > 1
+                else None
+            )
+        )
         payload = build_sap_payload(
             visit_order=visit_order,
             advisor_name=advisor_name,
@@ -3086,7 +3377,8 @@ async def generate_sap_consultation_payloads(
             consultation_time=consultation_time,
             transcript_full_text=_merge_transcript_full_text(contexts),
             transcript_utterances=_merge_transcript_utterances(contexts),
-            sap_summary_config=summary_config_cache[hospital_code],
+            sap_summary_config=summary_config,
+            consultation_text_override=consultation_text_override,
         )
         payloads.append(payload)
         targets.append(

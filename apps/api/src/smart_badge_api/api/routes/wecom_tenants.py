@@ -131,12 +131,14 @@ def _to_out(row: WecomTenant) -> WecomTenantOut:
         corp_id=row.corp_id,
         agent_id=row.agent_id,
         frontend_url=row.frontend_url,
+        callback_configured=bool(row.callback_token and row.callback_aes_key),
         default_hospital_code=row.default_hospital_code,
         default_hospital_name=row.default_hospital_name,
         sap_summary_template_name=row.sap_summary_template_name,
         sap_summary_template_version=row.sap_summary_template_version,
         sap_summary_template=row.sap_summary_template,
         sap_summary_prompt=row.sap_summary_prompt,
+        sap_summary_enabled=bool(getattr(row, "sap_summary_enabled", True)),
         department_assistant_match_config=row.department_assistant_match_config,
         is_default=bool(row.is_default),
         is_active=bool(row.is_active),
@@ -275,6 +277,8 @@ async def create_wecom_tenant(
         corp_id=_clean(body.corp_id),
         agent_id=_clean(body.agent_id),
         agent_secret=_clean(body.agent_secret),
+        callback_token=_clean(body.callback_token),
+        callback_aes_key=_clean(body.callback_aes_key),
         frontend_url=_normalize_frontend_url(body.frontend_url),
         default_hospital_code=hospital_code,
         default_hospital_name=None,
@@ -282,6 +286,7 @@ async def create_wecom_tenant(
         sap_summary_template_version=_clean(body.sap_summary_template_version),
         sap_summary_template=_clean(body.sap_summary_template),
         sap_summary_prompt=_clean(body.sap_summary_prompt),
+        sap_summary_enabled=bool(body.sap_summary_enabled),
         department_assistant_match_config=_normalize_department_assistant_match_config(
             body.department_assistant_match_config
         ),
@@ -334,6 +339,8 @@ async def update_wecom_tenant(
     for key in (
         "corp_id",
         "agent_id",
+        "callback_token",
+        "callback_aes_key",
         "sap_summary_template_name",
         "sap_summary_template_version",
         "sap_summary_template",
@@ -356,6 +363,13 @@ async def update_wecom_tenant(
             data["agent_secret"] = secret
         else:
             data.pop("agent_secret", None)
+    for secret_key in ("callback_token", "callback_aes_key"):
+        if secret_key in data:
+            secret = _clean(data[secret_key])
+            if secret:
+                data[secret_key] = secret
+            else:
+                data.pop(secret_key, None)
     if data.get("is_default") is False and tenant.is_default:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "默认机构配置不能直接取消，请将其他配置设为默认")
     if data.get("is_active") is False:

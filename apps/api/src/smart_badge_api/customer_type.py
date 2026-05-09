@@ -30,8 +30,11 @@ def normalize_customer_type_label(code: Any, text: Any = None) -> str | None:
 
 
 def customer_type_from_visit_order(order: Any) -> tuple[str | None, str | None]:
-    code = normalize_customer_type_code(getattr(order, "kutyp_dq", None)) or normalize_customer_type_code(
-        getattr(order, "khlx", None)
+    code = normalize_customer_type_code(getattr(order, "kut30_dq", None)) or normalize_customer_type_code(
+        getattr(order, "khlx_t30", None)
     )
-    label = normalize_customer_type_label(code, getattr(order, "kutyp_dq_txt", None))
+    label = normalize_customer_type_label(
+        code,
+        getattr(order, "kut30_dq_txt", None) or getattr(order, "khlx_t30", None),
+    )
     return code, label
