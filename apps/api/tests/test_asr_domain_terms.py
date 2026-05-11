@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from smart_badge_api.asr.domain_terms import (
     _HotwordEntry,
     _build_tencent_hotword_list_from_entries,
+    _build_tencent_hotword_word_weights_from_entries,
     _is_tencent_hotword_group_enabled,
     _normalize_tencent_hotword_weight,
     apply_medical_aesthetic_term_normalization,
@@ -33,12 +34,29 @@ def test_build_tencent_hotword_list_from_entries_deduplicates_and_limits_terms()
     assert hotword_list == "濡白天使|100,热玛吉|11,超声炮|10"
 
 
-def test_tencent_hotword_group_filter_keeps_projects_and_material_brands_only() -> None:
+def test_build_tencent_hotword_word_weights_from_entries_uses_vocab_shape() -> None:
+    word_weights = _build_tencent_hotword_word_weights_from_entries(
+        [
+            _HotwordEntry(term="贝丽菲尔", weight=11, priority=1),
+            _HotwordEntry(term="贝丽菲尔", weight=8, priority=3),
+            _HotwordEntry(term="超声炮", weight=10, priority=1),
+        ]
+    )
+
+    assert word_weights == [
+        {"Word": "贝丽菲尔", "Weight": 11},
+        {"Word": "超声炮", "Weight": 10},
+    ]
+
+
+def test_tencent_hotword_group_filter_keeps_high_value_asr_terms() -> None:
     assert _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="project", name="项目通用热词", source_label="行业"))
     assert _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="行业", name="材料品牌热词", source_label="行业"))
+    assert _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="行业", name="医疗治疗相关词汇", source_label="行业"))
+    assert _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="行业", name="部位热词", source_label="行业"))
+    assert _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="competitor", name="竞品机构热词", source_label="行业"))
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="concern", name="常见顾虑热词", source_label="运营"))
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="通用", name="通用服务热词", source_label="运营"))
-    assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="competitor", name="竞品机构热词", source_label="行业"))
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="industry", name="ASR自动挖词", source_label="ASR自动挖词"))
 
 

@@ -131,6 +131,24 @@ def test_asr_monitoring_overview_and_requests(monkeypatch) -> None:
                     ],
                 }
 
+            async def fake_institution_usage():
+                return [
+                    {
+                        "hospital_code": "6501",
+                        "hospital_name": "长沙雅美",
+                        "today_request_count": 1,
+                        "today_duration_seconds": 60,
+                        "last_7_days_request_count": 2,
+                        "last_7_days_duration_seconds": 120,
+                        "last_30_days_request_count": 3,
+                        "last_30_days_duration_seconds": 180,
+                        "last_30_days_failed_count": 0,
+                        "average_duration_seconds": 60,
+                        "share_percent": 100.0,
+                        "latest_transcribed_at": "2026-04-17T18:00:00+08:00",
+                    }
+                ], None
+
             monkeypatch.setattr(
                 "smart_badge_api.api.routes.asr_monitoring.get_usage_totals_by_date_range",
                 fake_usage,
@@ -138,6 +156,10 @@ def test_asr_monitoring_overview_and_requests(monkeypatch) -> None:
             monkeypatch.setattr(
                 "smart_badge_api.api.routes.asr_monitoring.get_file_recognition_resource_packages",
                 fake_packages,
+            )
+            monkeypatch.setattr(
+                "smart_badge_api.api.routes.asr_monitoring._build_institution_asr_usage",
+                fake_institution_usage,
             )
 
             try:
@@ -156,6 +178,8 @@ def test_asr_monitoring_overview_and_requests(monkeypatch) -> None:
                     assert overview["quota_remaining_seconds"] == 0
                     assert overview["quota_package_count"] == 6
                     assert len(overview["quota_packages"]) == 1
+                    assert overview["institution_usage"][0]["hospital_name"] == "长沙雅美"
+                    assert overview["institution_usage"][0]["last_30_days_duration_seconds"] == 180
 
                     requests_response = client.get("/api/v1/asr-monitoring/requests?page=1&page_size=10")
                     assert requests_response.status_code == 200

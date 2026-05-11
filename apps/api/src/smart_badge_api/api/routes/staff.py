@@ -36,7 +36,7 @@ from smart_badge_api.dingtalk import (
     DingTalkConfigError,
     lookup_dingtalk_user_by_job_number,
 )
-from smart_badge_api.db.models import AuditLog, PositionProfile, Staff, User, VisitOrder, WecomTenant
+from smart_badge_api.db.models import AuditLog, PositionProfile, Staff, StaffManagementRelation, User, VisitOrder, WecomTenant
 from smart_badge_api.db.session import get_db
 from smart_badge_api.db.system_defaults import ensure_system_management_defaults
 from smart_badge_api.schemas.pagination import PaginatedResponse, make_page_response
@@ -442,6 +442,36 @@ async def _ensure_super_admin_uniqueness(
         raise HTTPException(400, "系统中只能存在一位超级管理员")
 
 
+async def _initialize_hospital_admin_management_scope(db: AsyncSession, manager: Staff) -> None:
+    if normalize_permission_role(manager.permission_role) != "hospital_admin":
+        return
+    hospital_code = _clean_text(manager.hospital_code)
+    if not hospital_code or not manager.id:
+        return
+
+    manageable_staff = (
+        await db.execute(
+            select(Staff.id, Staff.permission_role).where(
+                Staff.hospital_code == hospital_code,
+                Staff.id != manager.id,
+                Staff.is_active.is_(True),
+            )
+        )
+    ).all()
+    manager_level = permission_role_level("hospital_admin")
+    relations = [
+        StaffManagementRelation(
+            hospital_code=hospital_code,
+            manager_staff_id=manager.id,
+            subordinate_staff_id=staff_id,
+        )
+        for staff_id, permission_role in manageable_staff
+        if staff_id and permission_role_level(permission_role) <= manager_level
+    ]
+    if relations:
+        db.add_all(relations)
+
+
 def _assert_manage_permission(
     current_user: User,
     *,
@@ -832,6 +862,8 @@ async def create_staff(
     )
     db.add(person)
     try:
+        await db.flush()
+        await _initialize_hospital_admin_management_scope(db, person)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()

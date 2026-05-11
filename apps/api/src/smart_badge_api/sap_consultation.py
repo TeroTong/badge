@@ -83,6 +83,142 @@ def _join_non_empty(values: list[str]) -> str:
     return "；".join(items) if items else "无"
 
 
+_SAP_FIELD_CONTINUATION_INDENT = " "
+_SAP_ITEM_MARKERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+_SAP_BULLET_FIELD_RE = re.compile(r"^●\s*([^：:\n]+?)\s*[：:]\s*(.*)$")
+_SAP_MULTILINE_FIELD_LABELS = {"顾客主诉", "顾客顾虑", "推荐方案", "未成交原因"}
+
+
+def _strip_sap_item_separator(value: str) -> str:
+    text = str(value or "").strip().strip("；;").strip()
+    return re.sub(rf"^\s*(?:[{_SAP_ITEM_MARKERS}]|\d+\s*[、.．])\s*", "", text).strip()
+
+
+def _is_empty_analysis_placeholder(value: str | None) -> bool:
+    text = re.sub(r"\s+", "", str(value or ""))
+    if not text:
+        return False
+    placeholder_fragments = (
+        "未识别出可标准化的适应症",
+        "未获取到可标准化的适应症",
+        "未识别出明确适应症",
+        "未识别到明确适应症",
+        "未识别出顾客主诉",
+        "未识别到顾客主诉",
+        "未识别出明确主诉",
+        "未识别到明确主诉",
+        "没有识别出顾客主诉",
+        "没有识别出适应症",
+    )
+    return any(fragment in text for fragment in placeholder_fragments)
+
+
+def _sap_item_marker(index: int) -> str:
+    if 1 <= index <= len(_SAP_ITEM_MARKERS):
+        return _SAP_ITEM_MARKERS[index - 1]
+    return f"{index}、"
+
+
+def _split_top_level_sap_items(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    items: list[str] = []
+    current: list[str] = []
+    paren_depth = 0
+    for char in text:
+        if char in "（(":
+            paren_depth += 1
+        elif char in "）)" and paren_depth > 0:
+            paren_depth -= 1
+
+        if char in "；;" and paren_depth == 0:
+            item = _strip_sap_item_separator("".join(current))
+            if item:
+                items.append(item)
+            current = []
+            continue
+        current.append(char)
+
+    item = _strip_sap_item_separator("".join(current))
+    if item:
+        items.append(item)
+    return items
+
+
+def _normalize_sap_field_items(values: list[str]) -> list[str]:
+    return _dedupe_preserve_order(
+        [
+            item
+            for item in (_strip_sap_item_separator(value) for value in values)
+            if item and item not in {"无", "暂无", "未明确", "-"} and not _is_empty_analysis_placeholder(item)
+        ]
+    )
+
+
+def _format_sap_multiline_field(title: str, values: list[str]) -> str:
+    items = _normalize_sap_field_items(values)
+    if not items:
+        return f"●{title}：无"
+
+    lines: list[str] = []
+    for index, item in enumerate(items, 1):
+        prefix = f"●{title}：" if index == 1 else _SAP_FIELD_CONTINUATION_INDENT
+        suffix = "；" if index < len(items) else ""
+        lines.append(f"{prefix}{_sap_item_marker(index)}{item}{suffix}")
+    return "\n".join(lines)
+
+
+def _format_sap_multiline_fields_in_text(text: str) -> str:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip().splitlines()
+    if not lines:
+        return ""
+
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index].rstrip()
+        match = _SAP_BULLET_FIELD_RE.match(raw_line.strip())
+        if not match:
+            if raw_line.strip():
+                blocks.append(raw_line)
+            index += 1
+            continue
+
+        title = match.group(1).strip()
+        if title not in _SAP_MULTILINE_FIELD_LABELS:
+            block_lines = [raw_line]
+            next_index = index + 1
+            while next_index < len(lines):
+                next_line = lines[next_index].rstrip()
+                if _SAP_BULLET_FIELD_RE.match(next_line.strip()):
+                    break
+                if next_line.strip():
+                    block_lines.append(next_line)
+                next_index += 1
+            blocks.append("\n".join(block_lines).strip())
+            index = next_index
+            continue
+
+        first_value = _strip_sap_item_separator(match.group(2))
+        continuation_values: list[str] = []
+        next_index = index + 1
+        while next_index < len(lines):
+            next_line = lines[next_index].rstrip()
+            if _SAP_BULLET_FIELD_RE.match(next_line.strip()):
+                break
+            if next_line.strip():
+                continuation_values.append(_strip_sap_item_separator(next_line))
+            next_index += 1
+
+        values = [first_value, *continuation_values] if continuation_values else _split_top_level_sap_items(first_value)
+        blocks.append(_format_sap_multiline_field(title, values))
+        index = next_index
+
+    return "\n\n".join(block for block in blocks if block.strip()).strip()
+
+
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -342,22 +478,36 @@ def _collect_primary_demand_items(result: dict) -> list[str]:
     if isinstance(chief, dict):
         primary_demands = chief.get("primary_demands")
         if isinstance(primary_demands, list):
-            values = _dedupe_preserve_order([str(item or "").strip() for item in primary_demands])
+            values = _dedupe_preserve_order(
+                [
+                    str(item or "").strip()
+                    for item in primary_demands
+                    if str(item or "").strip() and not _is_empty_analysis_placeholder(str(item or ""))
+                ]
+            )
             if values:
                 return values
-        if str(chief.get("summary") or "").strip():
-            return _dedupe_preserve_order(str(chief.get("summary") or "").strip().replace("；", "\n").splitlines())
+        chief_summary = str(chief.get("summary") or "").strip()
+        if chief_summary and not _is_empty_analysis_placeholder(chief_summary):
+            return _dedupe_preserve_order(chief_summary.replace("；", "\n").splitlines())
 
     cpd = result.get("customer_primary_demands", {})
     if isinstance(cpd, dict):
         items = cpd.get("items", [])
         if isinstance(items, list):
-            values = [str((item or {}).get("demand") or "").strip() for item in items if isinstance(item, dict)]
+            values = [
+                str((item or {}).get("demand") or "").strip()
+                for item in items
+                if isinstance(item, dict)
+                and str((item or {}).get("demand") or "").strip()
+                and not _is_empty_analysis_placeholder(str((item or {}).get("demand") or ""))
+            ]
             values = _dedupe_preserve_order(values)
             if values:
                 return values
-        if str(cpd.get("summary") or "").strip():
-            return _dedupe_preserve_order(str(cpd.get("summary") or "").strip().replace("；", "\n").splitlines())
+        cpd_summary = str(cpd.get("summary") or "").strip()
+        if cpd_summary and not _is_empty_analysis_placeholder(cpd_summary):
+            return _dedupe_preserve_order(cpd_summary.replace("；", "\n").splitlines())
     return []
 
 
@@ -449,7 +599,11 @@ def _collect_recommendation_text(result: dict) -> str:
             return str(recommended_plan.get("summary") or "").strip()
         items = recommended_plan.get("items", [])
         if isinstance(items, list):
-            values = [str((item or {}).get("plan") or "").strip() for item in items if isinstance(item, dict)]
+            values = [
+                _format_recommendation_plan_for_sap(item, "plan", "recommendation", "content")
+                for item in items
+                if isinstance(item, dict)
+            ]
             values = [value for value in values if value]
             if values:
                 return "；".join(values)
@@ -461,7 +615,7 @@ def _collect_recommendation_text(result: dict) -> str:
         items = sr.get("items", [])
         if isinstance(items, list):
             values = [
-                str(item.get("recommendation") or item.get("product_or_solution") or "").strip()
+                _format_recommendation_plan_for_sap(item, "recommendation", "product_or_solution")
                 for item in items
                 if isinstance(item, dict)
             ]
@@ -469,6 +623,44 @@ def _collect_recommendation_text(result: dict) -> str:
             if values:
                 return "；".join(values)
     return ""
+
+
+_RECOMMENDATION_DETAIL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("brand", "品牌"),
+    ("material", "材料"),
+    ("dosage", "用量"),
+    ("price", "报价"),
+    ("course_or_frequency", "疗程"),
+    ("treatment_steps", "步骤"),
+    ("implementation_notes", "要点"),
+)
+
+
+def _recommendation_detail_value(value: object) -> str:
+    if isinstance(value, list):
+        return "；".join(str(item or "").strip() for item in value if str(item or "").strip())
+    if isinstance(value, tuple):
+        return "；".join(str(item or "").strip() for item in value if str(item or "").strip())
+    return str(value or "").strip()
+
+
+def _format_recommendation_plan_for_sap(item: dict, *keys: str) -> str:
+    plan = next((str(item.get(key) or "").strip() for key in keys if str(item.get(key) or "").strip()), "")
+    if not plan:
+        return ""
+    compact_plan = re.sub(r"\s+", "", plan)
+    details: list[str] = []
+    seen_values: set[str] = set()
+    for field, label in _RECOMMENDATION_DETAIL_FIELDS:
+        value = _recommendation_detail_value(item.get(field))
+        compact_value = re.sub(r"\s+", "", value)
+        if not compact_value or compact_value in compact_plan or compact_value in seen_values:
+            continue
+        seen_values.add(compact_value)
+        details.append(f"{label}：{value}")
+    if not details:
+        return plan
+    return f"{plan}（{'；'.join(details)}）"
 
 
 def _collect_recommendation_items(result: dict) -> list[str]:
@@ -482,7 +674,7 @@ def _collect_recommendation_items(result: dict) -> list[str]:
                 if not isinstance(item, dict):
                     continue
                 plan, acceptance = _split_recommendation_plan_and_acceptance(
-                    str(item.get("plan") or item.get("recommendation") or item.get("content") or "").strip(),
+                    _format_recommendation_plan_for_sap(item, "plan", "recommendation", "content"),
                     str(item.get("acceptance") or "").strip(),
                 )
                 if not plan:
@@ -508,7 +700,7 @@ def _collect_recommendation_items(result: dict) -> list[str]:
                 if not isinstance(item, dict):
                     continue
                 plan, response = _split_recommendation_plan_and_acceptance(
-                    str(item.get("recommendation") or item.get("product_or_solution") or "").strip(),
+                    _format_recommendation_plan_for_sap(item, "recommendation", "product_or_solution"),
                     str(item.get("customer_response") or "").strip(),
                 )
                 if not plan:
@@ -521,6 +713,90 @@ def _collect_recommendation_items(result: dict) -> list[str]:
             if values:
                 return values
     return []
+
+
+def _transcript_text_for_price_quotes(
+    transcript_full_text: str | None,
+    transcript_utterances: list[dict] | None,
+) -> str:
+    if transcript_utterances:
+        parts = [
+            str(item.get("text") or "").strip()
+            for item in transcript_utterances
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        if parts:
+            return " ".join(parts)
+    return str(transcript_full_text or "").strip()
+
+
+def _collect_transcript_price_quote_recommendation_items(
+    transcript_full_text: str | None,
+    transcript_utterances: list[dict] | None,
+) -> list[str]:
+    text = _transcript_text_for_price_quotes(transcript_full_text, transcript_utterances)
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return []
+
+    has_price = bool(re.search(r"(?:\d{4,6}|[一二三四五六七八九十两]+万|十几万)", compact))
+    has_breast_implant_context = any(
+        keyword in compact
+        for keyword in (
+            "隆胸",
+            "丰胸",
+            "胸假体",
+            "乳房假体",
+            "假体",
+            "水滴型",
+            "圆形",
+            "宝俪",
+            "保利",
+            "爱思美",
+            "艾思美",
+            "优思利",
+            "优思丽",
+            "欧若拉",
+            "傲诺拉",
+            "母提瓦",
+            "魔滴",
+            "Motiva",
+            "星钻",
+        )
+    )
+    if not (has_price and has_breast_implant_context):
+        return []
+
+    quotes: list[str] = []
+
+    def add_quote(value: str) -> None:
+        text_value = value.strip("，,；;。 ")
+        if text_value and text_value not in quotes:
+            quotes.append(text_value)
+
+    if re.search(r"(?:保利|宝俪|宝丽).{0,10}水滴型.{0,30}(?:69800|七万)", compact):
+        add_quote("宝俪/保利水滴型约69800元")
+    if re.search(r"(?:保利|宝俪|宝丽).{0,45}圆形.{0,30}(?:46800|47000|4万7|四万七)", compact):
+        add_quote("宝俪/保利圆形约46800元")
+    elif re.search(r"圆形.{0,30}(?:46800|47000|4万7|四万七)", compact):
+        add_quote("圆形假体约46800元")
+
+    if re.search(r"(?:爱思美|艾思美).{0,12}(?:5万|五万|50000)", compact):
+        add_quote("爱思美/艾思美约5万元")
+    if re.search(r"(?:优思利|优思丽).{0,30}(?:保利|宝俪|宝丽).{0,20}(?:价格是一样|价格一样)", compact):
+        add_quote("优思利/优思丽圆形与宝俪/保利圆形价格相同")
+    if re.search(r"(?:欧若拉|傲诺拉).{0,25}(?:69800|七万)", compact):
+        add_quote("欧若拉/傲诺拉约69800元")
+    if re.search(r"(?:母提瓦|魔滴|Motiva).{0,16}(?:12万8|十二万八|128000)", compact, flags=re.IGNORECASE):
+        add_quote("母提瓦/Motiva魔滴约12.8万元")
+    elif re.search(r"(?:母提瓦|魔滴|Motiva).{0,16}(?:12万|十二万|120000)", compact, flags=re.IGNORECASE):
+        add_quote("母提瓦/Motiva魔滴约12万元")
+    if re.search(r"星钻.{0,12}(?:14万|十四万|140000)", compact):
+        add_quote("星钻约14万元")
+
+    if not quotes:
+        return []
+    return [f"胸假体/隆胸方案报价：{'；'.join(quotes)}"]
 
 
 def _collect_profile_tag_items(result: dict) -> list[str]:
@@ -662,7 +938,7 @@ def _collect_recommendation_acceptance_items(result: dict) -> list[tuple[str, st
             if not isinstance(item, dict):
                 continue
             plan, acceptance = _split_recommendation_plan_and_acceptance(
-                str(item.get("plan") or item.get("recommendation") or item.get("content") or "").strip(),
+                _format_recommendation_plan_for_sap(item, "plan", "recommendation", "content"),
                 str(item.get("acceptance") or "").strip(),
             )
             if plan:
@@ -674,7 +950,7 @@ def _collect_recommendation_acceptance_items(result: dict) -> list[tuple[str, st
             if not isinstance(item, dict):
                 continue
             plan, response = _split_recommendation_plan_and_acceptance(
-                str(item.get("recommendation") or item.get("product_or_solution") or "").strip(),
+                _format_recommendation_plan_for_sap(item, "recommendation", "product_or_solution"),
                 str(item.get("customer_response") or "").strip(),
             )
             if plan:
@@ -1613,7 +1889,7 @@ def _collect_configured_sap_summary_text(
         )
         for index, section in enumerate(sap_summary_config.sections, 1)
     ]
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _collect_summary_text(
@@ -2151,12 +2427,18 @@ def build_consultation_text(
     ●总结信息
     """
     lines = [f"●备注人员：{_text_or_none(advisor_name)}"]
-    lines.append(f"●顾客主诉：{_text_or_none(_collect_primary_demand_text(result))}")
+    lines.append(_format_sap_multiline_field("顾客主诉", _collect_primary_demand_items(result)))
     lines.append(f"●本次预算：{_text_or_none(_collect_budget_text(result))}")
-    lines.append(f"●顾客顾虑：{_join_non_empty(_collect_concern_items(result))}")
-    lines.append(f"●推荐方案：{_join_non_empty(_collect_recommendation_items(result))}")
+    lines.append(_format_sap_multiline_field("顾客顾虑", _collect_concern_items(result)))
+    recommendation_items = _collect_recommendation_items(result)
+    if not recommendation_items:
+        recommendation_items = _collect_transcript_price_quote_recommendation_items(
+            transcript_full_text,
+            transcript_utterances,
+        )
+    lines.append(_format_sap_multiline_field("推荐方案", recommendation_items))
     if _is_visit_order_final_not_deal(visit_order):
-        lines.append(f"●未成交原因：{_join_non_empty(_collect_loss_reason_items(result))}")
+        lines.append(_format_sap_multiline_field("未成交原因", _collect_loss_reason_items(result)))
     if _is_sap_summary_section_enabled(visit_order, sap_summary_config):
         summary_text = _format_sap_summary_text(
             _collect_summary_text(
@@ -2170,7 +2452,7 @@ def build_consultation_text(
         )
         lines.append("\u25cf\u603b\u7ed3\u4fe1\u606f\uff1a\n" f"{_text_or_none(summary_text)}")
 
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _normalize_date_token(value: str | None) -> str:
@@ -2406,8 +2688,8 @@ def _extract_sap_preview_text(result: dict | None, recording: Recording | None =
             return ""
         staff_name = _recording_staff_name(recording)
         if staff_name and text.startswith("●备注人员：无"):
-            return re.sub(r"^●备注人员：[^\n]*", f"●备注人员：{staff_name}", text, count=1).strip()
-        return text
+            text = re.sub(r"^●备注人员：[^\n]*", f"●备注人员：{staff_name}", text, count=1).strip()
+        return _format_sap_multiline_fields_in_text(text)
     return ""
 
 
@@ -2569,7 +2851,7 @@ async def _sync_review_effective_consultation_text(
         review.effective_text = effective_text
         if any(block.get("edited_body") for block in blocks):
             review.status = "modified"
-        elif review.status not in {"modified", "pushed", "sending", "queued"}:
+        elif review.status not in {"modified", "sending", "queued"}:
             review.status = "pending"
         await db.flush()
 

@@ -176,6 +176,40 @@ def _normalize_text_list(value: Any) -> list[str]:
     return []
 
 
+_RECOMMENDATION_DETAIL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("brand", "品牌"),
+    ("material", "材料"),
+    ("dosage", "用量"),
+    ("price", "报价"),
+    ("course_or_frequency", "疗程"),
+    ("treatment_steps", "步骤"),
+    ("implementation_notes", "要点"),
+)
+
+
+def _format_recommendation_plan_text(item: dict[str, Any]) -> str:
+    plan = (
+        _normalize_text(item.get("recommendation"))
+        or _normalize_text(item.get("product_or_solution"))
+        or _normalize_text(item.get("plan"))
+    )
+    if not plan:
+        return ""
+    compact_plan = re.sub(r"\s+", "", plan)
+    details: list[str] = []
+    seen_values: set[str] = set()
+    for field, label in _RECOMMENDATION_DETAIL_FIELDS:
+        value = "；".join(_normalize_text_list(item.get(field))) if isinstance(item.get(field), list) else _normalize_text(item.get(field))
+        compact_value = re.sub(r"\s+", "", value)
+        if not compact_value or compact_value in compact_plan or compact_value in seen_values:
+            continue
+        seen_values.add(compact_value)
+        details.append(f"{label}：{value}")
+    if not details:
+        return plan
+    return f"{plan}（{'；'.join(details)}）"
+
+
 def _as_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -812,8 +846,7 @@ def _build_consultation_result(normalized: dict[str, Any]) -> dict[str, Any]:
     recommended_items = (
         [
             {
-                "plan": _normalize_text(_as_dict(item).get("recommendation"))
-                or _normalize_text(_as_dict(item).get("product_or_solution")),
+                "plan": _format_recommendation_plan_text(_as_dict(item)),
                 "acceptance": _normalize_text(_as_dict(item).get("customer_response")) or "未明确回应",
                 "evidence": _normalize_text(_as_dict(item).get("evidence")),
             }
@@ -1209,7 +1242,6 @@ def _normalize_negative_project_tags(tags: list[dict[str, Any]]) -> list[dict[st
         if not category_items:
             negative_item.pop("evidence", None)
             negative_item.pop("weight_level", None)
-
     if insert_index is None:
         if concrete_values or has_prior_treatment_context:
             normalized_tags.append(negative_item)
@@ -1462,6 +1494,16 @@ def _age_evidence_mention_is_future_or_hypothetical(text: str, start: int, end: 
     compact_age = re.sub(r"\s+", "", age_text)
     age_question_like = re.search(r"(?:今年)?(?:多大|几岁|多少岁)|年龄|身份证", window)
 
+    if re.search(r"(?:我要是|要是我|如果我|假如我|换成我|像我|我当时|我那时候|我以前|我之前).{0,18}" + re.escape(compact_age), compact_window):
+        return True
+    if re.search(r"(?:我也要|我还要|我要|要).{0,4}" + re.escape(compact_age), compact_window) and not age_question_like:
+        return True
+    if re.search(re.escape(compact_age) + r"(?:的时候|那时候|当时|以前|之前|左右|上下)", compact_window) and not age_question_like:
+        return True
+    if re.search(re.escape(compact_age) + r"(?:离开|离|走|跑)", compact_window) and not age_question_like:
+        return True
+    if re.search(r"(?:像|看着像|看起来像|显得像).{0,6}" + re.escape(compact_age), compact_window) and not age_question_like:
+        return True
     if compact_suffix.startswith(("以后", "之后", "后")):
         return True
     if re.search(re.escape(compact_age) + r"(?:以后|之后|后)", compact_window):

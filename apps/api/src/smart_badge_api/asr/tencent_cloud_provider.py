@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -33,6 +34,10 @@ from smart_badge_api.core.config import get_settings
 # 共享 httpx AsyncClient（连接池复用）。
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 _HTTP_CLIENT_LOCK: asyncio.Lock | None = None
+_HOTWORD_VOCAB_CACHE: dict[str, Any] | None = None
+_HOTWORD_VOCAB_CACHE_LOCK: asyncio.Lock | None = None
+_TENCENT_HOTWORD_VOCAB_MAX_WORDS = 1000
+_TENCENT_HOTWORD_MAX_BYTES = 30
 
 
 async def _get_shared_client() -> httpx.AsyncClient:
@@ -200,10 +205,9 @@ async def _call_tencent_api_with_options(
     if settings.tencent_asr_session_token.strip():
         headers["X-TC-Token"] = settings.tencent_asr_session_token.strip()
 
-    # CreateRecTask is NOT idempotent: each retry creates a new task and
-    # consumes ASR quota even if the client never receives the response.
-    # Only retry read-only / idempotent actions.
-    _NON_IDEMPOTENT_ACTIONS = {"CreateRecTask"}
+    # These actions are NOT idempotent: retrying can create duplicated tasks or
+    # duplicated vocabularies if the first request succeeded but the response was lost.
+    _NON_IDEMPOTENT_ACTIONS = {"CreateRecTask", "CreateAsrVocab"}
     max_attempts = 1 if action in _NON_IDEMPOTENT_ACTIONS else 4
 
     body: dict[str, Any] | None = None
@@ -278,6 +282,203 @@ def _coerce_int(value: object) -> int | None:
         return None
 
 
+def _normalize_hotword_word_weights(word_weights: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in word_weights or []:
+        if not isinstance(item, dict):
+            continue
+        term = re.sub(r"\s+", "", str(item.get("Word") or item.get("word") or "").strip())
+        if not term or len(term.encode("utf-8")) > _TENCENT_HOTWORD_MAX_BYTES:
+            continue
+        if any(unicodedata.category(char).startswith(("P", "S")) for char in term):
+            continue
+        key = term.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        weight = _coerce_int(item.get("Weight") or item.get("weight")) or 10
+        if weight >= 100:
+            resolved_weight = 100
+        else:
+            resolved_weight = min(max(weight, 1), 11)
+        normalized.append({"Word": term, "Weight": resolved_weight})
+        if len(normalized) >= _TENCENT_HOTWORD_VOCAB_MAX_WORDS:
+            break
+    return normalized
+
+
+def _hotword_vocab_digest(word_weights: list[dict[str, object]]) -> str:
+    payload = json.dumps(word_weights, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _hotword_vocab_cache_path() -> Path:
+    return get_settings().asr_runtime_path / "tencent_hotword_vocab.json"
+
+
+def _load_hotword_vocab_cache() -> dict[str, Any]:
+    global _HOTWORD_VOCAB_CACHE
+    if _HOTWORD_VOCAB_CACHE is not None:
+        return dict(_HOTWORD_VOCAB_CACHE)
+
+    path = _hotword_vocab_cache_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    _HOTWORD_VOCAB_CACHE = payload if isinstance(payload, dict) else {}
+    return dict(_HOTWORD_VOCAB_CACHE)
+
+
+def _save_hotword_vocab_cache(payload: dict[str, Any]) -> None:
+    global _HOTWORD_VOCAB_CACHE
+    _HOTWORD_VOCAB_CACHE = dict(payload)
+    path = _hotword_vocab_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _extract_hotword_vocab_id(response_payload: dict[str, Any]) -> str | None:
+    candidates: list[dict[str, Any]] = []
+    if isinstance(response_payload, dict):
+        candidates.append(response_payload)
+        data = response_payload.get("Data")
+        if isinstance(data, dict):
+            candidates.append(data)
+    for container in candidates:
+        for key in ("VocabId", "VocabID", "HotwordId", "HotwordID"):
+            value = str(container.get(key) or "").strip()
+            if value:
+                return value
+    return None
+
+
+async def _create_tencent_hotword_vocab(word_weights: list[dict[str, object]]) -> str:
+    settings = get_settings()
+    response_payload = await _call_tencent_api(
+        "CreateAsrVocab",
+        {
+            "Name": settings.tencent_asr_hotword_vocab_name.strip() or "smart-badge-hotwords",
+            "Description": settings.tencent_asr_hotword_vocab_description.strip() or "Smart Badge ASR hotwords",
+            "WordWeights": word_weights,
+        },
+    )
+    vocab_id = _extract_hotword_vocab_id(response_payload)
+    if not vocab_id:
+        raise TencentAsrError("Tencent ASR CreateAsrVocab did not return VocabId")
+    return vocab_id
+
+
+async def _update_tencent_hotword_vocab(
+    vocab_id: str,
+    word_weights: list[dict[str, object]],
+) -> str:
+    settings = get_settings()
+    await _call_tencent_api(
+        "UpdateAsrVocab",
+        {
+            "VocabId": vocab_id,
+            "Name": settings.tencent_asr_hotword_vocab_name.strip() or "smart-badge-hotwords",
+            "Description": settings.tencent_asr_hotword_vocab_description.strip() or "Smart Badge ASR hotwords",
+            "WordWeights": word_weights,
+        },
+    )
+    return vocab_id
+
+
+async def _ensure_tencent_hotword_vocab(word_weights: list[dict[str, object]] | None) -> str | None:
+    settings = get_settings()
+    configured_vocab_id = settings.tencent_asr_hotword_vocab_id.strip()
+    if not settings.tencent_asr_hotword_vocab_sync_enabled:
+        return configured_vocab_id or None
+
+    normalized_word_weights = _normalize_hotword_word_weights(word_weights)
+    if not normalized_word_weights:
+        return configured_vocab_id or None
+
+    global _HOTWORD_VOCAB_CACHE_LOCK
+    if _HOTWORD_VOCAB_CACHE_LOCK is None:
+        _HOTWORD_VOCAB_CACHE_LOCK = asyncio.Lock()
+
+    async with _HOTWORD_VOCAB_CACHE_LOCK:
+        digest = _hotword_vocab_digest(normalized_word_weights)
+        cache = _load_hotword_vocab_cache()
+        cached_vocab_id = str(cache.get("vocab_id") or "").strip()
+        cached_digest = str(cache.get("digest") or "").strip()
+        cached_name = str(cache.get("name") or "").strip()
+        vocab_name = settings.tencent_asr_hotword_vocab_name.strip() or "smart-badge-hotwords"
+        vocab_id = configured_vocab_id or cached_vocab_id
+
+        if vocab_id and cached_vocab_id == vocab_id and cached_digest == digest and cached_name == vocab_name:
+            return vocab_id
+
+        if vocab_id:
+            vocab_id = await _update_tencent_hotword_vocab(vocab_id, normalized_word_weights)
+            logger.info("Updated Tencent ASR hotword vocabulary: vocab_id=%s words=%d", vocab_id, len(normalized_word_weights))
+        else:
+            vocab_id = await _create_tencent_hotword_vocab(normalized_word_weights)
+            logger.info("Created Tencent ASR hotword vocabulary: vocab_id=%s words=%d", vocab_id, len(normalized_word_weights))
+
+        _save_hotword_vocab_cache(
+            {
+                "vocab_id": vocab_id,
+                "digest": digest,
+                "name": vocab_name,
+                "word_count": len(normalized_word_weights),
+                "synced_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        return vocab_id
+
+
+def _build_hotword_list_from_word_weights(word_weights: list[dict[str, object]] | None) -> str | None:
+    hotwords = [
+        f"{item['Word']}|{item['Weight']}"
+        for item in _normalize_hotword_word_weights(word_weights)[:128]
+    ]
+    return ",".join(hotwords) if hotwords else None
+
+
+async def _resolve_tencent_hotword_config(
+    *,
+    hotword_word_weights: list[dict[str, object]] | None,
+    hotword_list: str | None,
+) -> tuple[str | None, str | None]:
+    settings = get_settings()
+    normalized_word_weights = _normalize_hotword_word_weights(hotword_word_weights)
+    if normalized_word_weights:
+        try:
+            hotword_id = await _ensure_tencent_hotword_vocab(normalized_word_weights)
+        except Exception:
+            logger.exception("Failed to sync Tencent ASR hotword vocabulary; falling back to request HotwordList")
+            hotword_id = settings.tencent_asr_hotword_vocab_id.strip() or None
+        if hotword_id:
+            return hotword_id, None
+        return None, _build_hotword_list_from_word_weights(normalized_word_weights) or hotword_list
+
+    configured_vocab_id = settings.tencent_asr_hotword_vocab_id.strip()
+    if configured_vocab_id:
+        return configured_vocab_id, None
+    return None, hotword_list
+
+
+def _apply_tencent_hotword_fields(
+    payload: dict[str, Any],
+    *,
+    hotword_id: str | None,
+    hotword_list: str | None,
+) -> None:
+    resolved_hotword_id = str(hotword_id or "").strip()
+    if resolved_hotword_id:
+        payload["HotwordId"] = resolved_hotword_id
+        return
+    resolved_hotword_list = str(hotword_list or "").strip() or get_settings().tencent_asr_hotword_list.strip()
+    if resolved_hotword_list:
+        payload["HotwordList"] = resolved_hotword_list
+
+
 def parse_tencent_task_data(data: dict[str, Any]) -> tuple[list[dict], str, int]:
     detail_items = list(data.get("ResultDetail") or [])
     utterances: list[dict] = []
@@ -332,6 +533,7 @@ def parse_tencent_task_data(data: dict[str, Any]) -> tuple[list[dict], str, int]
 def _build_create_rec_task_payload_from_bytes(
     audio_bytes: bytes,
     *,
+    hotword_id: str | None = None,
     hotword_list: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
@@ -346,9 +548,7 @@ def _build_create_rec_task_payload_from_bytes(
     }
     if settings.tencent_asr_speaker_number > 0:
         payload["SpeakerNumber"] = settings.tencent_asr_speaker_number
-    resolved_hotword_list = str(hotword_list or "").strip() or settings.tencent_asr_hotword_list.strip()
-    if resolved_hotword_list:
-        payload["HotwordList"] = resolved_hotword_list
+    _apply_tencent_hotword_fields(payload, hotword_id=hotword_id, hotword_list=hotword_list)
     if settings.tencent_asr_replace_text_id.strip():
         payload["ReplaceTextId"] = settings.tencent_asr_replace_text_id.strip()
     return payload
@@ -357,6 +557,7 @@ def _build_create_rec_task_payload_from_bytes(
 def _build_create_rec_task_payload_from_url(
     audio_url: str,
     *,
+    hotword_id: str | None = None,
     hotword_list: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
@@ -370,9 +571,7 @@ def _build_create_rec_task_payload_from_url(
     }
     if settings.tencent_asr_speaker_number > 0:
         payload["SpeakerNumber"] = settings.tencent_asr_speaker_number
-    resolved_hotword_list = str(hotword_list or "").strip() or settings.tencent_asr_hotword_list.strip()
-    if resolved_hotword_list:
-        payload["HotwordList"] = resolved_hotword_list
+    _apply_tencent_hotword_fields(payload, hotword_id=hotword_id, hotword_list=hotword_list)
     if settings.tencent_asr_replace_text_id.strip():
         payload["ReplaceTextId"] = settings.tencent_asr_replace_text_id.strip()
     return payload
@@ -452,15 +651,24 @@ def _chunk_file_size_bytes(chunk: Any) -> int:
 def _build_create_rec_task_payload_from_chunk(
     chunk: Any,
     *,
+    hotword_id: str | None = None,
     hotword_list: str | None = None,
 ) -> dict[str, Any]:
     audio_url = str(getattr(chunk, "url", "") or "").strip()
     if audio_url:
-        return _build_create_rec_task_payload_from_url(audio_url, hotword_list=hotword_list)
+        return _build_create_rec_task_payload_from_url(
+            audio_url,
+            hotword_id=hotword_id,
+            hotword_list=hotword_list,
+        )
     data = getattr(chunk, "data", None)
     if not isinstance(data, (bytes, bytearray)):
         raise TencentAsrError("腾讯云 ASR 直传分片缺少音频数据")
-    return _build_create_rec_task_payload_from_bytes(bytes(data), hotword_list=hotword_list)
+    return _build_create_rec_task_payload_from_bytes(
+        bytes(data),
+        hotword_id=hotword_id,
+        hotword_list=hotword_list,
+    )
 
 
 def _probe_audio_duration_ms(audio_path: Path) -> int:
@@ -923,6 +1131,7 @@ async def transcribe_audio(
     audio_path: str | Path,
     *,
     hotword_list: str | None = None,
+    hotword_word_weights: list[dict[str, object]] | None = None,
     source_id: str | None = None,
 ) -> tuple[list[dict], str, int]:
     _validate_runtime_prerequisites()
@@ -934,13 +1143,19 @@ async def transcribe_audio(
         "url" if str(getattr(chunk, "url", "") or "").strip() else "direct"
         for chunk in chunks
     }
+    hotword_id, resolved_hotword_list = await _resolve_tencent_hotword_config(
+        hotword_word_weights=hotword_word_weights,
+        hotword_list=hotword_list,
+    )
     logger.info(
-        "Submitting Tencent ASR for %s: chunks=%d modes=%s engine=%s diarization=%s",
+        "Submitting Tencent ASR for %s: chunks=%d modes=%s engine=%s diarization=%s hotword_id=%s hotword_list=%s",
         resolved_path,
         len(chunks),
         ",".join(sorted(upload_modes)) or "direct",
         get_settings().tencent_asr_engine_model_type,
         get_settings().tencent_asr_speaker_diarization,
+        hotword_id or "-",
+        "yes" if resolved_hotword_list else "no",
     )
 
     utterances: list[dict] = []
@@ -1066,7 +1281,8 @@ async def transcribe_audio(
                     task_id, request_id = await _create_rec_task(
                         _build_create_rec_task_payload_from_chunk(
                             chunk,
-                            hotword_list=hotword_list,
+                            hotword_id=hotword_id,
+                            hotword_list=resolved_hotword_list,
                         )
                     )
                     if source_id:

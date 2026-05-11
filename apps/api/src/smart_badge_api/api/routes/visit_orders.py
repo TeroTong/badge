@@ -6,13 +6,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, false, func, or_, select, true
+from sqlalchemy import and_, false, func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.api.data_scope import (
     build_permission_scope,
-    managed_staff_scope_condition,
-    recording_scope_condition,
     visit_order_scope_condition,
     visit_scope_condition,
 )
@@ -166,68 +164,10 @@ def _business_date_from_datetime(value: datetime | None) -> str | None:
 
 async def _list_visit_order_scope_condition(db: AsyncSession, scope):
     from smart_badge_api.core.permissions import normalize_permission_role
-    if normalize_permission_role(scope.role) in {"super_admin", "system_admin"}:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
-    if not scope.staff_id:
-        return false()
-
-    staff_rows = (
-        await db.execute(
-            select(Staff.external_account, Staff.hospital_code).where(
-                managed_staff_scope_condition(scope, Staff.id),
-                Staff.is_active.is_(True),
-                Staff.external_account.is_not(None),
-                Staff.hospital_code.is_not(None),
-            )
-        )
-    ).all()
-    advisor_codes = {
-        str(external_account or "").strip()
-        for external_account, _hospital_code in staff_rows
-        if str(external_account or "").strip()
-    }
-    hospital_codes = {
-        str(hospital_code or "").strip()
-        for _external_account, hospital_code in staff_rows
-        if str(hospital_code or "").strip()
-    }
-    if not advisor_codes or not hospital_codes:
-        return false()
-
-    recording_dates = {
-        business_date
-        for created_at in (
-            await db.execute(
-                select(Recording.created_at).where(
-                    recording_scope_condition(scope),
-                    Recording.created_at.is_not(None),
-                )
-            )
-        ).scalars().all()
-        if (business_date := _business_date_from_datetime(created_at))
-    }
-    if not recording_dates:
-        return false()
-
-    advisor_code_list = sorted(advisor_codes)
-    hospital_code_list = sorted(hospital_codes)
-    recording_date_list = sorted(recording_dates)
-    participant_condition = or_(
-        VisitOrder.fzuer.in_(advisor_code_list),
-        VisitOrder.d_fzuer.in_(advisor_code_list),
-        VisitOrder.fzr_id_dq.in_(advisor_code_list),
-        VisitOrder.advxc.in_(advisor_code_list),
-        VisitOrder.assxc.in_(advisor_code_list),
-        VisitOrder.advyq.in_(advisor_code_list),
-        VisitOrder.yyuer.in_(advisor_code_list),
-        VisitOrder.vipkf.in_(advisor_code_list),
-        VisitOrder.d_vipkf.in_(advisor_code_list),
-    )
-    return and_(
-        VisitOrder.jgbm.in_(hospital_code_list),
-        or_(VisitOrder.crtdt.in_(recording_date_list), VisitOrder.sjrq.in_(recording_date_list)),
-        participant_condition,
-    )
+    return visit_order_scope_condition(scope)
 
 
 def _build_daily_visit_order_items(

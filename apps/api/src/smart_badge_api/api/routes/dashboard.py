@@ -877,10 +877,8 @@ def _staff_stats_scope(scope) -> PermissionScope:
 
 
 async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: PermissionScope) -> list[str] | None:
-    # Global roles (super_admin/system_admin) without an explicitly selected
-    # staff see all staff. When a hospital is selected the visible staff are
-    # restricted to that hospital. None is the sentinel for "unrestricted".
-    if is_global_role(scope.role) and not scope.staff_id:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         if scope.hospital_code:
             stmt = select(Staff.id).where(
                 Staff.hospital_code == scope.hospital_code,
@@ -888,12 +886,32 @@ async def _resolve_dashboard_managed_staff_ids(db: AsyncSession, scope: Permissi
             )
             return list((await db.execute(stmt)).scalars().all())
         return None
+    if role == "system_admin":
+        actor_level = PERMISSION_ROLE_LEVELS["system_admin"]
+        role_levels = {
+            **PERMISSION_ROLE_LEVELS,
+            **{
+                legacy_role: PERMISSION_ROLE_LEVELS[normalized_role]
+                for legacy_role, normalized_role in LEGACY_STAFF_PERMISSION_ROLE_MAP.items()
+            },
+        }
+        stmt = select(Staff.id).where(
+            Staff.is_active.is_(True),
+            case(
+                role_levels,
+                value=Staff.permission_role,
+                else_=PERMISSION_ROLE_LEVELS["staff"],
+            )
+            <= actor_level,
+        )
+        if scope.hospital_code:
+            stmt = stmt.where(Staff.hospital_code == scope.hospital_code)
+        return list((await db.execute(stmt)).scalars().all())
     if not scope.staff_id:
         return []
     if scope.role == "single_staff":
         return [scope.staff_id]
 
-    role = normalize_permission_role(scope.role)
     actor_level = PERMISSION_ROLE_LEVELS.get(role, PERMISSION_ROLE_LEVELS["staff"])
     role_levels = {
         **PERMISSION_ROLE_LEVELS,
@@ -1208,7 +1226,7 @@ async def _load_dashboard_staff_options(
 ) -> list[DashboardStaffOptionItem]:
     stmt = select(Staff).where(Staff.is_active.is_(True))
 
-    if not base_scope.staff_id:
+    if not base_scope.staff_id and normalize_permission_role(base_scope.role) not in {"super_admin", "system_admin"}:
         return []
     stmt = stmt.where(managed_staff_scope_condition(base_scope, Staff.id))
     if selected_hospital_code:

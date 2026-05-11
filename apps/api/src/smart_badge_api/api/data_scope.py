@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from sqlalchemy import and_, case, exists, false, func, or_, select, true
+from sqlalchemy import case, exists, false, or_, select, true
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
-from smart_badge_api.core.config import get_settings
 from smart_badge_api.core.permissions import (
     LEGACY_STAFF_PERMISSION_ROLE_MAP,
     PERMISSION_ROLE_LEVELS,
     PermissionScope,
     GLOBAL_ROLES,
-    is_global_role,
     normalize_permission_role,
     permission_role_level,
 )
@@ -42,12 +41,6 @@ async def build_permission_scope(user: User) -> PermissionScope:
     )
 
 
-def _recording_created_date_text(recording_model) -> ColumnElement[str]:
-    if get_settings().database_url.startswith("sqlite"):
-        return func.date(recording_model.created_at, "+8 hours")
-    return func.to_char(func.timezone("Asia/Shanghai", recording_model.created_at), "YYYY-MM-DD")
-
-
 def _staff_visit_order_participation_condition(staff_model, visit_order_model) -> ColumnElement[bool]:
     return or_(
         staff_model.external_account == visit_order_model.fzuer,
@@ -62,26 +55,94 @@ def _staff_visit_order_participation_condition(staff_model, visit_order_model) -
     )
 
 
-def _staff_id_in_management_scope(scope: PermissionScope, staff_id_column) -> ColumnElement[bool]:
-    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+def _clean_staff_id(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _staff_role_level_condition(scope: PermissionScope, staff_model) -> ColumnElement[bool]:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
+    return (
+        case(
+            _STAFF_PERMISSION_ROLE_LEVELS,
+            value=staff_model.permission_role,
+            else_=PERMISSION_ROLE_LEVELS["staff"],
+        )
+        <= permission_role_level(role)
+    )
+
+
+def _staff_id_within_role_ceiling(scope: PermissionScope, staff_id_column) -> ColumnElement[bool]:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
+        return true()
+
+    scoped_staff = aliased(Staff)
+    return exists(
+        select(scoped_staff.id).where(
+            scoped_staff.id == staff_id_column,
+            scoped_staff.is_active.is_(True),
+            _staff_role_level_condition(scope, scoped_staff),
+        )
+    )
+
+
+async def resolve_visible_staff_ids_for_user(db: AsyncSession | None, user: object) -> set[str] | None:
+    role = normalize_permission_role(getattr(user, "role", None))
+    staff_id = _clean_staff_id(getattr(user, "staff_id", None))
+    if role == "super_admin":
+        return None
+    if role == "system_admin":
+        if db is None:
+            return {staff_id} if staff_id else set()
+        rows = (
+            await db.execute(
+                select(Staff.id).where(
+                    Staff.is_active.is_(True),
+                    _staff_role_level_condition(PermissionScope(role=role), Staff),
+                )
+            )
+        ).scalars().all()
+        visible_staff_ids = {item for item in rows if item}
+        if staff_id:
+            visible_staff_ids.add(staff_id)
+        return visible_staff_ids
+    if not staff_id:
+        return set()
+    if db is None:
+        return {staff_id}
+
+    rows = (
+        await db.execute(
+            select(Staff.id, Staff.permission_role)
+            .join(StaffManagementRelation, StaffManagementRelation.subordinate_staff_id == Staff.id)
+            .where(
+                StaffManagementRelation.manager_staff_id == staff_id,
+                Staff.is_active.is_(True),
+            )
+        )
+    ).all()
+    visible_staff_ids = {staff_id}
+    actor_level = permission_role_level(role)
+    for subordinate_staff_id, subordinate_role in rows:
+        if subordinate_staff_id == staff_id or permission_role_level(subordinate_role) <= actor_level:
+            visible_staff_ids.add(subordinate_staff_id)
+    return visible_staff_ids
+
+
+def _staff_id_in_management_scope(scope: PermissionScope, staff_id_column) -> ColumnElement[bool]:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
+        return true()
+    if role == "system_admin":
+        return _staff_id_within_role_ceiling(scope, staff_id_column)
     if not scope.staff_id:
         return false()
     if scope.role == "single_staff":
         return staff_id_column == scope.staff_id
     managed_staff = aliased(Staff)
-    role = normalize_permission_role(scope.role)
-    actor_level = permission_role_level(role)
-    managed_role_allowed = (
-        true()
-        if role == "super_admin"
-        else case(
-            _STAFF_PERMISSION_ROLE_LEVELS,
-            value=managed_staff.permission_role,
-            else_=PERMISSION_ROLE_LEVELS["staff"],
-        )
-        <= actor_level
-    )
     return or_(
         staff_id_column == scope.staff_id,
         exists(
@@ -91,7 +152,7 @@ def _staff_id_in_management_scope(scope: PermissionScope, staff_id_column) -> Co
                 StaffManagementRelation.manager_staff_id == scope.staff_id,
                 StaffManagementRelation.subordinate_staff_id == staff_id_column,
                 managed_staff.is_active.is_(True),
-                managed_role_allowed,
+                _staff_role_level_condition(scope, managed_staff),
             )
         ),
     )
@@ -99,19 +160,6 @@ def _staff_id_in_management_scope(scope: PermissionScope, staff_id_column) -> Co
 
 def managed_staff_scope_condition(scope: PermissionScope, staff_id_column) -> ColumnElement[bool]:
     return _staff_id_in_management_scope(scope, staff_id_column)
-
-
-def _staff_visit_order_recording_date_condition(scope: PermissionScope, visit_order_model) -> ColumnElement[bool]:
-    return exists(
-        select(Recording.id).where(
-            _staff_id_in_management_scope(scope, Recording.staff_id),
-            Recording.created_at.is_not(None),
-            or_(
-                _recording_created_date_text(Recording) == visit_order_model.crtdt,
-                _recording_created_date_text(Recording) == visit_order_model.sjrq,
-            ),
-        )
-    )
 
 
 def _hospital_visit_match_condition(
@@ -145,9 +193,10 @@ def _hospital_visit_match_condition(
 
 
 def visit_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
-    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
-    if scope.staff_id:
+    if role == "system_admin" or scope.staff_id:
         direct_recording_model = aliased(Recording)
         linked_recording_model = aliased(Recording)
         visit_order_model = aliased(VisitOrder)
@@ -188,16 +237,18 @@ def visit_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
 
 
 def recording_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
-    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
-    if scope.staff_id:
+    if role == "system_admin" or scope.staff_id:
         return _staff_id_in_management_scope(scope, Recording.staff_id)
 
     return false()
 
 
 def customer_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
-    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
     return exists(
         select(Visit.id).where(
@@ -208,34 +259,35 @@ def customer_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
 
 
 def visit_order_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
-    if normalize_permission_role(scope.role) in GLOBAL_ROLES:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
-    if scope.staff_id:
+    if role == "system_admin" or scope.staff_id:
         participant_visit_order = aliased(VisitOrder)
         participant_staff = aliased(Staff)
-        return and_(
-            exists(
-                select(participant_visit_order.id)
-                .select_from(participant_visit_order, participant_staff)
-                .where(
-                    _staff_id_in_management_scope(scope, participant_staff.id),
-                    participant_staff.external_account.is_not(None),
-                    participant_staff.hospital_code.is_not(None),
-                    participant_staff.hospital_code == VisitOrder.jgbm,
-                    participant_visit_order.dzdh == VisitOrder.dzdh,
-                    participant_visit_order.jgbm == VisitOrder.jgbm,
-                    _staff_visit_order_participation_condition(participant_staff, participant_visit_order),
-                )
-            ),
-            _staff_visit_order_recording_date_condition(scope, VisitOrder),
+        return exists(
+            select(participant_visit_order.id)
+            .select_from(participant_visit_order, participant_staff)
+            .where(
+                _staff_id_in_management_scope(scope, participant_staff.id),
+                participant_staff.external_account.is_not(None),
+                participant_staff.hospital_code.is_not(None),
+                participant_staff.hospital_code == VisitOrder.jgbm,
+                participant_visit_order.dzdh == VisitOrder.dzdh,
+                participant_visit_order.jgbm == VisitOrder.jgbm,
+                _staff_visit_order_participation_condition(participant_staff, participant_visit_order),
+            )
         )
 
     return false()
 
 
 def staff_scope_condition(scope: PermissionScope) -> ColumnElement[bool]:
-    if is_global_role(scope.role):
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true_condition()
+    if role == "system_admin":
+        return _staff_role_level_condition(scope, Staff)
     if scope.role == "hospital_admin":
         return Staff.hospital_code == scope.hospital_code if scope.hospital_code else false()
     if scope.staff_id:

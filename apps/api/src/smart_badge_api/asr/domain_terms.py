@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,8 +16,9 @@ from smart_badge_api.db.session import _session_factory
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HOTWORD_FILE = Path(__file__).resolve().parents[3] / "scripts" / "asr_hotwords_default.txt"
-_TENCENT_MAX_HOTWORDS = 128
-_TENCENT_MAX_HOTWORD_CHARS = 30
+_TENCENT_HOTWORD_LIST_MAX_HOTWORDS = 128
+_TENCENT_VOCAB_MAX_HOTWORDS = 1000
+_TENCENT_MAX_HOTWORD_BYTES = 30
 _DB_GROUP_PRIORITY = {
     "project": 0,
     "项目": 0,
@@ -140,16 +142,38 @@ def _normalize_tencent_hotword_weight(weight: int) -> int:
     return min(((weight - 1) // 9) + 1, 11)
 
 
+def _is_valid_tencent_hotword_term(term: str) -> bool:
+    if len(term.encode("utf-8")) > _TENCENT_MAX_HOTWORD_BYTES:
+        return False
+    return not any(unicodedata.category(char).startswith(("P", "S")) for char in term)
+
+
 def _priority_for_group(group_type: str | None) -> int:
     return _DB_GROUP_PRIORITY.get(str(group_type or "").strip(), 5)
 
 
 def _is_tencent_hotword_group_enabled(group: HotwordGroup) -> bool:
     group_type = str(group.group_type or "").strip()
+    descriptor = f"{group_type} {group.name or ''} {group.source_label or ''}".casefold()
+    if group_type in {"competitor", "竞品"}:
+        return True
+    if any(
+        marker in descriptor
+        for marker in (
+            "医疗",
+            "治疗",
+            "部位",
+            "竞品",
+            "medical",
+            "treatment",
+            "body",
+            "competitor",
+        )
+    ):
+        return True
     if group_type in {"project", "项目", "brand", "品牌", "material", "材料"}:
         return True
 
-    descriptor = f"{group_type} {group.name or ''} {group.source_label or ''}".casefold()
     return any(marker in descriptor for marker in ("材料", "品牌", "material", "brand"))
 
 
@@ -211,15 +235,17 @@ def _parse_manual_hotword_entries(value: str) -> list[_HotwordEntry]:
     return entries
 
 
-def _build_tencent_hotword_list_from_entries(entries: list[_HotwordEntry]) -> str | None:
-    hotwords: list[str] = []
+def _select_tencent_hotword_entries(
+    entries: list[_HotwordEntry],
+    *,
+    max_terms: int,
+) -> list[_HotwordEntry]:
+    selected: list[_HotwordEntry] = []
     seen: set[str] = set()
 
     for entry in sorted(entries, key=lambda item: (item.priority, -item.weight, item.term)):
         term = _clean_term(entry.term)
-        if not term or len(term) > _TENCENT_MAX_HOTWORD_CHARS:
-            continue
-        if "," in term or "|" in term:
+        if not term or not _is_valid_tencent_hotword_term(term):
             continue
         key = term.casefold()
         if key in seen:
@@ -229,18 +255,39 @@ def _build_tencent_hotword_list_from_entries(entries: list[_HotwordEntry]) -> st
             resolved_weight = entry.weight
         else:
             resolved_weight = _normalize_tencent_hotword_weight(entry.weight)
-        hotwords.append(f"{term}|{resolved_weight}")
-        if len(hotwords) >= _TENCENT_MAX_HOTWORDS:
+        selected.append(_HotwordEntry(term=term, weight=resolved_weight, priority=entry.priority))
+        if len(selected) >= max_terms:
             break
 
+    return selected
+
+
+def _build_tencent_hotword_list_from_entries(entries: list[_HotwordEntry]) -> str | None:
+    hotwords = [
+        f"{entry.term}|{entry.weight}"
+        for entry in _select_tencent_hotword_entries(
+            entries,
+            max_terms=_TENCENT_HOTWORD_LIST_MAX_HOTWORDS,
+        )
+    ]
     return ",".join(hotwords) if hotwords else None
 
 
-async def build_tencent_hotword_list() -> str | None:
+def _build_tencent_hotword_word_weights_from_entries(entries: list[_HotwordEntry]) -> list[dict[str, object]]:
+    return [
+        {"Word": entry.term, "Weight": entry.weight}
+        for entry in _select_tencent_hotword_entries(
+            entries,
+            max_terms=_TENCENT_VOCAB_MAX_HOTWORDS,
+        )
+    ]
+
+
+async def _collect_tencent_hotword_entries() -> list[_HotwordEntry]:
     settings = get_settings()
     manual_entries = _parse_manual_hotword_entries(settings.tencent_asr_hotword_list)
     if not settings.tencent_asr_dynamic_hotwords_enabled:
-        return _build_tencent_hotword_list_from_entries(manual_entries)
+        return manual_entries
 
     entries: list[_HotwordEntry] = []
     entries.extend(manual_entries)
@@ -256,7 +303,7 @@ async def build_tencent_hotword_list() -> str | None:
     except Exception as exc:
         logger.warning("Failed to load hotword groups for Tencent ASR, using fallback hotwords only: %s", exc)
         entries.extend(_load_default_hotword_entries())
-        return _build_tencent_hotword_list_from_entries(entries)
+        return entries
 
     for group in sorted(groups, key=lambda item: (_priority_for_group(item.group_type), item.name)):
         if not _is_tencent_hotword_group_enabled(group):
@@ -280,7 +327,15 @@ async def build_tencent_hotword_list() -> str | None:
                 )
             )
 
-    return _build_tencent_hotword_list_from_entries(entries)
+    return entries
+
+
+async def build_tencent_hotword_list() -> str | None:
+    return _build_tencent_hotword_list_from_entries(await _collect_tencent_hotword_entries())
+
+
+async def build_tencent_hotword_word_weights() -> list[dict[str, object]]:
+    return _build_tencent_hotword_word_weights_from_entries(await _collect_tencent_hotword_entries())
 
 
 def normalize_medical_aesthetic_text(text: str) -> tuple[str, list[dict[str, str]]]:

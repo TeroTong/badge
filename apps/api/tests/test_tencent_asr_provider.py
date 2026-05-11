@@ -15,6 +15,7 @@ from smart_badge_api.asr.tencent_cloud_provider import (
     _build_create_rec_task_payload_from_url,
     _choose_silence_aware_cut_points,
     _distinct_speaker_ids,
+    _ensure_tencent_hotword_vocab,
     _offset_utterances,
     _prepare_direct_upload_chunks,
     _resolve_direct_upload_chunk_bitrate_kbps,
@@ -23,6 +24,7 @@ from smart_badge_api.asr.tencent_cloud_provider import (
     parse_tencent_task_data,
     transcribe_audio,
 )
+from smart_badge_api.asr.service import _should_build_tencent_hotword_word_weights
 from smart_badge_api.asr.tencent_media_proxy import (
     build_tencent_media_token,
     build_tencent_media_url,
@@ -178,6 +180,91 @@ def test_build_create_rec_task_payload_from_url_uses_original_media_url(
     assert payload["ReplaceTextId"] == "replace-123"
     assert "Data" not in payload
     assert "DataLen" not in payload
+
+
+def test_build_create_rec_task_payload_prefers_hotword_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_LIST", "fallback|10")
+    get_settings.cache_clear()
+
+    try:
+        payload = _build_create_rec_task_payload_from_bytes(
+            b"demo-bytes",
+            hotword_id="vocab-123",
+            hotword_list="request|11",
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert payload["HotwordId"] == "vocab-123"
+    assert "HotwordList" not in payload
+
+
+def test_tencent_asr_runtime_skips_local_hotword_build_for_fixed_vocab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_SYNC_ENABLED", "false")
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_ID", "vocab-fixed")
+    get_settings.cache_clear()
+
+    try:
+        assert _should_build_tencent_hotword_word_weights() is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_tencent_asr_runtime_builds_local_hotwords_when_sync_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_SYNC_ENABLED", "true")
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_ID", "vocab-fixed")
+    get_settings.cache_clear()
+
+    try:
+        assert _should_build_tencent_hotword_word_weights() is True
+    finally:
+        get_settings.cache_clear()
+
+
+def test_ensure_tencent_hotword_vocab_creates_and_reuses_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_SYNC_ENABLED", "true")
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_NAME", "badge-test-hotwords")
+    monkeypatch.setenv("TENCENT_ASR_HOTWORD_VOCAB_ID", "")
+    monkeypatch.setattr("smart_badge_api.asr.tencent_cloud_provider._HOTWORD_VOCAB_CACHE", None)
+    monkeypatch.setattr("smart_badge_api.asr.tencent_cloud_provider._HOTWORD_VOCAB_CACHE_LOCK", None)
+    get_settings.cache_clear()
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call_tencent_api(action: str, payload: dict) -> dict:
+        calls.append((action, payload))
+        return {"Data": {"VocabId": "vocab-created"}}
+
+    monkeypatch.setattr(
+        "smart_badge_api.asr.tencent_cloud_provider._call_tencent_api",
+        fake_call_tencent_api,
+    )
+
+    async def run_scenario() -> tuple[str | None, str | None]:
+        first = await _ensure_tencent_hotword_vocab([{"Word": "贝丽菲尔", "Weight": 11}])
+        second = await _ensure_tencent_hotword_vocab([{"Word": "贝丽菲尔", "Weight": 11}])
+        return first, second
+
+    try:
+        first, second = asyncio.run(run_scenario())
+    finally:
+        get_settings.cache_clear()
+
+    assert first == "vocab-created"
+    assert second == "vocab-created"
+    assert [call[0] for call in calls] == ["CreateAsrVocab"]
+    assert calls[0][1]["Name"] == "badge-test-hotwords"
+    assert calls[0][1]["WordWeights"] == [{"Word": "贝丽菲尔", "Weight": 11}]
 
 
 def test_resolve_ffmpeg_executable_falls_back_to_bundled_binary(

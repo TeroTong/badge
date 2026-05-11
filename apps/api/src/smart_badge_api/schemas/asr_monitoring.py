@@ -13,6 +13,21 @@ class AsrUsageRangeOut(BaseModel):
     duration_seconds: int
 
 
+class AsrInstitutionUsageOut(BaseModel):
+    hospital_code: str
+    hospital_name: str
+    today_request_count: int
+    today_duration_seconds: int
+    last_7_days_request_count: int
+    last_7_days_duration_seconds: int
+    last_30_days_request_count: int
+    last_30_days_duration_seconds: int
+    last_30_days_failed_count: int
+    average_duration_seconds: int
+    share_percent: float
+    latest_transcribed_at: str | None = None
+
+
 class AsrQuotaPackageOut(BaseModel):
     name: str
     fee_mode: bool
@@ -53,6 +68,8 @@ class AsrMonitoringOverviewOut(BaseModel):
     quota_fetch_error_message: str | None = None
     usage_ranges: list[AsrUsageRangeOut]
     usage_error_message: str | None = None
+    institution_usage: list[AsrInstitutionUsageOut] = []
+    institution_usage_error_message: str | None = None
 
 
 class AsrRequestEventOut(BaseModel):

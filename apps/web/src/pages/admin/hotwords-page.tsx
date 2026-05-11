@@ -15,7 +15,7 @@ import {
   Tag,
   message,
 } from 'antd'
-import { LinkOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons'
+import { DownloadOutlined, LinkOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons'
 
 import type { Hotword, HotwordGroup } from '@/api/admin'
 import * as adminApi from '@/api/admin'
@@ -77,6 +77,23 @@ function renderPreviewWords(words: string[]) {
       {words.length > visibleWords.length ? <Tag>+{words.length - visibleWords.length}</Tag> : null}
     </>
   )
+}
+
+function buildExportFileName(group: HotwordGroup) {
+  const safeName = group.name.trim().replace(/[\\/:*?"<>|]+/g, '_') || '热词库'
+  return `${safeName}_热词_${new Date().toISOString().slice(0, 10)}.txt`
+}
+
+function downloadTextFile(filename: string, content: string) {
+  const blob = new Blob([`\ufeff${content}`], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 export function HotwordsPage() {
@@ -259,6 +276,17 @@ export function HotwordsPage() {
     setWordModalOpen(false)
   }
 
+  const handleExportCurrentGroup = () => {
+    if (!selectedGroup) return
+    const words = selectedWords.map((word) => word.word.trim()).filter(Boolean)
+    if (!words.length) {
+      message.warning('当前词库没有可导出的热词')
+      return
+    }
+    downloadTextFile(buildExportFileName(selectedGroup), words.join('\n'))
+    message.success(`已导出 ${words.length} 个热词`)
+  }
+
   return (
     <div className="hotword-page">
       <div className="hotword-page__header">
@@ -389,6 +417,9 @@ export function HotwordsPage() {
                 </div>
 
                 <div className="hotword-main__actions">
+                  <Button icon={<DownloadOutlined />} disabled={!selectedWords.length} onClick={handleExportCurrentGroup}>
+                    导出当前词库
+                  </Button>
                   <Button type="primary" ghost icon={<PlusOutlined />} onClick={() => openWordModal(selectedGroup.id)}>
                     添加词汇
                   </Button>

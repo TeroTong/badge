@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as monotonic_time
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query
+from sqlalchemy import case, func, or_, select
 
 from smart_badge_api.asr.tencent_cloud_provider import (
     get_file_recognition_resource_packages,
@@ -14,7 +15,10 @@ from smart_badge_api.asr.tencent_cloud_provider import (
 )
 from smart_badge_api.asr.tencent_request_audit import list_tencent_request_events, summarize_tencent_request_events
 from smart_badge_api.core.config import get_settings
+from smart_badge_api.db.models import Device, Recording, Staff, Transcript, WecomTenant
+from smart_badge_api.db.session import _session_factory
 from smart_badge_api.schemas.asr_monitoring import (
+    AsrInstitutionUsageOut,
     AsrMonitoringOverviewOut,
     AsrRequestEventOut,
     AsrUsageRangeOut,
@@ -27,10 +31,28 @@ _CHINA_TZ = ZoneInfo("Asia/Shanghai")
 _OVERVIEW_CACHE_TTL_SECONDS = 60.0
 _overview_cache: dict[str, object] = {"expires_at": 0.0, "value": None}
 _overview_cache_lock = asyncio.Lock()
-_OVERVIEW_REDIS_KEY = "asr_monitoring:overview:v1"
+_OVERVIEW_REDIS_KEY = "asr_monitoring:overview:v2"
 _overview_redis_client = None
 _overview_redis_disabled = False
 _overview_cache_logger = logging.getLogger(__name__)
+
+
+def _beijing_range_start(days: int) -> datetime:
+    today = datetime.now(_CHINA_TZ).date()
+    start_date = today - timedelta(days=max(days, 1) - 1)
+    return datetime.combine(start_date, time.min, tzinfo=_CHINA_TZ).astimezone(UTC)
+
+
+def _dt_to_iso(value: object) -> str | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_CHINA_TZ).isoformat()
+
+
+def _clean_hospital_text(value: object) -> str:
+    return str(value or "").strip()
 
 
 async def _overview_get_redis_client():
@@ -114,6 +136,91 @@ def _to_request_event_out(item: dict) -> AsrRequestEventOut:
     )
 
 
+async def _build_institution_asr_usage() -> tuple[list[AsrInstitutionUsageOut], str | None]:
+    start_today = _beijing_range_start(1)
+    start_7_days = _beijing_range_start(7)
+    start_30_days = _beijing_range_start(30)
+
+    hospital_code_expr = func.coalesce(
+        func.nullif(Staff.hospital_code, ""),
+        func.nullif(Device.hospital_code, ""),
+        "unknown",
+    )
+    hospital_name_expr = func.coalesce(
+        func.nullif(Staff.hospital_short_name, ""),
+        func.nullif(Device.hospital_short_name, ""),
+        "",
+    )
+    event_time_expr = func.coalesce(Transcript.completed_at, Transcript.updated_at, Transcript.created_at)
+    duration_seconds_expr = func.coalesce(Transcript.duration_ms, Recording.duration_seconds * 1000, 0) / 1000.0
+
+    try:
+        async with _session_factory() as db:
+            tenant_result = await db.execute(
+                select(WecomTenant.default_hospital_code, WecomTenant.default_hospital_name)
+                .where(WecomTenant.is_active.is_(True))
+            )
+            tenant_names = {
+                _clean_hospital_text(code): _clean_hospital_text(name)
+                for code, name in tenant_result.all()
+                if _clean_hospital_text(code) and _clean_hospital_text(name)
+            }
+
+            stmt = (
+                select(
+                    hospital_code_expr.label("hospital_code"),
+                    func.max(hospital_name_expr).label("hospital_name"),
+                    func.count().label("last_30_days_request_count"),
+                    func.sum(duration_seconds_expr).label("last_30_days_duration_seconds"),
+                    func.sum(case((event_time_expr >= start_7_days, 1), else_=0)).label("last_7_days_request_count"),
+                    func.sum(case((event_time_expr >= start_7_days, duration_seconds_expr), else_=0)).label("last_7_days_duration_seconds"),
+                    func.sum(case((event_time_expr >= start_today, 1), else_=0)).label("today_request_count"),
+                    func.sum(case((event_time_expr >= start_today, duration_seconds_expr), else_=0)).label("today_duration_seconds"),
+                    func.sum(case((Transcript.status == "failed", 1), else_=0)).label("last_30_days_failed_count"),
+                    func.max(event_time_expr).label("latest_transcribed_at"),
+                )
+                .select_from(Transcript)
+                .join(Recording, Recording.id == Transcript.recording_id)
+                .outerjoin(Staff, Staff.id == Recording.staff_id)
+                .outerjoin(Device, or_(Device.id == Recording.device_id, Device.device_code == Recording.device_id))
+                .where(Transcript.asr_provider == "tencent_asr")
+                .where(event_time_expr >= start_30_days)
+                .group_by(hospital_code_expr)
+            )
+            result = await db.execute(stmt)
+            rows = list(result.mappings().all())
+    except Exception as exc:
+        _overview_cache_logger.warning("Failed to build institution ASR usage: %s", exc)
+        return [], str(exc)
+
+    total_30_days_seconds = sum(float(row.get("last_30_days_duration_seconds") or 0) for row in rows)
+    usage: list[AsrInstitutionUsageOut] = []
+    for row in rows:
+        hospital_code = _clean_hospital_text(row.get("hospital_code")) or "unknown"
+        fallback_name = _clean_hospital_text(row.get("hospital_name"))
+        hospital_name = tenant_names.get(hospital_code) or fallback_name or ("未归属机构" if hospital_code == "unknown" else hospital_code)
+        duration_30 = int(float(row.get("last_30_days_duration_seconds") or 0))
+        request_count_30 = int(row.get("last_30_days_request_count") or 0)
+        usage.append(
+            AsrInstitutionUsageOut(
+                hospital_code=hospital_code,
+                hospital_name=hospital_name,
+                today_request_count=int(row.get("today_request_count") or 0),
+                today_duration_seconds=int(float(row.get("today_duration_seconds") or 0)),
+                last_7_days_request_count=int(row.get("last_7_days_request_count") or 0),
+                last_7_days_duration_seconds=int(float(row.get("last_7_days_duration_seconds") or 0)),
+                last_30_days_request_count=request_count_30,
+                last_30_days_duration_seconds=duration_30,
+                last_30_days_failed_count=int(row.get("last_30_days_failed_count") or 0),
+                average_duration_seconds=int(duration_30 / request_count_30) if request_count_30 else 0,
+                share_percent=round((duration_30 / total_30_days_seconds) * 100, 1) if total_30_days_seconds > 0 else 0.0,
+                latest_transcribed_at=_dt_to_iso(row.get("latest_transcribed_at")),
+            )
+        )
+    usage.sort(key=lambda item: item.last_30_days_duration_seconds, reverse=True)
+    return usage, None
+
+
 async def _cached_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
     now = monotonic_time.monotonic()
     cached_value = _overview_cache.get("value")
@@ -158,6 +265,7 @@ async def _build_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
     quota_exhausted_package_count = 0
     quota_packages: list[dict] = []
     quota_fetch_error_message: str | None = None
+    institution_usage, institution_usage_error_message = await _build_institution_asr_usage()
     has_tencent_credentials = bool(
         settings.tencent_asr_secret_id.strip() and settings.tencent_asr_secret_key.strip()
     )
@@ -240,6 +348,8 @@ async def _build_asr_monitoring_overview() -> AsrMonitoringOverviewOut:
         quota_fetch_error_message=quota_fetch_error_message,
         usage_ranges=usage_ranges,
         usage_error_message=usage_error_message,
+        institution_usage=institution_usage,
+        institution_usage_error_message=institution_usage_error_message,
     )
 
 

@@ -108,7 +108,7 @@ def test_derive_recording_date_candidates_includes_filename_fallback() -> None:
     assert _derive_recording_date_candidates(recording) == ["2026-04-13", "2026-04-14"]
 
 
-def test_staff_list_visit_orders_only_returns_same_institution_same_recording_date_and_participated_orders() -> None:
+def test_staff_list_visit_orders_returns_participated_orders_before_recording_upload() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -132,14 +132,6 @@ def test_staff_list_visit_orders_only_returns_same_institution_same_recording_da
                     staff_id=staff.id,
                     hospital_code="6101",
                     is_active=True,
-                )
-                recording = Recording(
-                    id="rec_1",
-                    staff_id=staff.id,
-                    file_name="20260416_100000.mp3",
-                    file_path="/tmp/20260416_100000.mp3",
-                    status="uploaded",
-                    created_at=datetime(2026, 4, 16, 10, 0, tzinfo=timezone.utc),
                 )
                 matching_primary = VisitOrder(
                     id="vo_match_1",
@@ -177,8 +169,8 @@ def test_staff_list_visit_orders_only_returns_same_institution_same_recording_da
                     sjrq="2026-04-16",
                     fzuer="86000995",
                 )
-                wrong_date = VisitOrder(
-                    id="vo_wrong_date",
+                later_participated = VisitOrder(
+                    id="vo_later_participated",
                     dzdh="DZ2002",
                     dzseg="110",
                     jgbm="6101",
@@ -201,12 +193,11 @@ def test_staff_list_visit_orders_only_returns_same_institution_same_recording_da
                 db.add_all([
                     staff,
                     user,
-                    recording,
                     matching_primary,
                     matching_vipkf,
                     grouped_same_dzdh,
                     wrong_institution,
-                    wrong_date,
+                    later_participated,
                     wrong_participant,
                 ])
                 await db.commit()
@@ -223,8 +214,13 @@ def test_staff_list_visit_orders_only_returns_same_institution_same_recording_da
                     current_user=user,
                 )
 
-                assert result["total"] == 3
-                assert {item.id for item in result["items"]} == {"vo_match_1", "vo_match_2", "vo_match_3"}
+                assert result["total"] == 4
+                assert {item.id for item in result["items"]} == {
+                    "vo_match_1",
+                    "vo_match_2",
+                    "vo_match_3",
+                    "vo_later_participated",
+                }
         finally:
             await engine.dispose()
 

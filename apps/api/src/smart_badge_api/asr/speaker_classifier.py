@@ -19,13 +19,22 @@ logger = logging.getLogger(__name__)
 VALID_ROLES = {"consultant", "doctor", "customer", "unknown"}
 
 _SYSTEM_PROMPT = """判断医美咨询录音中每个 SPEAKER 的角色，只输出 JSON。
-角色只能是：consultant（接待/咨询/报价人员）、doctor（医生/医助面诊意见）、customer（顾客/陪同顾客侧）、unknown。
-无法稳定判断则 unknown。示例：{"SPEAKER_00":"consultant","SPEAKER_01":"customer"}"""
+角色只能是：consultant（接待/咨询/报价人员）、doctor（医生/医助面诊意见）、customer（主顾客或明确替主顾客表达的陪同者）、unknown。
+
+判定规则：
+1. 不要只凭“我/我们/你”判断角色。咨询师/医生也会说“我建议你、我给你看、我自己打过、我们医院、案例里有个顾客”。
+2. consultant 常见特征：主动接待、询问诉求、报价、介绍材料/品牌/活动、安排医生/治疗、给出销售建议。
+3. doctor 常见特征：从医学条件、解剖层次、风险禁忌、治疗可行性给出意见。
+4. customer 常见特征：表达自己的主诉、预算、顾虑、既往项目、价格追问、是否接受方案；陪同者只有在明确替主顾客表达“她/他想、她/他担心、她/他做过”时才归 customer。
+5. 若同一说话人既有大量方案/报价/医学解释，又夹杂“我自己/我以前/案例”等表达，优先判断为 consultant 或 doctor，不要把顾问自述当顾客。
+6. 无法稳定判断则 unknown。
+
+示例：{"SPEAKER_00":"consultant","SPEAKER_01":"customer"}"""
 
 
 def _collect_samples(
     utterances: list[dict],
-    max_per_speaker: int = 5,
+    max_per_speaker: int = 8,
 ) -> dict[str, list[str]]:
     """从每个说话人采集前 N 条发言（用于 LLM 分类）。"""
     samples: dict[str, list[str]] = {}

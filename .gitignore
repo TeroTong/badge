@@ -46,38 +46,26 @@ apps/api/asr_v2_test.log
 apps/api/.env
 apps/web/.env
 
-# Local sync exclusions
-# Documents supplied outside the source repo
+# Local sync backups / documents / generated data
+/.bak*/
+/backups/
+/source_sync_backups/
 /docs/
-*.pdf
-*.PDF
-*.docx
-*.DOCX
-*.xlsx
-*.XLSX
-*.xls
-*.XLS
-*.csv
-*.CSV
-
-# Local backups and generated artifacts
-.bak/
-.bak*/
-backups/
-source_sync_backups/
-exports/
-logs/
-remote/
-*.bak
-*.bak*
-*.review_*
-apps/web/dist.bak*/
-
-# Local investigation scripts and reports
-stress_report.json
-*_summary.json
-tmp_*.py
-apps/api/tmp_*.py
-apps/api/.tmp_*.py
-apps/api/.debug_*.py
-apps/api/.tmp_*.json
+/exports/
+/logs/
+/remote/
+/wecom_verify/
+/apps/web/dist.bak*/
+/apps/api/.debug_*.py
+/apps/api/.tmp_*.py
+/apps/api/tmp_*.py
+/tmp_*.py
+/*_summary.json
+/stress_report.json
+/WW_verify_*.txt
+/*.pdf
+/*.docx
+/*.xlsx
+/*.xls
+/*.csv
+/*.jpg

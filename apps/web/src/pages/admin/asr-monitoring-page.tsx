@@ -12,9 +12,11 @@ import {
   Typography,
 } from 'antd'
 import {
+  BankOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
   CloudServerOutlined,
+  DatabaseOutlined,
   HistoryOutlined,
   ReloadOutlined,
   WarningOutlined,
@@ -153,6 +155,7 @@ export function AsrMonitoringPage() {
   const overview = overviewQuery.data
   const requestRows = requestsQuery.data?.items ?? []
   const usageRanges = useMemo(() => overview?.usage_ranges ?? [], [overview?.usage_ranges])
+  const institutionUsage = useMemo(() => overview?.institution_usage ?? [], [overview?.institution_usage])
   const sevenDayUsage = useMemo(
     () => usageRanges.find((item) => item.label.includes('7')) ?? usageRanges[1],
     [usageRanges],
@@ -169,6 +172,15 @@ export function AsrMonitoringPage() {
     () => usageRanges.reduce((max, item) => Math.max(max, item.duration_seconds || 0), 0),
     [usageRanges],
   )
+  const institutionMaxSeconds = useMemo(
+    () => institutionUsage.reduce((max, item) => Math.max(max, item.last_30_days_duration_seconds || 0), 0),
+    [institutionUsage],
+  )
+  const institutionTotalSeconds = useMemo(
+    () => institutionUsage.reduce((total, item) => total + (item.last_30_days_duration_seconds || 0), 0),
+    [institutionUsage],
+  )
+  const topInstitution = institutionUsage[0]
   const sevenDayAverageSeconds = useMemo(() => {
     if (!sevenDayUsage?.duration_seconds) return 0
     const start = dayjs(sevenDayUsage.start_date)
@@ -236,6 +248,30 @@ export function AsrMonitoringPage() {
     },
   ] as const
 
+  const institutionSummaryCards = [
+    {
+      label: '可归因机构',
+      value: String(institutionUsage.length),
+      hint: '按员工或设备归属统计',
+      tone: 'brand',
+      icon: <BankOutlined />,
+    },
+    {
+      label: '近 30 天机构用量',
+      value: toHoursLabel(institutionTotalSeconds),
+      hint: '系统内腾讯 ASR 转写估算',
+      tone: 'success',
+      icon: <DatabaseOutlined />,
+    },
+    {
+      label: '最高消耗机构',
+      value: topInstitution?.hospital_name || '-',
+      hint: topInstitution ? `${toHoursLabel(topInstitution.last_30_days_duration_seconds)} · ${topInstitution.share_percent}%` : '暂无机构用量',
+      tone: 'neutral',
+      icon: <CloudServerOutlined />,
+    },
+  ] as const
+
   const warningAlerts = [
     overview?.quota_state === 'exhausted' ? (
       <Alert
@@ -263,6 +299,15 @@ export function AsrMonitoringPage() {
         showIcon
         message="资源包查询暂时失败"
         description={overview.quota_fetch_error_message}
+      />
+    ) : null,
+    overview?.institution_usage_error_message ? (
+      <Alert
+        key="institution-usage-error"
+        type="warning"
+        showIcon
+        message="机构用量归因暂时失败"
+        description={overview.institution_usage_error_message}
       />
     ) : null,
   ].filter(Boolean)
@@ -366,6 +411,106 @@ export function AsrMonitoringPage() {
                 )
               })}
             </div>
+          </section>
+
+          <section className="operation-card asr-monitoring-page__institution-board">
+            <SectionHeading
+              title="机构资源分摊"
+              subtitle="按系统内腾讯 ASR 转写记录估算机构消耗，腾讯云官方资源包仍作为账号总账。"
+            />
+            <div className="asr-monitoring-page__metric-grid asr-monitoring-page__metric-grid--compact asr-monitoring-page__metric-grid--triple">
+              {institutionSummaryCards.map((item) => (
+                <OverviewMetricCard
+                  key={item.label}
+                  label={item.label}
+                  value={item.value}
+                  hint={item.hint}
+                  tone={item.tone}
+                  icon={item.icon}
+                />
+              ))}
+            </div>
+            <Table
+              className="asr-monitoring-page__institution-table"
+              rowKey={(row) => row.hospital_code}
+              dataSource={institutionUsage}
+              pagination={false}
+              size="small"
+              tableLayout="fixed"
+              scroll={{ x: 860 }}
+              columns={[
+                {
+                  title: '机构',
+                  width: 150,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => (
+                    <div className="asr-monitoring-page__table-stack">
+                      <div>{row.hospital_name}</div>
+                      <Text type="secondary">{row.hospital_code}</Text>
+                    </div>
+                  ),
+                },
+                {
+                  title: '今日',
+                  width: 104,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => (
+                    <div className="asr-monitoring-page__table-stack">
+                      <div>{toHoursLabel(row.today_duration_seconds)}</div>
+                      <Text type="secondary">{row.today_request_count} 条</Text>
+                    </div>
+                  ),
+                },
+                {
+                  title: '近 7 天',
+                  width: 104,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => (
+                    <div className="asr-monitoring-page__table-stack">
+                      <div>{toHoursLabel(row.last_7_days_duration_seconds)}</div>
+                      <Text type="secondary">{row.last_7_days_request_count} 条</Text>
+                    </div>
+                  ),
+                },
+                {
+                  title: '近 30 天',
+                  width: 190,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => {
+                    const percent =
+                      institutionMaxSeconds > 0
+                        ? Math.round((row.last_30_days_duration_seconds / institutionMaxSeconds) * 100)
+                        : 0
+                    return (
+                      <div className="asr-monitoring-page__table-stack">
+                        <div>{toHoursLabel(row.last_30_days_duration_seconds)}</div>
+                        <Progress percent={percent} size="small" showInfo={false} />
+                        <Text type="secondary">占机构可归因总量 {row.share_percent}%</Text>
+                      </div>
+                    )
+                  },
+                },
+                {
+                  title: '请求 / 失败',
+                  width: 104,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => (
+                    <div className="asr-monitoring-page__table-stack">
+                      <div>{row.last_30_days_request_count} 条</div>
+                      <Text type={row.last_30_days_failed_count ? 'danger' : 'secondary'}>
+                        失败 {row.last_30_days_failed_count}
+                      </Text>
+                    </div>
+                  ),
+                },
+                {
+                  title: '平均时长',
+                  width: 90,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) => toHoursLabel(row.average_duration_seconds),
+                },
+                {
+                  title: '最近转写',
+                  width: 132,
+                  render: (_value, row: adminApi.AsrInstitutionUsage) =>
+                    row.latest_transcribed_at ? formatBeijingTime(row.latest_transcribed_at, 'MM-DD HH:mm') : '-',
+                },
+              ]}
+            />
           </section>
         </div>
 

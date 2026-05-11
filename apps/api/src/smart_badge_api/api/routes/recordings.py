@@ -28,13 +28,14 @@ from smart_badge_api.api.analysis_normalization import normalize_task_detail
 from smart_badge_api.api.data_scope import (
     build_permission_scope,
     recording_scope_condition,
+    resolve_visible_staff_ids_for_user,
     visit_order_scope_condition,
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user, require_system_admin_or_above
 from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.core.permissions import normalize_permission_role, permission_role_level
+from smart_badge_api.core.permissions import permission_role_level
 from smart_badge_api.asr.tencent_media_proxy import build_tencent_media_path
 from smart_badge_api.db.models import (
     AnalysisTask,
@@ -44,7 +45,6 @@ from smart_badge_api.db.models import (
     RecordingVisitAnalysis,
     RecordingVisitLink,
     Staff,
-    StaffManagementRelation,
     Transcript,
     User,
     Visit,
@@ -844,6 +844,7 @@ def _staff_manifest_payload(recording: Recording) -> dict[str, str | None]:
         "staff_id": recording.staff_id,
         "staff_name": staff.name if staff else None,
         "staff_role": staff.role if staff else None,
+        "staff_permission_role": staff.permission_role if staff else None,
         "staff_hospital_code": staff.hospital_code if staff else None,
         "staff_hospital_short_name": staff.hospital_short_name if staff else None,
     }
@@ -935,31 +936,7 @@ def _filter_recording_match_result_visit_ids(
 
 
 async def _archive_managed_staff_ids_for_user(db: AsyncSession | None, user: User) -> set[str] | None:
-    role = normalize_permission_role(user.role)
-    staff_id = _archive_clean_text(user.staff_id)
-    if role in {"super_admin", "system_admin"}:
-        return None
-    if not staff_id:
-        return set()
-    if db is None:
-        return {staff_id}
-
-    actor_level = permission_role_level(user.role)
-    rows = (
-        await db.execute(
-            select(Staff.id, Staff.permission_role)
-            .join(StaffManagementRelation, StaffManagementRelation.subordinate_staff_id == Staff.id)
-            .where(
-                StaffManagementRelation.manager_staff_id == staff_id,
-                Staff.is_active.is_(True),
-            )
-        )
-    ).all()
-    visible_staff_ids = {staff_id}
-    for subordinate_staff_id, subordinate_role in rows:
-        if role == "super_admin" or subordinate_staff_id == staff_id or permission_role_level(subordinate_role) <= actor_level:
-            visible_staff_ids.add(subordinate_staff_id)
-    return visible_staff_ids
+    return await resolve_visible_staff_ids_for_user(db, user)
 
 
 def _archive_item_staff_id(item: dict[str, object]) -> str | None:

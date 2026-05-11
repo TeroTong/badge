@@ -1190,9 +1190,22 @@ a {
 }
 
 .ad-result-card--hero {
+  order: 1;
   padding: 14px 16px;
   border-left: 4px solid var(--color-brand-teal, #1677ff);
   background: linear-gradient(135deg, rgba(22, 119, 255, 0.045), rgba(255, 255, 255, 1) 55%);
+}
+
+.ad-result-card--recommend-panel {
+  order: 2;
+}
+
+.ad-result-card--factors {
+  order: 3;
+}
+
+.ad-result-card--outcome {
+  order: 4;
 }
 
 .ad-result-card--tags-panel {
@@ -1802,11 +1815,18 @@ a {
 }
 
 .ad-evidence-context__item {
-  display: inline;
+  display: block;
+  padding: 3px 0;
 }
 
 .ad-evidence-context__item + .ad-evidence-context__item::before {
-  content: '  ';
+  content: none;
+}
+
+.ad-evidence-context__item + .ad-evidence-context__item {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(203, 213, 225, 0.7);
 }
 
 .ad-evidence-context__item--hit {
@@ -1828,6 +1848,7 @@ a {
 
 .ad-evidence-context__text {
   color: #0f172a;
+  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -22118,6 +22139,7 @@ a {
 
 .asr-monitoring-page__summary-panel,
 .asr-monitoring-page__usage-board,
+.asr-monitoring-page__institution-board,
 .asr-monitoring-page__quota-board {
   display: flex;
   flex-direction: column;
@@ -22134,6 +22156,10 @@ a {
 
 .asr-monitoring-page__metric-grid--quad {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.asr-monitoring-page__metric-grid--triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .asr-monitoring-page__metric-card,
@@ -22188,6 +22214,30 @@ a {
 .asr-monitoring-page__usage-board .asr-monitoring-page__usage-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.asr-monitoring-page__institution-board {
+  gap: 10px;
+}
+
+.asr-monitoring-page__institution-table .ant-table {
+  font-size: 11px;
+}
+
+.asr-monitoring-page__institution-table .ant-table-thead > tr > th {
+  padding: 8px 8px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+.asr-monitoring-page__institution-table .ant-table-tbody > tr > td {
+  padding: 8px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.asr-monitoring-page__institution-table .ant-progress {
+  line-height: 1;
 }
 
 .asr-monitoring-page__quota-board .ant-table-wrapper {
@@ -22352,11 +22402,16 @@ a {
   .asr-monitoring-page__metric-grid--quad {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .asr-monitoring-page__metric-grid--triple {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1080px) {
   .asr-monitoring-page__hero-side,
-  .asr-monitoring-page__usage-board .asr-monitoring-page__usage-grid {
+  .asr-monitoring-page__usage-board .asr-monitoring-page__usage-grid,
+  .asr-monitoring-page__metric-grid--triple {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -22377,6 +22432,7 @@ a {
 
   .asr-monitoring-page__hero-side,
   .asr-monitoring-page__metric-grid--quad,
+  .asr-monitoring-page__metric-grid--triple,
   .asr-monitoring-page__usage-board .asr-monitoring-page__usage-grid {
     grid-template-columns: 1fr;
   }

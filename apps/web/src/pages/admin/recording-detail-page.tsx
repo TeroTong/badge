@@ -754,6 +754,19 @@ export function RecordingDetailPage() {
     queryFn: () => fetchAnalysisDetail(analysisFileId!),
     enabled: !!analysisFileId && analysisTask?.status === 'done',
   })
+  const analysisDetailWithTranscript = useMemo(() => {
+    if (!analysisDetail || !transcript) return analysisDetail
+    return {
+      ...analysisDetail,
+      transcript: {
+        id: transcript.id,
+        recording_id: transcript.recording_id,
+        status: transcript.status,
+        utterances: transcript.utterances ?? [],
+        duration_ms: transcript.duration_ms,
+      },
+    }
+  }, [analysisDetail, transcript])
 
   const {
     data: audioBlob,
@@ -1378,9 +1391,9 @@ export function RecordingDetailPage() {
           </Card>
         )}
 
-        {analysisTask?.status === 'done' && analysisDetail && (
+        {analysisTask?.status === 'done' && analysisDetailWithTranscript && (
           <AnalysisDetailContent
-            data={analysisDetail}
+            data={analysisDetailWithTranscript}
             recordingId={recordingId}
             embedded
             showHeader

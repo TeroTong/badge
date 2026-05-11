@@ -295,6 +295,21 @@ export type AsrUsageRange = {
   duration_seconds: number
 }
 
+export type AsrInstitutionUsage = {
+  hospital_code: string
+  hospital_name: string
+  today_request_count: number
+  today_duration_seconds: number
+  last_7_days_request_count: number
+  last_7_days_duration_seconds: number
+  last_30_days_request_count: number
+  last_30_days_duration_seconds: number
+  last_30_days_failed_count: number
+  average_duration_seconds: number
+  share_percent: number
+  latest_transcribed_at: string | null
+}
+
 export type AsrQuotaPackage = {
   name: string
   fee_mode: boolean
@@ -335,6 +350,8 @@ export type AsrMonitoringOverview = {
   quota_fetch_error_message: string | null
   usage_ranges: AsrUsageRange[]
   usage_error_message: string | null
+  institution_usage: AsrInstitutionUsage[]
+  institution_usage_error_message: string | null
 }
 
 export type AsrRequestEvent = {

@@ -19,8 +19,7 @@ from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import Recording
-from smart_badge_api.db.models import User
+from smart_badge_api.db.models import Recording, Transcript, User
 from smart_badge_api.db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -31,12 +30,13 @@ _ANALYSIS_RESULT_LIST_CACHE_TTL_SECONDS = 60.0
 _analysis_result_list_cache: dict[str, object] = {
     "expires_at": 0.0,
     "items": None,
+    "source_key": None,
 }
 _SAP_CONSULTATION_PREVIEW_RESULT_KEY = "sap_consultation_preview"
-# Per-file summary memo, keyed by (path_str, mtime_ns, size). Survives the
+# Per-file summary memo, keyed by (path_str, mtime_ns, size, source_key). Survives the
 # coarse list-cache expiry so a cache miss only re-processes files that
 # actually changed on disk.
-_analysis_summary_memo: dict[tuple[str, int, int], dict] = {}
+_analysis_summary_memo: dict[tuple[object, ...], dict] = {}
 _analysis_result_list_lock = asyncio.Lock()
 
 
@@ -113,6 +113,27 @@ async def _load_recording_meta(file_ids: list[str], db: AsyncSession) -> dict[st
             "file_name": row.file_name,
         }
         for row in rows
+    }
+
+
+async def _load_transcript_context(recording_id: str | None, db: AsyncSession) -> dict | None:
+    if not recording_id:
+        return None
+    transcript = (
+        await db.execute(
+            select(Transcript).where(Transcript.recording_id == recording_id)
+        )
+    ).scalar_one_or_none()
+    if transcript is None:
+        return None
+    return {
+        "id": transcript.id,
+        "recording_id": transcript.recording_id,
+        "status": transcript.status,
+        "utterances": transcript.utterances or [],
+        "duration_ms": transcript.duration_ms,
+        "created_at": transcript.created_at.isoformat() if transcript.created_at else None,
+        "completed_at": transcript.completed_at.isoformat() if transcript.completed_at else None,
     }
 
 
@@ -270,6 +291,7 @@ def _format_duration(ms: int) -> str:
 def clear_analysis_result_list_cache() -> None:
     _analysis_result_list_cache["expires_at"] = 0.0
     _analysis_result_list_cache["items"] = None
+    _analysis_result_list_cache["source_key"] = None
     _analysis_summary_memo.clear()
 
 
@@ -279,9 +301,16 @@ def _clone_analysis_summaries(items: list[dict]) -> list[dict]:
 
 async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]:
     now = time.monotonic()
+    results_dir = _results_dir()
+    raw_dir = _raw_dir()
+    source_key = (str(results_dir.resolve()), str(raw_dir.resolve()))
     cached_items = _analysis_result_list_cache.get("items")
     cached_expires_at = float(_analysis_result_list_cache.get("expires_at") or 0.0)
-    if cached_items is not None and cached_expires_at > now:
+    if (
+        cached_items is not None
+        and cached_expires_at > now
+        and _analysis_result_list_cache.get("source_key") == source_key
+    ):
         return _clone_analysis_summaries(cached_items)  # type: ignore[arg-type]
 
     # Single-flight: avoid stampedes of expensive disk+sanitize work when many
@@ -290,12 +319,16 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
         now = time.monotonic()
         cached_items = _analysis_result_list_cache.get("items")
         cached_expires_at = float(_analysis_result_list_cache.get("expires_at") or 0.0)
-        if cached_items is not None and cached_expires_at > now:
+        if (
+            cached_items is not None
+            and cached_expires_at > now
+            and _analysis_result_list_cache.get("source_key") == source_key
+        ):
             return _clone_analysis_summaries(cached_items)  # type: ignore[arg-type]
 
-        results_dir = _results_dir()
         if not results_dir.exists():
             _analysis_result_list_cache["items"] = []
+            _analysis_result_list_cache["source_key"] = source_key
             _analysis_result_list_cache["expires_at"] = now + _ANALYSIS_RESULT_LIST_CACHE_TTL_SECONDS
             return []
 
@@ -304,7 +337,7 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
         recording_meta_map = await _load_recording_meta(file_ids, db)
 
         items: list[dict] = []
-        seen_keys: set[tuple[str, int, int]] = set()
+        seen_keys: set[tuple[object, ...]] = set()
         for idx, fp in enumerate(result_files):
             # Yield to the event loop periodically so other requests / warm-ups
             # are not starved during the (CPU-heavy) sanitize loop.
@@ -312,14 +345,14 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
                 await asyncio.sleep(0)
             try:
                 stat = fp.stat()
-                memo_key = (str(fp), stat.st_mtime_ns, stat.st_size)
+                memo_key = (str(fp), stat.st_mtime_ns, stat.st_size, source_key)
                 seen_keys.add(memo_key)
                 file_id = _get_file_id(fp.name)
                 recording_id = _extract_recording_id(file_id)
                 meta = recording_meta_map.get(recording_id) if recording_id else None
                 # Include meta identity in the key so cache invalidates if the
                 # underlying recording metadata gets refreshed.
-                full_key = memo_key + ((meta or {}).get("_cache_token"),)  # type: ignore[operator]
+                full_key = memo_key + ((meta or {}).get("_cache_token"),)
                 cached = _analysis_summary_memo.get(full_key)  # type: ignore[arg-type]
                 if cached is not None:
                     items.append(cached)
@@ -350,6 +383,7 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
                 _analysis_summary_memo.pop(k, None)
 
         _analysis_result_list_cache["items"] = _clone_analysis_summaries(items)
+        _analysis_result_list_cache["source_key"] = source_key
         _analysis_result_list_cache["expires_at"] = now + _ANALYSIS_RESULT_LIST_CACHE_TTL_SECONDS
         return items
 
@@ -368,6 +402,7 @@ async def list_results(
 ):
     """获取所有分析结果列表。"""
     access = await build_analysis_artifact_access(db, current_user)
+    hospital_code = hospital_code if isinstance(hospital_code, str) else None
     requested_hospital_code = normalize_hospital_code(hospital_code)
     hospital_recording_ids: set[str] | None = None
     if requested_hospital_code:
@@ -419,6 +454,7 @@ async def list_results(
 @router.get("/results/{file_id}")
 async def get_result(
     file_id: str,
+    include_transcript: bool = Query(False, description="Include transcript utterances for evidence context"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -445,9 +481,11 @@ async def get_result(
     recording_id = _extract_recording_id(file_id)
     recording_meta_map = await _load_recording_meta([file_id], db)
     summary = _build_summary(file_id, result_data, raw_data, recording_meta_map.get(recording_id) if recording_id else None)
+    transcript_context = await _load_transcript_context(recording_id, db) if include_transcript else None
 
     return {
         **summary,
+        "transcript": transcript_context,
         "customer_primary_demands": result_data.get("customer_primary_demands"),
         "staff_recommendations": result_data.get("staff_recommendations"),
         "standardized_indications": result_data.get("standardized_indications"),

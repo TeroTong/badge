@@ -3541,6 +3541,43 @@ def test_sanitize_staff_recommendations_prioritizes_positive_plan_over_negated_m
     assert recommended_plan["items"][0]["plan"] == "半年后可考虑胶原/胶原蛋白改善泪沟"
 
 
+def test_sync_recommended_plan_includes_recommendation_details() -> None:
+    result = {
+        "staff_recommendations": {
+            "summary": "",
+            "items": [
+                {
+                    "recommendation": "鼻部支撑塑形",
+                    "product_or_solution": "玻尿酸鼻部塑形",
+                    "body_part": "鼻部",
+                    "brand": "乔雅登",
+                    "material": "玻尿酸",
+                    "dosage": "2支",
+                    "price": "8800元",
+                    "course_or_frequency": "一次",
+                    "treatment_steps": ["先山根支撑", "再鼻背衔接"],
+                    "implementation_notes": "医生面诊后微调",
+                    "evidence": "[01:20] 山根这边建议用乔雅登玻尿酸两支，做鼻背衔接。",
+                    "customer_response": "犹豫",
+                    "demand_priority": [1],
+                }
+            ],
+        },
+        "consultation_result": {"recommended_plan": {"summary": "", "items": []}},
+    }
+
+    changed = pipeline._sync_consultation_result_recommended_plan(result)
+
+    assert changed
+    plan = result["consultation_result"]["recommended_plan"]["items"][0]["plan"]
+    assert plan.startswith("鼻部支撑塑形")
+    assert "品牌：乔雅登" in plan
+    assert "材料：玻尿酸" in plan
+    assert "用量：2支" in plan
+    assert "步骤：先山根支撑；再鼻背衔接" in plan
+    assert result["consultation_result"]["recommended_plan"]["summary"] == plan
+
+
 def test_analyze_transcript_downgrades_false_positive_deal_status_from_payment_flow_and_pending(tmp_path, monkeypatch) -> None:
     transcript_path = tmp_path / "sample_false_positive_deal_status.json"
     transcript_path.write_text(

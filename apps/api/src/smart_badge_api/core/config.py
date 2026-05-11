@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     tencent_asr_public_media_base_url: str = ""
     tencent_asr_max_concurrency: int = 8
     tencent_asr_hotword_list: str = ""
+    tencent_asr_hotword_vocab_sync_enabled: bool = False
+    tencent_asr_hotword_vocab_id: str = ""
+    tencent_asr_hotword_vocab_name: str = "smart-badge-hotwords"
+    tencent_asr_hotword_vocab_description: str = "Smart Badge ASR hotwords"
     tencent_asr_dynamic_hotwords_enabled: bool = True
     tencent_asr_replace_text_id: str = ""
     tencent_asr_local_diarization_enabled: bool = True

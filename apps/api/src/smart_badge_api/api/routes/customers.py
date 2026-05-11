@@ -13,13 +13,14 @@ from smart_badge_api.api.data_scope import (
     build_permission_scope,
     customer_scope_condition,
     recording_scope_condition,
+    resolve_visible_staff_ids_for_user,
     visit_order_scope_condition,
     visit_scope_condition,
 )
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.api.hospital_scope import customer_hospital_condition, normalize_hospital_code, visit_hospital_condition
 from smart_badge_api.analysis.consultation_evaluation import normalize_consultation_dimension_name
-from smart_badge_api.core.permissions import normalize_permission_role, permission_role_level
+from smart_badge_api.core.permissions import normalize_permission_role
 from smart_badge_api.db.default_data import ensure_tag_categories
 from smart_badge_api.db.models import (
     AnalysisTask,
@@ -28,7 +29,6 @@ from smart_badge_api.db.models import (
     RecordingVisitLink,
     SapPushLog,
     Staff,
-    StaffManagementRelation,
     TagCategory,
     Transcript,
     Visit,
@@ -166,8 +166,10 @@ def _customer_type_sort_key(
 
 def _customer_visit_order_scope_condition(scope):
     role = normalize_permission_role(scope.role)
-    if role in {"super_admin", "system_admin"}:
+    if role == "super_admin":
         return true()
+    if role == "system_admin":
+        return visit_order_scope_condition(scope)
     if role == "hospital_admin":
         return VisitOrder.jgbm == scope.hospital_code if scope.hospital_code else false()
     return true()
@@ -179,33 +181,7 @@ def _clean_staff_id(value: str | None) -> str | None:
 
 
 async def _managed_staff_ids_for_user(db: AsyncSession, user) -> set[str] | None:
-    role = normalize_permission_role(getattr(user, "role", None))
-    staff_id = _clean_staff_id(getattr(user, "staff_id", None))
-    if role in {"super_admin", "system_admin"}:
-        return None
-    if not staff_id:
-        return set()
-
-    actor_level = permission_role_level(role)
-    rows = (
-        await db.execute(
-            select(Staff.id, Staff.permission_role)
-            .join(StaffManagementRelation, StaffManagementRelation.subordinate_staff_id == Staff.id)
-            .where(
-                StaffManagementRelation.manager_staff_id == staff_id,
-                Staff.is_active.is_(True),
-            )
-        )
-    ).all()
-    visible_staff_ids = {staff_id}
-    for subordinate_staff_id, subordinate_role in rows:
-        if (
-            role == "super_admin"
-            or subordinate_staff_id == staff_id
-            or permission_role_level(subordinate_role) <= actor_level
-        ):
-            visible_staff_ids.add(subordinate_staff_id)
-    return visible_staff_ids
+    return await resolve_visible_staff_ids_for_user(db, user)
 
 
 def _recording_staff_scope_condition(visible_staff_ids: set[str] | None):
@@ -705,8 +681,11 @@ def _deposit_principal_subquery(scope):
 
 
 def _visible_recording_scope_condition(scope):
-    if normalize_permission_role(scope.role) in {"super_admin", "system_admin"}:
+    role = normalize_permission_role(scope.role)
+    if role == "super_admin":
         return true()
+    if role == "system_admin":
+        return recording_scope_condition(scope)
     if scope.role == "hospital_admin":
         return true()
     if scope.staff_id:

@@ -45,6 +45,13 @@ def _get_asr_semaphore(provider: str) -> asyncio.Semaphore:
     return semaphore
 
 
+def _should_build_tencent_hotword_word_weights() -> bool:
+    settings = get_settings()
+    if settings.tencent_asr_hotword_vocab_sync_enabled:
+        return True
+    return not settings.tencent_asr_hotword_vocab_id.strip()
+
+
 # ── Mock ASR 结果生成 ──────────────────────────────
 
 
@@ -135,12 +142,17 @@ async def transcribe_audio_file(
             )
         async with _get_asr_semaphore(resolved_provider):
             if resolved_provider == "tencent_asr":
-                from smart_badge_api.asr.domain_terms import build_tencent_hotword_list
                 from smart_badge_api.asr.tencent_cloud_provider import transcribe_audio
+
+                hotword_word_weights: list[dict[str, object]] | None = None
+                if _should_build_tencent_hotword_word_weights():
+                    from smart_badge_api.asr.domain_terms import build_tencent_hotword_word_weights
+
+                    hotword_word_weights = await build_tencent_hotword_word_weights()
 
                 utterances, full_text, duration_ms = await transcribe_audio(
                     prepared_audio_path,
-                    hotword_list=await build_tencent_hotword_list(),
+                    hotword_word_weights=hotword_word_weights,
                     source_id=source_id,
                 )
             elif resolved_provider == "xfyun_asr":

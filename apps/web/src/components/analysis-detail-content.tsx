@@ -14,6 +14,7 @@ import { ANALYSIS_TAG_CATALOG_GROUPS } from '@/constants/tag-catalog'
 import type { TranscriptUtteranceLite } from '@/components/transcript-playback-panel'
 import { formatRecordingDisplayName } from '@/utils/recording-display'
 import { formatBeijingTime } from '@/utils/time'
+import { formatSapPreviewText } from '@/utils/sap-preview-text'
 
 function formatChiefIndicationLine(item: StandardizedIndicationItem): string {
   const departmentPart = item.department_code
@@ -34,7 +35,7 @@ function sapPreviewValue(value: unknown): string {
 
 function sapPreviewText(value: AnalysisDetail['sap_consultation_preview']): string {
   const firstPayload = value?.payloads?.find((item) => Boolean(item && typeof item === 'object'))
-  return sapPreviewValue(firstPayload?.text)
+  return formatSapPreviewText(sapPreviewValue(firstPayload?.text))
 }
 
 function normalizeEvidenceKey(value: string | null | undefined): string {
@@ -164,7 +165,14 @@ function extractEvidenceAnchors(evidence: string): EvidenceAnchor[] {
     if (timeMs != null || text) anchors.push({ timeMs, text })
   }
   if (anchors.length > 0) return anchors
-  return extractEvidenceTimesMs(evidence).map((timeMs) => ({ timeMs, text: '' }))
+  const timeAnchors = extractEvidenceTimesMs(evidence).map((timeMs) => ({ timeMs, text: '' }))
+  if (timeAnchors.length > 0) return timeAnchors
+  return evidence
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, EVIDENCE_CONTEXT_MAX_LINES)
+    .map((text) => ({ timeMs: null, text }))
 }
 
 function utteranceBeginMs(utterance: TranscriptUtteranceLite): number | null {
@@ -499,15 +507,21 @@ function AnalysisSection({
   count,
   embedded,
   defaultOpen = true,
+  plain = false,
   children,
 }: {
   title: string
   count?: ReactNode
   embedded: boolean
   defaultOpen?: boolean
+  plain?: boolean
   children: ReactNode
 }) {
   const [open, setOpen] = useState(defaultOpen)
+
+  if (plain) {
+    return <>{children}</>
+  }
 
   if (!embedded) {
     return (
@@ -737,6 +751,8 @@ type AnalysisDetailContentProps = {
   embeddedSectionDefaultOpen?: boolean
   showCustomerTags?: boolean
   customerTagDisplayMode?: 'all' | 'extracted'
+  showProcessEvaluation?: boolean
+  plainResultSection?: boolean
   title?: string
   backTo?: string | null
   backLabel?: string
@@ -752,6 +768,8 @@ export function AnalysisDetailContent({
   embeddedSectionDefaultOpen = true,
   showCustomerTags = true,
   customerTagDisplayMode = 'all',
+  showProcessEvaluation = true,
+  plainResultSection = false,
   title = '分析结果',
   backTo = null,
   backLabel = '← 返回列表',
@@ -1138,6 +1156,7 @@ export function AnalysisDetailContent({
           title="面诊结果分析"
           embedded={embedded}
           defaultOpen={embeddedSectionDefaultOpen}
+          plain={plainResultSection}
         >
           <div className="ad-result-grid">
             <div className={`ad-result-grid__split${showCustomerTags ? '' : ' ad-result-grid__split--no-tags'}`}>
@@ -1197,7 +1216,7 @@ export function AnalysisDetailContent({
             </div>
 
             <div className="ad-result-card ad-result-card--factors">
-              <span className="ad-result-card__eyebrow">2. 成交影响因素</span>
+              <span className="ad-result-card__eyebrow">3. 成交影响因素</span>
               {!embeddedSimplified && !hasDealFactorDetails ? (
                 <p className="ad-result-card__summary">
                   {consultationResult.deal_factors.summary || '当前未生成成交影响因素总结。'}
@@ -1251,7 +1270,7 @@ export function AnalysisDetailContent({
             </div>
 
             <div className="ad-result-card ad-result-card--recommend-panel">
-              <span className="ad-result-card__eyebrow">3. 推荐给顾客的方案和认可程度</span>
+              <span className="ad-result-card__eyebrow">2. 推荐给顾客的方案和认可程度</span>
               {!embeddedSimplified && !hasRecommendedPlanDetails ? (
                 <p className="ad-result-card__summary">
                   {consultationResult.recommended_plan.summary || '当前未生成推荐方案总结。'}
@@ -1369,27 +1388,29 @@ export function AnalysisDetailContent({
           </div>
         </AnalysisSection>
 
-        <AnalysisSection
-          title="面诊过程评价"
-          count={processScoreTitle}
-          embedded={embedded}
-          defaultOpen={embeddedSectionDefaultOpen}
-        >
-          {processEvaluation.overall_summary && !embeddedSimplified ? (
-            <p className="ad-section__summary">{processEvaluation.overall_summary}</p>
-          ) : null}
-          <div className="ad-process-section-list">
-            {processEvaluation.sections.map((section) => (
-              <ProcessEvaluationSectionBlock
-                key={section.code || section.name}
-                section={section}
-                recordingId={linkedRecordingId}
-                recordingLinkBase={recordingLinkBase}
-                simplified={embeddedSimplified}
-              />
-            ))}
-          </div>
-        </AnalysisSection>
+        {showProcessEvaluation ? (
+          <AnalysisSection
+            title="面诊过程评价"
+            count={processScoreTitle}
+            embedded={embedded}
+            defaultOpen={embeddedSectionDefaultOpen}
+          >
+            {processEvaluation.overall_summary && !embeddedSimplified ? (
+              <p className="ad-section__summary">{processEvaluation.overall_summary}</p>
+            ) : null}
+            <div className="ad-process-section-list">
+              {processEvaluation.sections.map((section) => (
+                <ProcessEvaluationSectionBlock
+                  key={section.code || section.name}
+                  section={section}
+                  recordingId={linkedRecordingId}
+                  recordingLinkBase={recordingLinkBase}
+                  simplified={embeddedSimplified}
+                />
+              ))}
+            </div>
+          </AnalysisSection>
+        ) : null}
       </div>
     </section>
     </EvidenceUtteranceContext.Provider>

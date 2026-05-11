@@ -40,6 +40,7 @@ import { getDisplayMatchEvidenceLines } from '@/utils/match-evidence'
 import { buildRecordingVisitLinkRiskText } from '@/utils/recording-visit-link-confirmation'
 import { getQuickRecommendSelection } from '@/utils/visit-order-recommendations'
 import { keepElementInScrollContainerView } from '@/utils/scroll'
+import { formatSapPreviewText } from '@/utils/sap-preview-text'
 import {
   buildVisitOrderLineItemMeta,
   formatMergedVisitOrderTitle,
@@ -137,7 +138,7 @@ function sapPreviewValue(value: unknown): string {
 
 function sapPreviewText(value: AnalysisDetail['sap_consultation_preview']): string {
   const firstPayload = value?.payloads?.find((item) => Boolean(item && typeof item === 'object'))
-  return sapPreviewValue(firstPayload?.text)
+  return formatSapPreviewText(sapPreviewValue(firstPayload?.text))
 }
 
 function getMatchMethodLabel(method: string) {
@@ -512,13 +513,25 @@ export function WecomRecordingDetailPage() {
   })
 
   const splitMutation = useMutation({
-    mutationFn: () => {
-      if (!effectiveRecordingId || splitAtSeconds == null) {
+    mutationFn: async () => {
+      if (splitAtSeconds == null) {
         throw new Error('请先填写裁切时间点')
       }
-      return splitRecording(effectiveRecordingId, { split_at_seconds: splitAtSeconds, confirm: true })
+      let targetRecordingId = effectiveRecordingId
+      if (!targetRecordingId && archiveItemId) {
+        if (archiveRecording?.is_split_hidden || archiveRecording?.pipeline_status === 'filtered') {
+          throw new Error('已过滤或已裁切的原始录音不能再次裁切')
+        }
+        const ensured = await ensureArchiveRecordingMutation.mutateAsync(archiveItemId)
+        targetRecordingId = ensured.recording_id
+      }
+      if (!targetRecordingId) {
+        throw new Error('当前录音还未准备好，请稍后再试')
+      }
+      const result = await splitRecording(targetRecordingId, { split_at_seconds: splitAtSeconds, confirm: true })
+      return { result, targetRecordingId }
     },
-    onSuccess: async (result: RecordingSplitResult) => {
+    onSuccess: async ({ result, targetRecordingId }: { result: RecordingSplitResult; targetRecordingId: string }) => {
       setSplitModalOpen(false)
       Modal.success({
         title: '裁切完成',
@@ -527,9 +540,10 @@ export function WecomRecordingDetailPage() {
         centered: true,
         wrapClassName: 'wc-badge-action-modal',
       })
-      await qc.invalidateQueries({ queryKey: ['wecom', 'recording', effectiveRecordingId] })
-      await qc.invalidateQueries({ queryKey: ['wecom', 'recording-media-source', archiveItemId || effectiveRecordingId] })
-      await qc.invalidateQueries({ queryKey: ['wecom', 'transcripts', effectiveRecordingId] })
+      await qc.invalidateQueries({ queryKey: ['wecom', 'recording', targetRecordingId] })
+      await qc.invalidateQueries({ queryKey: ['wecom', 'archive-recording', archiveItemId] })
+      await qc.invalidateQueries({ queryKey: ['wecom', 'recording-media-source', archiveItemId || targetRecordingId] })
+      await qc.invalidateQueries({ queryKey: ['wecom', 'transcripts', targetRecordingId] })
       await qc.invalidateQueries({ queryKey: ['wecom', 'recordings'] })
       await qc.invalidateQueries({ queryKey: ['wecom', 'home'] })
     },
@@ -595,11 +609,7 @@ export function WecomRecordingDetailPage() {
     enabled: !!analysisFileId && analysisTask?.status === 'done',
   })
   const archiveAnalysisDetail = useMemo(() => buildArchiveAnalysisDetail(archiveRecording), [archiveRecording])
-  const resolvedAnalysisDetail = analysisDetail ?? archiveAnalysisDetail
-  const sapPrewriteText = useMemo(
-    () => sapPreviewText(resolvedAnalysisDetail?.sap_consultation_preview),
-    [resolvedAnalysisDetail?.sap_consultation_preview],
-  )
+  const baseAnalysisDetail = analysisDetail ?? archiveAnalysisDetail
 
   const { data: transcriptsData } = useQuery({
     queryKey: ['wecom', 'transcripts', effectiveRecordingId],
@@ -609,6 +619,26 @@ export function WecomRecordingDetailPage() {
 
   const transcript = transcriptsData?.items?.[0] as Transcript | undefined
   const utterances = transcript?.utterances ?? resolveArchiveUtterances(archiveRecording)
+  const resolvedAnalysisDetail = useMemo(() => {
+    if (!baseAnalysisDetail) return baseAnalysisDetail
+    const transcriptPayload = transcript
+      ? {
+          id: transcript.id,
+          recording_id: transcript.recording_id,
+          status: transcript.status,
+          utterances: transcript.utterances ?? [],
+          duration_ms: transcript.duration_ms,
+        }
+      : utterances.length > 0
+        ? { utterances }
+        : baseAnalysisDetail.transcript
+    if (!transcriptPayload) return baseAnalysisDetail
+    return { ...baseAnalysisDetail, transcript: transcriptPayload }
+  }, [baseAnalysisDetail, transcript, utterances])
+  const sapPrewriteText = useMemo(
+    () => sapPreviewText(resolvedAnalysisDetail?.sap_consultation_preview),
+    [resolvedAnalysisDetail?.sap_consultation_preview],
+  )
   const activeUtteranceIndex = utterances.findIndex(
     (utterance) => playbackMs != null && playbackMs >= utterance.begin_ms && playbackMs < utterance.end_ms,
   )
@@ -737,7 +767,7 @@ export function WecomRecordingDetailPage() {
   const displayCreatedAt = archiveRecording ? resolveArchiveCreatedAt(archiveRecording) : (recording?.created_at ?? null)
   const displayCreatedLabel = formatDateTime(displayCreatedAt)
   const currentUser = auth.status === 'authenticated' ? auth.user : null
-  const canSplitRecording = Boolean(
+  const canSplitLocalRecording = Boolean(
     effectiveRecordingId
     && recording
     && currentUser
@@ -748,6 +778,19 @@ export function WecomRecordingDetailPage() {
       || (recording.staff_id && recording.staff_id === currentUser.staff_id)
     ),
   )
+  const canSplitArchiveRecording = Boolean(
+    archiveItemId
+    && archiveRecording
+    && currentUser
+    && !archiveRecording.is_split_hidden
+    && archiveRecording.pipeline_status !== 'filtered'
+    && (displayDuration ?? 0) > 1
+    && (
+      isHospitalAdminOrAbove(currentUser.role)
+      || (archiveRecording.staff_id && archiveRecording.staff_id === currentUser.staff_id)
+    ),
+  )
+  const canSplitRecording = canSplitLocalRecording || canSplitArchiveRecording
   const openSplitModal = () => {
     const durationSeconds = displayDuration ?? resolvedAudioDurationSeconds ?? 0
     const defaultSeconds = currentTimeSeconds > 0 && currentTimeSeconds < durationSeconds
@@ -1851,6 +1894,8 @@ export function WecomRecordingDetailPage() {
               embedded
               embeddedSectionDefaultOpen={false}
               embeddedSimplified
+              showProcessEvaluation={false}
+              plainResultSection
               customerTagDisplayMode="extracted"
               recordingId={effectiveRecordingId}
               recordingLinkBase={null}

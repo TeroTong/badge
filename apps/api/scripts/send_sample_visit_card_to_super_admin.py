@@ -13,6 +13,7 @@ from smart_badge_api.visit_order_notifications import (
     _build_card_description,
     _build_card_url,
     _build_card_horizontal_items,
+    _build_card_title,
     _extract_candidates,
     _load_advisor_staff,
     _resolve_tenant_for_hospital,
@@ -125,17 +126,18 @@ async def main() -> None:
         last_error = None
         for tenant in tenants:
             attempts += 1
+            pushed_at = datetime.now(timezone.utc)
             try:
                 try:
                     await send_wecom_button_interaction_card(
                         to_user=target_staff.wecom_user_id,
-                        title=f"测试：新的待接诊客户｜{candidate.customer_type_label or '未标识'}",
-                        description=_build_card_description(candidate, advisor_staff),
-                        main_title_desc=f"{candidate.customer_name or '未填写客户'} · {candidate.visit_order_no}-{candidate.visit_order_seg}",
-                        horizontal_content_list=_build_card_horizontal_items(candidate),
+                        title=f"测试：{_build_card_title(candidate)}",
+                        description=_build_card_description(candidate, advisor_staff, pushed_at=pushed_at),
+                        main_title_desc=None,
+                        horizontal_content_list=_build_card_horizontal_items(candidate, pushed_at=pushed_at),
                         task_id=build_recording_card_task_id(
                             "sample",
-                            action=f"{attempts}_{int(datetime.now(timezone.utc).timestamp())}",
+                            action=f"{attempts}_{int(pushed_at.timestamp())}",
                         ),
                         buttons=[
                             {
@@ -153,8 +155,8 @@ async def main() -> None:
                         raise
                     await send_wecom_textcard_message(
                         to_user=target_staff.wecom_user_id,
-                        title=f"测试：新的待接诊客户｜{candidate.customer_type_label or '未标识'}",
-                        description=_build_card_description(candidate, advisor_staff).replace("\n", "<br/>"),
+                        title=f"测试：{_build_card_title(candidate)}",
+                        description=_build_card_description(candidate, advisor_staff, pushed_at=pushed_at).replace("\n", "<br/>"),
                         url=_build_card_url(frontend_url=tenant.frontend_url, visit_order_no=candidate.visit_order_no),
                         btn_text="开始录音",
                         tenant=tenant,

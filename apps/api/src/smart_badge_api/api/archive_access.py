@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from smart_badge_api.core.permissions import PermissionScope, normalize_permission_role
+from smart_badge_api.core.permissions import PermissionScope, normalize_permission_role, permission_role_level
 
 _ARCHIVE_GLOBAL_ROLES = {"super_admin", "system_admin"}
 
@@ -54,10 +54,16 @@ def _archive_item_visible(
     hospital_code: str | None,
 ) -> bool:
     normalized_role = normalize_permission_role(role)
-    if normalized_role in _ARCHIVE_GLOBAL_ROLES:
+    if normalized_role == "super_admin":
         return True
 
     scoped_staff_id = _clean_text(staff_id)
+    if normalized_role == "system_admin":
+        item_permission_role = _clean_text(item.get("staff_permission_role")) or _clean_text(item.get("permission_role"))
+        if item_permission_role:
+            return permission_role_level(item_permission_role) <= permission_role_level(normalized_role)
+        return bool(scoped_staff_id and _archive_item_staff_id(item) == scoped_staff_id)
+
     if normalized_role == "hospital_admin":
         scoped_hospital_code = _clean_text(hospital_code)
         if not scoped_hospital_code:

@@ -259,8 +259,15 @@ export async function fetchAnalysisResults(
   return api.get('analysis/results', { searchParams }).json()
 }
 
-export async function fetchAnalysisDetail(fileId: string): Promise<AnalysisDetail> {
-  return api.get(`analysis/results/${fileId}`).json()
+export async function fetchAnalysisDetail(
+  fileId: string,
+  options?: { includeTranscript?: boolean },
+): Promise<AnalysisDetail> {
+  const searchParams: Record<string, string> = {}
+  if (options?.includeTranscript) {
+    searchParams.include_transcript = 'true'
+  }
+  return api.get(`analysis/results/${fileId}`, { searchParams }).json()
 }
 
 export function extractRecordingIdFromAnalysisFileId(fileId: string): string | null {

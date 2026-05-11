@@ -473,8 +473,8 @@ export function WecomCustomerDetailPage() {
     queries: visitRecordings.map((recording) => {
       const analysisFileId = resolveRecordingAnalysisFileId(recording)
       return {
-        queryKey: ['wecom', 'customer-detail-recording-analysis', recording.id, analysisFileId],
-        queryFn: () => fetchAnalysisDetail(analysisFileId!),
+        queryKey: ['wecom', 'customer-detail-recording-analysis', recording.id, analysisFileId, 'with-transcript'],
+        queryFn: () => fetchAnalysisDetail(analysisFileId!, { includeTranscript: true }),
         enabled: !!analysisFileId,
         retry: false,
         staleTime: 60_000,
@@ -675,6 +675,8 @@ export function WecomCustomerDetailPage() {
                                         embedded
                                         embeddedSectionDefaultOpen={false}
                                         embeddedSimplified
+                                        showProcessEvaluation={false}
+                                        plainResultSection
                                         recordingId={recording.id}
                                         recordingLinkBase={null}
                                         showCustomerTags={false}

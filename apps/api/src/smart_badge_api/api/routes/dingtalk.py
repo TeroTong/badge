@@ -31,7 +31,7 @@ from smart_badge_api.analysis.consultation_evaluation import (
 )
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
-from smart_badge_api.api.data_scope import build_permission_scope
+from smart_badge_api.api.data_scope import build_permission_scope, resolve_visible_staff_ids_for_user
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.device_binding import (
     DeviceBindingOverlapError,
@@ -42,7 +42,7 @@ from smart_badge_api.device_binding import (
     resolve_device_staff_binding,
 )
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.core.permissions import is_global_role, normalize_permission_role, permission_role_level
+from smart_badge_api.core.permissions import is_global_role
 from smart_badge_api.device_battery_notifications import handle_device_battery_update
 from smart_badge_api.dingtalk_audio_archive import (
     RemoteAudioItem,
@@ -88,7 +88,6 @@ from smart_badge_api.db.models import (
     Recording,
     RecordingVisitLink,
     Staff,
-    StaffManagementRelation,
     Transcript,
     User,
     Visit,
@@ -1245,6 +1244,7 @@ async def _attach_archive_recording_bindings(
                     Staff.id,
                     Staff.name,
                     Staff.role,
+                    Staff.permission_role,
                     Staff.badge_id,
                     Staff.hospital_code,
                     Staff.hospital_short_name,
@@ -1256,6 +1256,7 @@ async def _attach_archive_recording_bindings(
                 "staff_id": _clean_text(row.id),
                 "staff_name": _clean_text(row.name),
                 "staff_role": _clean_text(row.role),
+                "staff_permission_role": _clean_text(row.permission_role),
                 "staff_hospital_code": _clean_text(row.hospital_code),
                 "staff_hospital_short_name": _clean_text(row.hospital_short_name),
             }
@@ -1277,6 +1278,7 @@ async def _attach_archive_recording_bindings(
                     Device.hospital_short_name.label("device_hospital_short_name"),
                     Staff.name.label("staff_name"),
                     Staff.role.label("staff_role"),
+                    Staff.permission_role.label("staff_permission_role"),
                     Staff.hospital_code.label("staff_hospital_code"),
                     Staff.hospital_short_name.label("staff_hospital_short_name"),
                 )
@@ -1293,6 +1295,7 @@ async def _attach_archive_recording_bindings(
                 "staff_id": _clean_text(row.staff_id),
                 "staff_name": _clean_text(row.staff_name),
                 "staff_role": _clean_text(row.staff_role),
+                "staff_permission_role": _clean_text(row.staff_permission_role),
                 "staff_hospital_code": _clean_text(row.staff_hospital_code),
                 "staff_hospital_short_name": _clean_text(row.staff_hospital_short_name),
                 "device_hospital_code": _clean_text(row.device_hospital_code),
@@ -1349,6 +1352,8 @@ async def _attach_archive_recording_bindings(
                     item["staff_name"] = recording.staff.name
                 if _clean_text(recording.staff.role):
                     item["staff_role"] = recording.staff.role
+                if _clean_text(recording.staff.permission_role):
+                    item["staff_permission_role"] = recording.staff.permission_role
                 if _clean_text(recording.staff.hospital_code):
                     item["staff_hospital_code"] = recording.staff.hospital_code
                 if _clean_text(recording.staff.hospital_short_name):
@@ -1432,6 +1437,8 @@ async def _attach_archive_recording_bindings(
                 item["staff_name"] = fallback_staff["staff_name"]
             if not _clean_text(item.get("staff_role")) and fallback_staff.get("staff_role"):
                 item["staff_role"] = fallback_staff["staff_role"]
+            if fallback_staff.get("staff_permission_role"):
+                item["staff_permission_role"] = fallback_staff["staff_permission_role"]
             if fallback_staff.get("staff_hospital_code"):
                 item["staff_hospital_code"] = fallback_staff["staff_hospital_code"]
             if fallback_staff.get("staff_hospital_short_name"):
@@ -2798,31 +2805,7 @@ async def get_audio_archive_sync_status(request: Request):
 
 
 async def _archive_managed_staff_ids_for_user(db: AsyncSession | None, user: User) -> set[str] | None:
-    role = normalize_permission_role(user.role)
-    staff_id = _clean_text(user.staff_id)
-    if role in {"super_admin", "system_admin"}:
-        return None
-    if not staff_id:
-        return set()
-    if db is None:
-        return {staff_id}
-
-    actor_level = permission_role_level(user.role)
-    rows = (
-        await db.execute(
-            select(Staff.id, Staff.permission_role)
-            .join(StaffManagementRelation, StaffManagementRelation.subordinate_staff_id == Staff.id)
-            .where(
-                StaffManagementRelation.manager_staff_id == staff_id,
-                Staff.is_active.is_(True),
-            )
-        )
-    ).all()
-    visible_staff_ids = {staff_id}
-    for subordinate_staff_id, subordinate_role in rows:
-        if role == "super_admin" or subordinate_staff_id == staff_id or permission_role_level(subordinate_role) <= actor_level:
-            visible_staff_ids.add(subordinate_staff_id)
-    return visible_staff_ids
+    return await resolve_visible_staff_ids_for_user(db, user)
 
 
 def _archive_item_staff_id(item: dict[str, Any]) -> str | None:

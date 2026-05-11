@@ -557,6 +557,14 @@ def test_hospital_admin_can_create_staff_and_hospital_admin_in_own_hospital() ->
                 assert created_staff.hospital_code == "6501"
                 assert created_admin.permission_role == "hospital_admin"
                 assert created_admin.hospital_code == "6501"
+                default_relations = (
+                    await db.execute(
+                        select(StaffManagementRelation.subordinate_staff_id).where(
+                            StaffManagementRelation.manager_staff_id == created_admin.id
+                        )
+                    )
+                ).scalars().all()
+                assert set(default_relations) == {created_staff.id}
         finally:
             await engine.dispose()
 

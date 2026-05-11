@@ -72,6 +72,13 @@ class StaffRecommendationItem(BaseModel):
     recommendation: str = Field(..., description="员工推荐动作或方案归纳")
     product_or_solution: str | None = Field(default=None, description="推荐的项目、产品或方案")
     body_part: str | None = Field(default=None, description="推荐对应的部位")
+    brand: str | None = Field(default=None, description="推荐方案涉及的品牌名")
+    material: str | None = Field(default=None, description="推荐方案涉及的材料、产品类型或设备类型")
+    dosage: str | None = Field(default=None, description="推荐方案涉及的用量、支数、剂量或治疗范围")
+    price: str | None = Field(default=None, description="推荐方案涉及的报价、成交价或套餐价格")
+    course_or_frequency: str | None = Field(default=None, description="推荐方案涉及的疗程、次数或频次")
+    treatment_steps: list[str] = Field(default_factory=list, description="推荐方案涉及的先后处理步骤")
+    implementation_notes: str | None = Field(default=None, description="推荐方案补充执行要点")
     evidence: str = Field(..., description="原话证据，必须保留时间戳")
     customer_response: str = Field(..., description="客户对推荐的反应：接受/犹豫/拒绝/未明确回应")
     demand_priority: list[int] = Field(
@@ -88,6 +95,35 @@ class StaffRecommendationItem(BaseModel):
         normalized["recommendation"] = normalized.get("recommendation") or normalized.get("content") or normalized.get("proposal") or ""
         normalized.setdefault("product_or_solution", normalized.get("product") or normalized.get("solution"))
         normalized.setdefault("body_part", normalized.get("part") or normalized.get("area"))
+        normalized.setdefault("brand", normalized.get("brand_name") or normalized.get("product_brand"))
+        normalized.setdefault(
+            "material",
+            normalized.get("material_or_product") or normalized.get("product_material") or normalized.get("material_name"),
+        )
+        normalized.setdefault(
+            "dosage",
+            normalized.get("dose") or normalized.get("quantity") or normalized.get("usage_amount"),
+        )
+        normalized.setdefault("price", normalized.get("quoted_price") or normalized.get("quote"))
+        normalized.setdefault(
+            "course_or_frequency",
+            normalized.get("course") or normalized.get("frequency") or normalized.get("treatment_course"),
+        )
+        normalized.setdefault("treatment_steps", normalized.get("steps") or normalized.get("sequence") or [])
+        if isinstance(normalized.get("treatment_steps"), str):
+            value = normalized["treatment_steps"].strip()
+            normalized["treatment_steps"] = [value] if value else []
+        elif not isinstance(normalized.get("treatment_steps"), list):
+            normalized["treatment_steps"] = []
+        normalized["treatment_steps"] = [
+            str(item).strip()
+            for item in normalized.get("treatment_steps", [])
+            if str(item or "").strip()
+        ]
+        normalized.setdefault(
+            "implementation_notes",
+            normalized.get("notes") or normalized.get("detail") or normalized.get("remark"),
+        )
         normalized.setdefault("evidence", normalized.get("quote") or normalized.get("source") or "")
         normalized.setdefault("customer_response", normalized.get("response") or "未明确回应")
         # demand_priority: accept int, list[int], or None → always list[int]
@@ -647,6 +683,13 @@ class ConsultationResultRecommendedPlanItem(BaseModel):
     plan: str = Field(default="", description="推荐方案名称或概括")
     acceptance: str | None = Field(default=None, description="顾客认可程度：接受/犹豫/拒绝/未明确回应")
     evidence: str | None = Field(default=None, description="对应原话证据")
+    brand: str | None = Field(default=None, description="方案涉及的品牌名")
+    material: str | None = Field(default=None, description="方案涉及的材料、产品类型或设备类型")
+    dosage: str | None = Field(default=None, description="方案涉及的用量、支数、剂量或治疗范围")
+    price: str | None = Field(default=None, description="方案涉及的报价、成交价或套餐价格")
+    course_or_frequency: str | None = Field(default=None, description="方案涉及的疗程、次数或频次")
+    treatment_steps: list[str] = Field(default_factory=list, description="方案涉及的先后处理步骤")
+    implementation_notes: str | None = Field(default=None, description="方案补充执行要点")
 
     @model_validator(mode="before")
     @classmethod
@@ -658,6 +701,35 @@ class ConsultationResultRecommendedPlanItem(BaseModel):
         normalized.setdefault(
             "acceptance",
             normalized.get("acceptance") or normalized.get("customer_response") or normalized.get("response"),
+        )
+        normalized.setdefault("brand", normalized.get("brand_name") or normalized.get("product_brand"))
+        normalized.setdefault(
+            "material",
+            normalized.get("material_or_product") or normalized.get("product_material") or normalized.get("material_name"),
+        )
+        normalized.setdefault(
+            "dosage",
+            normalized.get("dose") or normalized.get("quantity") or normalized.get("usage_amount"),
+        )
+        normalized.setdefault("price", normalized.get("quoted_price") or normalized.get("quote"))
+        normalized.setdefault(
+            "course_or_frequency",
+            normalized.get("course") or normalized.get("frequency") or normalized.get("treatment_course"),
+        )
+        normalized.setdefault("treatment_steps", normalized.get("steps") or normalized.get("sequence") or [])
+        if isinstance(normalized.get("treatment_steps"), str):
+            value = normalized["treatment_steps"].strip()
+            normalized["treatment_steps"] = [value] if value else []
+        elif not isinstance(normalized.get("treatment_steps"), list):
+            normalized["treatment_steps"] = []
+        normalized["treatment_steps"] = [
+            str(item).strip()
+            for item in normalized.get("treatment_steps", [])
+            if str(item or "").strip()
+        ]
+        normalized.setdefault(
+            "implementation_notes",
+            normalized.get("notes") or normalized.get("detail") or normalized.get("remark"),
         )
         normalized.setdefault("evidence", normalized.get("evidence") or normalized.get("quote") or normalized.get("source"))
         return normalized

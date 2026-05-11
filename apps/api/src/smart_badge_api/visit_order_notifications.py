@@ -25,6 +25,14 @@ logger = logging.getLogger("smart_badge.visit_order_notifications")
 
 _RECORDING_ACTION_PREFIX = "visit_order_recording"
 _TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_NON_ARRIVAL_PURPOSE_CODES = {"X", "Z"}
+_NON_ARRIVAL_PURPOSE_LABELS = {"\u672a\u5230\u9662\u8d2d\u4e70", "\u5176\u4ed6"}
+_ARRIVAL_PURPOSE_LABELS = {
+    "A": "咨询",
+    "B": "治疗",
+    "C": "手术",
+    "D": "复查",
+}
 
 
 def _safe_task_component(value: object, *, fallback: str = "manual", max_length: int = 80) -> str:
@@ -81,9 +89,41 @@ def _clean_text(value: object) -> str | None:
     return text or None
 
 
+def _compact_text(value: object) -> str:
+    return "".join(str(value or "").split())
+
+
+def _is_non_arrival_purpose(*values: object) -> bool:
+    for value in values:
+        text = _clean_text(value)
+        if not text:
+            continue
+        if text.upper() in _NON_ARRIVAL_PURPOSE_CODES:
+            return True
+        if _compact_text(text) in _NON_ARRIVAL_PURPOSE_LABELS:
+            return True
+    return False
+
+
+def _extract_arrival_purpose_label(serialized: dict[str, Any]) -> str | None:
+    for key in ("DYMD_TXT", "dymd_txt", "DYMDTXT", "DYMD_TEXT"):
+        text = _clean_text(serialized.get(key))
+        if text:
+            return text
+    code = _clean_text(serialized.get("DYMD"))
+    if code:
+        return _ARRIVAL_PURPOSE_LABELS.get(code.upper())
+    return None
+
+
 def _format_card_push_time(value: datetime) -> str:
     aware_value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     return aware_value.astimezone(_TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_card_push_time_short(value: datetime) -> str:
+    aware_value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware_value.astimezone(_TZ_SHANGHAI).strftime("%m-%d %H:%M")
 
 
 def _normalize_sap_date_token(value: Any) -> str | None:
@@ -147,6 +187,10 @@ def _extract_candidates(payloads: list[SapHanaVisitOrderPushIn]) -> list[VisitOr
         visit_order_no = _clean_text(serialized.get("DZDH"))
         if not hospital_code or not visit_order_no:
             continue
+        arrival_purpose = _clean_text(serialized.get("DYMD"))
+        arrival_purpose_label = _extract_arrival_purpose_label(serialized)
+        if _is_non_arrival_purpose(arrival_purpose, arrival_purpose_label):
+            continue
 
         triage_rows = _iter_triage_rows(serialized)
         if not triage_rows:
@@ -182,7 +226,7 @@ def _extract_candidates(payloads: list[SapHanaVisitOrderPushIn]) -> list[VisitOr
                     visit_date=_normalize_sap_date_token(serialized.get("CRTDT")),
                     visit_time=_normalize_sap_time_token(triage.get("FZSJ")) or _normalize_sap_time_token(serialized.get("CRTTM")),
                     department_code=_clean_text(serialized.get("JGKS")),
-                    arrival_purpose=_clean_text(serialized.get("DYMD")),
+                    arrival_purpose=arrival_purpose_label,
                     demand=_clean_text(serialized.get("REMARK_DZ")),
                 )
             )
@@ -320,36 +364,36 @@ async def _resolve_tenant_for_hospital(db: AsyncSession, hospital_code: str):
     return await resolve_wecom_tenant_config(db)
 
 
-def _build_card_description(candidate: VisitOrderAdvisorCandidate, staff: Staff, *, pushed_at: datetime) -> str:
-    customer = candidate.customer_name or "未填写"
+def _build_card_customer_text(candidate: VisitOrderAdvisorCandidate) -> str:
+    customer = candidate.customer_name or "未填写客户"
     if candidate.customer_code:
         customer = f"{customer}（{candidate.customer_code}）"
-    customer_type = candidate.customer_type_label or "未标识"
-    lines = [
-        f"客户：{customer}｜{customer_type}",
-        f"卡片推送时间：{_format_card_push_time(pushed_at)}",
-        f"到诊单：{candidate.visit_order_no}-{candidate.visit_order_seg}",
-        f"接诊人：{candidate.advisor_name or staff.name}",
-    ]
-    if candidate.department_code:
-        lines.append(f"科室：{candidate.department_code}")
-    if candidate.arrival_purpose:
-        lines.append(f"到院目的：{candidate.arrival_purpose}")
-    if candidate.demand:
-        lines.append(f"需求：{candidate.demand[:96]}")
-    lines.append("点击按钮后直接控制工牌开始或停止录音。")
-    return "\n".join(lines)
+    return customer
+
+
+def _build_card_title(candidate: VisitOrderAdvisorCandidate) -> str:
+    return f"{_build_card_customer_text(candidate)}｜{candidate.customer_type_label or '未标识'}"
+
+
+def _build_card_description(candidate: VisitOrderAdvisorCandidate, staff: Staff, *, pushed_at: datetime) -> str:
+    return "\n".join(
+        [
+            "请确认工牌在线后点击开始录音。",
+            "录音完成上传后，系统会自动关联该到诊单。",
+        ]
+    )
 
 
 def _build_card_horizontal_items(candidate: VisitOrderAdvisorCandidate, *, pushed_at: datetime) -> list[dict[str, str]]:
-    items = [
-        {"keyname": "客户类型", "value": candidate.customer_type_label or "未标识"},
+    order_display = f"{candidate.visit_order_no}-{candidate.visit_order_seg}"
+    return [
+        {"keyname": "客户姓名", "value": (candidate.customer_name or "未填写")[:32]},
+        {"keyname": "客户编号", "value": (candidate.customer_code or "未填写")[:32]},
+        {"keyname": "新老客标识", "value": (candidate.customer_type_label or "未标识")[:32]},
+        {"keyname": "到诊单号", "value": order_display[:32]},
+        {"keyname": "到院目的", "value": (candidate.arrival_purpose or "未填写")[:32]},
         {"keyname": "卡片推送时间", "value": _format_card_push_time(pushed_at)},
-        {"keyname": "到诊单", "value": f"{candidate.visit_order_no}-{candidate.visit_order_seg}"},
     ]
-    if candidate.arrival_purpose:
-        items.append({"keyname": "到院目的", "value": candidate.arrival_purpose[:32]})
-    return items
 
 
 async def notify_pushed_visit_order_advisors(
@@ -384,9 +428,9 @@ async def notify_pushed_visit_order_advisors(
             try:
                 response = await send_wecom_button_interaction_card(
                     to_user=wecom_user_id,
-                    title=f"新的待接诊客户｜{candidate.customer_type_label or '未标识'}",
+                    title=_build_card_title(candidate),
                     description=_build_card_description(candidate, staff, pushed_at=pushed_at),
-                    main_title_desc=f"{candidate.customer_name or '未填写客户'} · {candidate.visit_order_no}-{candidate.visit_order_seg}",
+                    main_title_desc=None,
                     horizontal_content_list=_build_card_horizontal_items(candidate, pushed_at=pushed_at),
                     task_id=task_id,
                     buttons=[
@@ -408,7 +452,7 @@ async def notify_pushed_visit_order_advisors(
                     raise
                 response = await send_wecom_textcard_message(
                     to_user=wecom_user_id,
-                    title=f"新的待接诊客户｜{candidate.customer_type_label or '未标识'}",
+                    title=_build_card_title(candidate),
                     description=_build_card_description(candidate, staff, pushed_at=pushed_at).replace("\n", "<br/>"),
                     url=_build_card_url(frontend_url=tenant.frontend_url, visit_order_no=candidate.visit_order_no),
                     btn_text="开始录音",

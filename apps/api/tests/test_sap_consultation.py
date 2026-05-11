@@ -23,6 +23,7 @@ from smart_badge_api.api.routes.sap_consultation_reviews import (
     _status_from_review_and_log,
 )
 from smart_badge_api.sap_consultation import (
+    _extract_sap_preview_text,
     _merge_analysis_results,
     _synthesize_visit_analysis_results,
     build_consultation_text,
@@ -205,10 +206,10 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
 
     assert "●备注人员：兰四秀" in text
     assert "●接诊人员：" not in text
-    assert "●顾客主诉：下巴后缩；希望更立体自然" in text
+    assert "●顾客主诉：①下巴后缩；\n ②希望更立体自然" in text
     assert "●本次预算：5000-8000" in text
-    assert "●顾客顾虑：担心不自然；担心超预算" in text
-    assert "●推荐方案：玻尿酸下巴填充（认可程度：犹豫）" in text
+    assert "●顾客顾虑：①担心不自然；\n ②担心超预算" in text
+    assert "●推荐方案：①玻尿酸下巴填充（认可程度：犹豫）" in text
     assert "●未成交原因：" not in text
     assert "●总结信息：\n1、客户基础信息：" in text
     assert "从消费基础看，既往医美经历相对空白；本次已出现5000-8000的预算或金额线索" in text
@@ -223,6 +224,75 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
     assert "一、客户基础信息" not in text
     assert "1. 人口属性" not in text
     assert "建议通过微信延续沟通" in text
+
+
+def test_build_consultation_text_wraps_multi_item_sap_fields() -> None:
+    result = {
+        "consultation_result": {
+            "chief_complaint_and_indications": {
+                "primary_demands": [
+                    "调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调",
+                    "改善鼻基底/中面部衔接，希望恢复平整自然",
+                ],
+            },
+            "deal_factors": {
+                "concerns": ["担心风险、副作用或安全性"],
+            },
+            "recommended_plan": {
+                "items": [
+                    {
+                        "plan": "先进行咬肌注射（减法），1.5-2个月后再做玻尿酸面部填充（加法），每侧一次一支，避免移位。",
+                        "dosage": "每侧1支",
+                        "course_or_frequency": "咬肌后1.5-2个月填充",
+                        "treatment_steps": ["先注射咬肌", "1.5-2个月后再进行填充"],
+                        "implementation_notes": "控制单侧单支剂量，避免移位",
+                        "acceptance": "接受",
+                    },
+                    {"plan": "玻尿酸填充塑形", "acceptance": "未明确回应"},
+                ],
+            },
+        },
+    }
+
+    text = build_consultation_text("李珍玉", result)
+
+    assert (
+        "●顾客主诉：①调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调；\n"
+        " ②改善鼻基底/中面部衔接，希望恢复平整自然"
+    ) in text
+    assert "●顾客顾虑：①担心风险、副作用或安全性" in text
+    assert (
+        "●推荐方案：①先进行咬肌注射（减法），1.5-2个月后再做玻尿酸面部填充（加法），每侧一次一支，避免移位。"
+        "（用量：每侧1支；疗程：咬肌后1.5-2个月填充；步骤：先注射咬肌；1.5-2个月后再进行填充；要点：控制单侧单支剂量，避免移位）（认可程度：接受）；\n"
+        " ②玻尿酸填充塑形（认可程度：未明确回应）"
+    ) in text
+
+
+def test_extract_existing_sap_preview_text_wraps_multi_item_fields() -> None:
+    result = {
+        "sap_consultation_preview": {
+            "payloads": [
+                {
+                    "text": (
+                        "●备注人员：李珍玉\n"
+                        "●顾客主诉：调整眶外C线/眉尾轮廓；改善鼻基底/中面部衔接\n"
+                        "●本次预算：无\n"
+                        "●顾客顾虑：担心风险；担心安全性\n"
+                        "●推荐方案：咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；玻尿酸填充塑形（认可程度：未明确回应）"
+                    )
+                }
+            ]
+        }
+    }
+
+    text = _extract_sap_preview_text(result)
+
+    assert "●顾客主诉：①调整眶外C线/眉尾轮廓；\n ②改善鼻基底/中面部衔接" in text
+    assert "●顾客顾虑：①担心风险；\n ②担心安全性" in text
+    assert (
+        "●推荐方案：①咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；\n"
+        " ②玻尿酸填充塑形（认可程度：未明确回应）"
+    ) in text
 
 
 def test_build_consultation_text_prefers_model_sap_summary_materials() -> None:
@@ -375,7 +445,7 @@ def test_build_consultation_text_only_includes_loss_reason_when_visit_order_fina
 
     text = build_consultation_text("张三", result, visit_order=visit_order)
 
-    assert "●未成交原因：仍需比较价格；需要与家人商量" in text
+    assert "●未成交原因：①仍需比较价格；\n ②需要与家人商量" in text
 
 
 def test_build_consultation_text_summary_includes_transcript_clues() -> None:
@@ -615,7 +685,7 @@ def test_build_consultation_text_dedupes_recommendation_names_in_sap_summary() -
     text = build_consultation_text("胡倩雯", result)
 
     recommendation_line = next(line for line in text.splitlines() if line.startswith("●推荐方案："))
-    assert recommendation_line == "●推荐方案：深层支撑+肉毒提升方案（认可程度：未接受，当下未选择）"
+    assert recommendation_line == "●推荐方案：①深层支撑+肉毒提升方案（认可程度：未接受，当下未选择）"
     assert "后续可补充肉毒或深层支撑加强效果" not in text
     assert "深层支撑+肉毒提升方案（认可程度：" not in text.split("●总结信息：", 1)[1]
 
@@ -926,6 +996,43 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
         asyncio.run(scenario())
     finally:
         get_settings.cache_clear()
+
+
+def test_build_consultation_text_uses_empty_demand_and_price_quote_fallback() -> None:
+    result = {
+        "customer_primary_demands": {
+            "items": [],
+            "summary": "\u5bf9\u8bdd\u4e2d\u672a\u8bc6\u522b\u51fa\u53ef\u6807\u51c6\u5316\u7684\u9002\u5e94\u75c7",
+        },
+        "standardized_indications": {
+            "items": [],
+            "summary": "\u5bf9\u8bdd\u4e2d\u672a\u8bc6\u522b\u51fa\u53ef\u6807\u51c6\u5316\u7684\u9002\u5e94\u75c7",
+        },
+        "consultation_result": {
+            "chief_complaint_and_indications": {
+                "summary": "\u5bf9\u8bdd\u4e2d\u672a\u8bc6\u522b\u51fa\u53ef\u6807\u51c6\u5316\u7684\u9002\u5e94\u75c7",
+                "primary_demands": [],
+                "standardized_indications": [],
+            },
+            "deal_factors": {},
+            "recommended_plan": {"items": []},
+        },
+    }
+    transcript = (
+        "\u6211\u4eec\u4fdd\u5229\u7684\u6c34\u6ef4\u578b\u554a\uff0c\u6211\u4eec\u6d3b\u52a8\u4e0b\u6765\u5c31\u662f69800"
+        "\uff0c\u5982\u679c\u662f\u5706\u5f62\u7684\u8bdd\uff0c\u6211\u4eec\u5c31\u662f46800\u3002"
+        "\u8fd9\u4e2a\u7231\u601d\u7f8e\u7684\u8bdd5\u4e07\u5427\u3002"
+        "\u6bcd\u63d0\u74e612\u4e078\u661f\u94bb14\u4e07\u5427\u3002"
+    )
+
+    text = build_consultation_text("\u5f20\u5bd2", result, transcript_full_text=transcript)
+
+    assert "\u25cf\u987e\u5ba2\u4e3b\u8bc9\uff1a\u65e0" in text
+    assert "\u5bf9\u8bdd\u4e2d\u672a\u8bc6\u522b\u51fa\u53ef\u6807\u51c6\u5316\u7684\u9002\u5e94\u75c7" not in text
+    assert "\u25cf\u63a8\u8350\u65b9\u6848\uff1a\u2460\u80f8\u5047\u4f53/\u9686\u80f8\u65b9\u6848\u62a5\u4ef7" in text
+    assert "69800" in text
+    assert "46800" in text
+    assert "5\u4e07" in text
 
 
 def test_generate_sap_consultation_payloads_merges_multiple_recordings_for_same_visit(monkeypatch) -> None:

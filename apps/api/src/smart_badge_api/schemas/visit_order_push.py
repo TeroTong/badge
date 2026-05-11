@@ -36,6 +36,7 @@ class SapHanaVisitOrderPushIn(BaseModel):
     kusta_dq: str | None = Field(None, alias="KUSTA_DQ")
     dzly: str | None = Field(None, alias="DZLY")
     dymd: str | None = Field(None, alias="DYMD")
+    dymd_txt: str | None = Field(None, alias="DYMD_TXT")
     dztyp: str | None = Field(None, alias="DZTYP")
     remark_dz: str | None = Field(None, alias="REMARK_DZ")
     jgks: str | None = Field(None, alias="JGKS")

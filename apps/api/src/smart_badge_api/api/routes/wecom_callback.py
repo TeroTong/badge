@@ -29,7 +29,6 @@ from smart_badge_api.visit_order_card_recording_link import mark_visit_order_car
 from smart_badge_api.wecom import (
     WecomTenantConfig,
     legacy_wecom_tenant_config,
-    send_wecom_text_message,
     update_wecom_button_interaction_card,
     update_wecom_template_card_button,
 )
@@ -44,6 +43,14 @@ router = APIRouter(prefix="/wecom/callback", tags=["企业微信回调"])
 logger = logging.getLogger("smart_badge.wecom_callback")
 _ACTION_KEY_PATTERN = re.compile(r"visit_order_recording__(?:start|stop|confirm|cancel|retry|done)__[A-Za-z0-9_.@-]+")
 _TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_ARRIVAL_PURPOSE_LABELS = {
+    "A": "咨询",
+    "B": "治疗",
+    "C": "手术",
+    "D": "复查",
+    "X": "未到院购买",
+    "Z": "其他",
+}
 
 
 @dataclass(slots=True)
@@ -112,6 +119,18 @@ def _format_card_push_time(value: object) -> str:
     return aware_value.astimezone(_TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _arrival_purpose_text(order: VisitOrder | None) -> str:
+    if order is None:
+        return "未填写"
+    text = _clean(getattr(order, "dymd_txt", None))
+    if text:
+        return text
+    code = _clean(getattr(order, "dymd", None))
+    if code:
+        return _ARRIVAL_PURPOSE_LABELS.get(code.upper(), code)
+    return "未填写"
+
+
 async def _load_card_visit_context(
     db: AsyncSession,
     log_id: str | None,
@@ -142,6 +161,7 @@ async def _load_card_visit_context(
     visit_order_seg = _clean(getattr(order, "dzseg", None)) or _clean(notification.visit_order_seg)
     customer_name = _clean(getattr(order, "ninam", None)) or _clean(notification.customer_name) or "-"
     customer_code = _clean(getattr(order, "kunr", None)) or _clean(notification.customer_code) or "-"
+    arrival_purpose = _arrival_purpose_text(order)
     push_time = _format_card_push_time(notification.sent_at or notification.created_at)
     customer_type = (
         _customer_type_label(getattr(order, "kut30_dq_txt", None))
@@ -154,11 +174,12 @@ async def _load_card_visit_context(
     order_display = visit_order_no if not visit_order_seg else f"{visit_order_no}-{visit_order_seg}"
     subtitle = f"到诊单：{order_display}"
     horizontal_items: list[dict[str, str | int]] = [
-        {"keyname": "到诊单号", "value": order_display},
         {"keyname": "客户姓名", "value": customer_name},
         {"keyname": "客户编号", "value": customer_code},
+        {"keyname": "新老客标识", "value": customer_type},
+        {"keyname": "到诊单号", "value": order_display},
+        {"keyname": "到院目的", "value": arrival_purpose},
         {"keyname": "卡片推送时间", "value": push_time},
-        {"keyname": "新老客", "value": customer_type},
     ]
     return title, subtitle, horizontal_items
 
@@ -514,25 +535,50 @@ async def _update_card_to_confirm_restart(
     )
 
 
-async def _send_text_safe(
+async def _update_card_to_message(
+    *,
+    db: AsyncSession,
     tenant: WecomTenantConfig,
     userid: str,
-    content: str,
-    *,
-    response_code: str | None = None,
-    card_button_text: str = "已处理",
+    response_code: str | None,
+    log_id: str,
+    title: str,
+    description: str,
+    action: str = "start",
+    buttons: list[dict[str, str | int]] | None = None,
 ) -> None:
-    await _send_card_button_feedback(tenant, userid, response_code, card_button_text)
-    try:
-        response = await send_wecom_text_message(
-            to_user=userid,
-            content=content,
-            tenant=tenant,
-            enable_duplicate_check=False,
-        )
-        logger.warning("send wecom callback text ok user=%s response=%s", _mask(userid), response)
-    except Exception:
-        logger.exception("send wecom callback text failed user=%s", _mask(userid))
+    await _update_card_with_button(
+        db=db,
+        tenant=tenant,
+        userid=userid,
+        response_code=response_code,
+        title=title,
+        description=description,
+        log_id=log_id,
+        action=action,
+        buttons=buttons or _start_stop_buttons(log_id),
+    )
+
+
+async def _update_card_to_cancelled(
+    *,
+    db: AsyncSession,
+    tenant: WecomTenantConfig,
+    userid: str,
+    response_code: str | None,
+    log_id: str,
+) -> None:
+    await _update_card_to_message(
+        db=db,
+        tenant=tenant,
+        userid=userid,
+        response_code=response_code,
+        log_id=log_id,
+        title="已取消开始录音",
+        description="已取消本次开始录音操作。需要录音时，可再次点击开始录音。",
+        action="start",
+        buttons=_start_stop_buttons(log_id),
+    )
 
 
 def _http_error_message(exc: HTTPException) -> str:
@@ -546,17 +592,22 @@ async def _load_recording_context_or_notify(
     tenant: WecomTenantConfig,
     userid: str,
     *,
+    log_id: str,
     response_code: str | None = None,
 ):
     try:
         return await _require_my_badge_recording_context(db, user)
     except HTTPException as exc:
-        await _send_text_safe(
-            tenant,
-            userid,
-            _http_error_message(exc),
+        await _update_card_to_message(
+            db=db,
+            tenant=tenant,
+            userid=userid,
             response_code=response_code,
-            card_button_text="无法控制",
+            log_id=log_id,
+            title="无法控制工牌",
+            description=_http_error_message(exc),
+            action="done",
+            buttons=[_recording_card_button("无法控制", "done", log_id, style=2)],
         )
         return None
 
@@ -624,7 +675,14 @@ async def _handle_start_action(
         )
         return
 
-    context = await _load_recording_context_or_notify(db, user, tenant, userid, response_code=response_code)
+    context = await _load_recording_context_or_notify(
+        db,
+        user,
+        tenant,
+        userid,
+        log_id=log_id,
+        response_code=response_code,
+    )
     if context is None:
         return
     if context.online is False:
@@ -634,13 +692,6 @@ async def _handle_start_action(
             userid=userid,
             response_code=response_code,
             log_id=log_id,
-        )
-        await _send_text_safe(
-            tenant,
-            userid,
-            "工牌未开机，请先开机后再开始录音。",
-            response_code=None,
-            card_button_text="工牌离线",
         )
         return
     if context.is_recording:
@@ -668,13 +719,18 @@ async def _handle_start_action(
             response_code=response_code,
             log_id=log_id,
         )
-    await _send_text_safe(
-        tenant,
-        userid,
-        message if ok else f"开始录音失败：{message}",
-        response_code=None if ok else response_code,
-        card_button_text="已开始录音" if ok else "启动失败",
-    )
+    if not ok:
+        await _update_card_to_message(
+            db=db,
+            tenant=tenant,
+            userid=userid,
+            response_code=response_code,
+            log_id=log_id,
+            title="开始录音失败",
+            description=f"开始录音失败：{message}",
+            action="start",
+            buttons=_start_stop_buttons(log_id),
+        )
 
 
 async def _handle_reused_start_action(
@@ -688,14 +744,17 @@ async def _handle_reused_start_action(
 ) -> None:
     context = await _load_recording_context_silent(db, user)
     if context is not None and context.online is not False and context.is_recording:
-        await _update_card_to_recording(
+        await _update_card_to_message(
             db=db,
             tenant=tenant,
             userid=userid,
             response_code=response_code,
             log_id=log_id,
+            title="本卡片已启动过录音",
+            description="这张到诊卡片已经成功发起过一次录音，不能再次开始新的录音。当前工牌仍在录音，可点击停止录音结束本次录音。",
+            action="stop",
+            buttons=[_recording_card_button("停止录音", "stop", log_id, style=2)],
         )
-        message = "这张到诊卡片已经成功发起过一次录音，不能再次开始新的录音。当前工牌仍在录音，可点击停止录音结束本次录音。"
     else:
         await _update_card_to_stopped(
             db=db,
@@ -704,13 +763,6 @@ async def _handle_reused_start_action(
             response_code=response_code,
             log_id=log_id,
         )
-        message = "这张到诊卡片已经成功发起过一次录音，不能再次开始新的录音。"
-    await _send_text_safe(
-        tenant,
-        userid,
-        message,
-        response_code=None,
-    )
 
 
 async def _handle_stop_action(
@@ -723,7 +775,14 @@ async def _handle_stop_action(
     log_id: str,
     response_code: str | None = None,
 ) -> None:
-    context = await _load_recording_context_or_notify(db, user, tenant, userid, response_code=response_code)
+    context = await _load_recording_context_or_notify(
+        db,
+        user,
+        tenant,
+        userid,
+        log_id=log_id,
+        response_code=response_code,
+    )
     if context is None:
         return
     if context.online is False:
@@ -733,13 +792,6 @@ async def _handle_stop_action(
             userid=userid,
             response_code=response_code,
             log_id=log_id,
-        )
-        await _send_text_safe(
-            tenant,
-            userid,
-            "工牌未开机或未联网，无法停止录音。请先确认工牌已开机联网。",
-            response_code=None,
-            card_button_text="工牌离线",
         )
         return
     if not context.is_recording:
@@ -759,12 +811,6 @@ async def _handle_stop_action(
                 response_code=response_code,
                 log_id=log_id,
             )
-        await _send_text_safe(
-            tenant,
-            userid,
-            "当前工牌未处于录音状态，无需停止。",
-            response_code=None,
-        )
         return
 
     ok, message = await _control_recording(db=db, user=user, context=context, request=request, action="stop")
@@ -776,13 +822,18 @@ async def _handle_stop_action(
             response_code=response_code,
             log_id=log_id,
         )
-    await _send_text_safe(
-        tenant,
-        userid,
-        message if ok else f"停止录音失败：{message}",
-        response_code=None if ok else response_code,
-        card_button_text="已停止录音" if ok else "停止失败",
-    )
+    else:
+        await _update_card_to_message(
+            db=db,
+            tenant=tenant,
+            userid=userid,
+            response_code=response_code,
+            log_id=log_id,
+            title="停止录音失败",
+            description=f"停止录音失败：{message}",
+            action="stop",
+            buttons=[_recording_card_button("停止录音", "stop", log_id, style=2)],
+        )
 
 
 async def _handle_confirm_action(
@@ -806,7 +857,14 @@ async def _handle_confirm_action(
         )
         return
 
-    context = await _load_recording_context_or_notify(db, user, tenant, userid, response_code=response_code)
+    context = await _load_recording_context_or_notify(
+        db,
+        user,
+        tenant,
+        userid,
+        log_id=log_id,
+        response_code=response_code,
+    )
     if context is None:
         return
     if context.online is False:
@@ -817,26 +875,33 @@ async def _handle_confirm_action(
             response_code=response_code,
             log_id=log_id,
         )
-        await _send_text_safe(
-            tenant,
-            userid,
-            "工牌未开机，请先开机后再开始录音。",
-            response_code=None,
-            card_button_text="工牌离线",
-        )
         return
     if context.is_recording:
         ok, message = await _control_recording(db=db, user=user, context=context, request=request, action="stop")
         if not ok:
-            await _send_text_safe(
-                tenant,
-                userid,
-                f"停止当前录音失败：{message}",
+            await _update_card_to_message(
+                db=db,
+                tenant=tenant,
+                userid=userid,
                 response_code=response_code,
-                card_button_text="停止失败",
+                log_id=log_id,
+                title="停止当前录音失败",
+                description=f"停止当前录音失败：{message}",
+                action="confirm",
+                buttons=[
+                    _recording_card_button("停止并开始", "confirm", log_id, style=1),
+                    _recording_card_button("取消", "cancel", log_id, style=2),
+                ],
             )
             return
-        context = await _load_recording_context_or_notify(db, user, tenant, userid, response_code=response_code)
+        context = await _load_recording_context_or_notify(
+            db,
+            user,
+            tenant,
+            userid,
+            log_id=log_id,
+            response_code=response_code,
+        )
         if context is None:
             return
     ok, message = await _control_recording(db=db, user=user, context=context, request=request, action="start")
@@ -855,13 +920,18 @@ async def _handle_confirm_action(
             response_code=response_code,
             log_id=log_id,
         )
-    await _send_text_safe(
-        tenant,
-        userid,
-        message if ok else f"开始录音失败：{message}",
-        response_code=None if ok else response_code,
-        card_button_text="已开始录音" if ok else "启动失败",
-    )
+    else:
+        await _update_card_to_message(
+            db=db,
+            tenant=tenant,
+            userid=userid,
+            response_code=response_code,
+            log_id=log_id,
+            title="开始录音失败",
+            description=f"开始录音失败：{message}",
+            action="start",
+            buttons=_start_stop_buttons(log_id),
+        )
 
 
 async def _handle_retry_action(
@@ -890,12 +960,6 @@ async def _handle_retry_action(
         userid=userid,
         response_code=response_code,
         log_id=log_id,
-    )
-    await _send_text_safe(
-        tenant,
-        userid,
-        "已恢复“开始录音”按钮，请确认工牌在线后再次点击开始录音。",
-        response_code=None,
     )
 
 
@@ -934,22 +998,26 @@ async def _process_button_event(
     _, user = await _load_user_by_wecom_userid(db, userid=userid, corp_id=callback.tenant.corp_id)
     if user is None:
         logger.warning("wecom recording callback user not bound user=%s corp=%s", _mask(userid), callback.tenant.corp_id)
-        await _send_text_safe(callback.tenant, userid, "当前企业微信账号未绑定工牌系统账号，无法控制工牌录音。")
-        return
-
-    if action == "cancel":
-        await _update_card_to_start_retry(
+        await _update_card_to_message(
             db=db,
             tenant=callback.tenant,
             userid=userid,
             response_code=response_code,
             log_id=log_id,
+            title="无法控制工牌",
+            description="当前企业微信账号未绑定工牌系统账号，无法控制工牌录音。",
+            action="done",
+            buttons=[_recording_card_button("无法控制", "done", log_id, style=2)],
         )
-        await _send_text_safe(
-            callback.tenant,
-            userid,
-            "已取消开始录音。",
-            response_code=None,
+        return
+
+    if action == "cancel":
+        await _update_card_to_cancelled(
+            db=db,
+            tenant=callback.tenant,
+            userid=userid,
+            response_code=response_code,
+            log_id=log_id,
         )
         return
     elif action == "start":
@@ -992,12 +1060,16 @@ async def _process_button_event(
             response_code=response_code,
         )
     elif action == "done":
-        await _send_text_safe(
-            callback.tenant,
-            userid,
-            "这张到诊卡片已完成一次录音控制，不能再次开始新的录音。",
+        await _update_card_to_message(
+            db=db,
+            tenant=callback.tenant,
+            userid=userid,
             response_code=response_code,
-            card_button_text="录音已完成",
+            log_id=log_id,
+            title="录音已完成",
+            description="这张到诊卡片已完成一次录音控制，不能再次开始新的录音。",
+            action="done",
+            buttons=[_recording_card_button("录音已完成", "done", log_id, style=2)],
         )
 
 
