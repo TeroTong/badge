@@ -13,6 +13,8 @@ from smart_badge_api.db.base import Base
 from smart_badge_api.db.models import AnalysisTask, Device, Recording, Staff, Transcript
 from smart_badge_api.device_binding import bind_staff_to_device
 from smart_badge_api.dingtalk_audio_sync import (
+    _post_asr_quality_decision,
+    _post_analysis_quality_decision,
     _ensure_stage_paths,
     _manifest_path,
     _pre_asr_quality_decision,
@@ -448,6 +450,135 @@ def test_sync_dingtalk_audio_files_skips_when_manifest_exists(monkeypatch, tmp_p
                 assert result.skipped == 1
                 assert result.items[0].status == "skipped"
                 assert "已暂存" in result.items[0].message
+        finally:
+            get_settings.cache_clear()
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_sync_dingtalk_audio_files_reconciles_analyzed_manifest_when_recording_stale_filtered(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setenv("DINGTALK_AUDIO_STAGE_DIR", "dingtalk_pending")
+        get_settings.cache_clear()
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            paths = _ensure_stage_paths()
+            audio_dir = paths.audio_dir / "SNFIX"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            raw_audio = audio_dir / "dingtalk_SNFIX_iot_iot_cloud_5940266.mp3"
+            raw_audio.write_bytes(b"ID3demo")
+
+            stage_key = _stage_key("SNFIX", "iot:iot_cloud_5940266")
+            transcript_path = paths.transcript_dir / f"{stage_key}.transcript.json"
+            result_path = paths.result_dir / f"{stage_key}.result.json"
+            analysis_input_path = paths.analysis_input_dir / f"{stage_key}.json"
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            analysis_input_path.parent.mkdir(parents=True, exist_ok=True)
+
+            utterances = [
+                {"speaker": "customer", "text": "我想让鼻尖高一点", "begin_ms": 0, "end_ms": 1200},
+                {"speaker": "consultant", "text": "可以看鼻部材料和支撑力", "begin_ms": 1400, "end_ms": 3000},
+            ]
+            transcript_path.write_text(
+                json.dumps(
+                    {
+                        "stageKey": stage_key,
+                        "deviceCode": "SNFIX",
+                        "fileId": "iot:iot_cloud_5940266",
+                        "asrProvider": "tencent_asr",
+                        "durationMs": 3000,
+                        "fullText": "我想让鼻尖高一点 可以看鼻部材料和支撑力",
+                        "utterances": utterances,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            analysis_input_path.write_text(
+                json.dumps({"payload": {"transcribeResult": []}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                json.dumps(_analysis_result_with_indication(86), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            manifest = {
+                "stageKey": stage_key,
+                "deviceCode": "SNFIX",
+                "fileId": "iot:iot_cloud_5940266",
+                "remoteFileName": "origin.mp3",
+                "stagedFileName": raw_audio.name,
+                "audioPath": str(raw_audio),
+                "fileSize": 7,
+                "durationMs": 3000,
+                "durationSeconds": 3,
+                "remoteCreatedAt": "2026-05-11T08:07:30+00:00",
+                "status": "analyzed",
+                "createdAt": "2026-05-11T08:08:00+00:00",
+                "updatedAt": "2026-05-11T08:09:00+00:00",
+                "transcriptPath": str(transcript_path),
+                "analysisInputPath": str(analysis_input_path),
+                "analysisResultPath": str(result_path),
+            }
+            _manifest_path(paths, stage_key).write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+            async with session_factory() as db:
+                staff = Staff(name="黄雅洁", external_account="65019999", permission_role="staff", is_active=True)
+                db.add(staff)
+                await db.flush()
+                db.add(Device(name="测试工牌", device_code="SNFIX", staff_id=staff.id, is_active=True))
+                db.add(
+                    Recording(
+                        file_name=raw_audio.name,
+                        file_path=str(raw_audio.relative_to(get_settings().upload_path)),
+                        status="filtered",
+                        staff_id=staff.id,
+                    )
+                )
+                await db.commit()
+
+                with patch(
+                    "smart_badge_api.dingtalk_audio_sync.dvi_list_audio_files",
+                    AsyncMock(
+                        return_value={
+                            "result": [
+                                {
+                                    "fileId": "iot:iot_cloud_5940266",
+                                    "fileName": "origin.mp3",
+                                    "duration": 3000,
+                                    "createTime": 1778486850000,
+                                }
+                            ]
+                        }
+                    ),
+                ):
+                    result = await sync_dingtalk_audio_files(db, lookback_minutes=60)
+
+                assert result.imported == 0
+                assert result.skipped == 1
+
+                recording = (await db.execute(select(Recording))).scalars().one()
+                transcript = (await db.execute(select(Transcript))).scalars().one()
+                task = (await db.execute(select(AnalysisTask))).scalars().one()
+
+                assert recording.status == "analyzed"
+                assert transcript.status == "completed"
+                assert transcript.full_text == "我想让鼻尖高一点 可以看鼻部材料和支撑力"
+                assert task.status == "done"
+                assert task.file_name == f"recording_{recording.id}.json"
         finally:
             get_settings.cache_clear()
             await engine.dispose()
@@ -1072,6 +1203,51 @@ def test_execute_dingtalk_recording_pipeline_allows_single_speaker_consultation_
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_post_asr_quality_allows_low_keyword_nose_and_ear_business_scene(monkeypatch) -> None:
+    monkeypatch.setenv("DINGTALK_AUDIO_MIN_UTTERANCE_COUNT", "4")
+    monkeypatch.setenv("DINGTALK_AUDIO_MIN_TRANSCRIPT_CHARS", "40")
+    monkeypatch.setenv("DINGTALK_AUDIO_REQUIRE_MULTI_SPEAKER", "true")
+    monkeypatch.setenv("DINGTALK_AUDIO_REQUIRE_CUSTOMER_ROLE", "true")
+    monkeypatch.setenv("DINGTALK_AUDIO_INTERNAL_KEYWORD_THRESHOLD", "2")
+    get_settings.cache_clear()
+    try:
+        utterances = [
+            {"speaker": "SPEAKER_00", "text": "就是想让鼻尖高一点。"},
+            {"speaker": "SPEAKER_00", "text": "侧面看鼻背要修一点点，但是不能打太多。"},
+            {"speaker": "SPEAKER_00", "text": "如果打耳朵的话大概要几次？"},
+            {"speaker": "SPEAKER_00", "text": "材料可以用艾拉斯提，支撑力会更好。"},
+            {"speaker": "SPEAKER_00", "text": "减龄材料比较软，没什么支撑力。"},
+            {"speaker": "SPEAKER_00", "text": "那我到时候再过来详细沟通，看看鼻部和耳朵分别需要多少用量。"},
+        ]
+        full_text = " ".join(item["text"] for item in utterances)
+
+        decision = _post_asr_quality_decision(utterances, full_text)
+
+        assert decision.passed is True
+    finally:
+        get_settings.cache_clear()
+
+
+def test_post_analysis_keeps_result_with_customer_demand_business_signals() -> None:
+    decision = _post_analysis_quality_decision(
+        {
+            "standardized_indications": {"items": []},
+            "customer_primary_demands": {"items": []},
+            "customer_demands": {
+                "focus_areas": [
+                    {"area": "耳部塑形", "surface_need": "耳朵稍微长出来一点"},
+                    {"area": "下巴衔接", "surface_need": "改善衔接不自然"},
+                ]
+            },
+            "sap_summary_materials": {"summary": "客户进行玻尿酸微调塑形，使用艾拉斯提。"},
+        },
+        full_text="有两支玻尿酸需要用一下，艾拉斯提和碘盐。耳朵还要不要再长出来一点点？",
+    )
+
+    assert decision.passed is True
+    assert "业务信号" in (decision.reason or "")
 
 
 def test_execute_dingtalk_recording_pipeline_filters_internal_two_speaker_transcript(monkeypatch, tmp_path) -> None:

@@ -155,6 +155,8 @@ def _priority_for_group(group_type: str | None) -> int:
 def _is_tencent_hotword_group_enabled(group: HotwordGroup) -> bool:
     group_type = str(group.group_type or "").strip()
     descriptor = f"{group_type} {group.name or ''} {group.source_label or ''}".casefold()
+    if any(marker.casefold() in descriptor for marker in ("ASR自动挖词", "自动挖词候选")):
+        return False
     if group_type in {"competitor", "竞品"}:
         return True
     if any(

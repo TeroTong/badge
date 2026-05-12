@@ -1905,6 +1905,27 @@ a {
   gap: 10px;
 }
 
+.ad-recommend-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ad-recommend-section + .ad-recommend-section {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(148, 163, 184, 0.38);
+}
+
+.ad-recommend-section__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
 .ad-demand-item--recommend {
   background: rgba(255, 255, 255, 0.78);
 }
@@ -30713,7 +30734,8 @@ a {
   min-height: 42px;
 }
 
-.wc-sap-review-field--recommendedPlan .wc-sap-review-field__control {
+.wc-sap-review-field--recommendedPlan .wc-sap-review-field__control,
+.wc-sap-review-field--seedPlan .wc-sap-review-field__control {
   min-height: 132px;
 }
 

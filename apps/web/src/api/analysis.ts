@@ -110,6 +110,14 @@ export type ConsultationResult = {
       evidence: string | null
     }[]
   }
+  seed_plan: {
+    summary: string
+    items: {
+      plan: string
+      acceptance: string | null
+      evidence: string | null
+    }[]
+  }
   deal_outcome: {
     status: string
     summary: string
@@ -188,6 +196,10 @@ export type AnalysisDetail = AnalysisSummary & {
     items: PrimaryDemandItem[]
   } | null
   staff_recommendations: {
+    summary: string
+    items: StaffRecommendationItem[]
+  } | null
+  staff_seed_recommendations: {
     summary: string
     items: StaffRecommendationItem[]
   } | null

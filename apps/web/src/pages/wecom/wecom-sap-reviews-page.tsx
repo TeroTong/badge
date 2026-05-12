@@ -25,6 +25,7 @@ const CONSULTATION_FIELDS = [
   { key: 'budget', label: '本次预算', rows: 1 },
   { key: 'concerns', label: '顾客顾虑', rows: 2 },
   { key: 'recommendedPlan', label: '推荐方案', rows: 5 },
+  { key: 'seedPlan', label: '种草方案', rows: 4 },
   { key: 'summary', label: '总结信息', rows: 6 },
 ] as const
 const STATUS_FILTER_OPTIONS = [
@@ -44,6 +45,7 @@ const FIELD_LABEL_TO_KEY: Record<string, ConsultationFieldKey> = {
   本次预算: 'budget',
   顾客顾虑: 'concerns',
   推荐方案: 'recommendedPlan',
+  种草方案: 'seedPlan',
   总结信息: 'summary',
 }
 
@@ -53,6 +55,7 @@ function createEmptyConsultationFields(): ConsultationFields {
     budget: '',
     concerns: '',
     recommendedPlan: '',
+    seedPlan: '',
     summary: '',
   }
 }
@@ -181,7 +184,7 @@ function parseConsultationBody(text: string) {
 
   for (const rawLine of String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')) {
     const line = rawLine.trimEnd()
-    const match = line.trimStart().match(/^●\s*(顾客主诉|本次预算|顾客顾虑|推荐方案|总结信息)\s*[：:]\s*(.*)$/)
+    const match = line.trimStart().match(/^●\s*(顾客主诉|本次预算|顾客顾虑|推荐方案|种草方案|总结信息)\s*[：:]\s*(.*)$/)
     if (match) {
       activeKey = FIELD_LABEL_TO_KEY[match[1]]
       present[activeKey] = true

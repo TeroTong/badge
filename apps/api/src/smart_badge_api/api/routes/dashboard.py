@@ -48,6 +48,7 @@ from smart_badge_api.db.models import (
     Transcript,
     Visit,
     VisitOrder,
+    WecomTenant,
 )
 from smart_badge_api.db.models import User
 from smart_badge_api.db.session import get_db
@@ -59,6 +60,34 @@ from smart_badge_api.tag_catalog_reference import (
 
 router = APIRouter(prefix="/dashboard", tags=["仪表盘"])
 _DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
+DEFAULT_HOSPITAL_CODE = "6501"
+
+
+def _hospital_code_sort_key(code: str, default_hospital_code: str | None = None) -> tuple[int, int, str]:
+    normalized = str(code or "").strip()
+    normalized_default = str(default_hospital_code or "").strip()
+    return (
+        0 if normalized_default and normalized == normalized_default else 1,
+        0 if normalized == DEFAULT_HOSPITAL_CODE else 1,
+        normalized,
+    )
+
+
+async def _load_default_hospital_code(db: AsyncSession) -> str | None:
+    row = (
+        await db.execute(
+            select(WecomTenant.default_hospital_code)
+            .where(
+                WecomTenant.is_default.is_(True),
+                WecomTenant.is_active.is_(True),
+                WecomTenant.default_hospital_code.is_not(None),
+                WecomTenant.default_hospital_code != "",
+            )
+            .order_by(WecomTenant.updated_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return str(row or "").strip() or None
 
 
 class ScoreDistItem(BaseModel):
@@ -1193,6 +1222,8 @@ async def _load_visible_hospitals(
     ).all()
 
     hospital_codes = [str(hospital_code).strip() for (hospital_code,) in rows if hospital_code]
+    default_hospital_code = await _load_default_hospital_code(db)
+    hospital_codes.sort(key=lambda code: _hospital_code_sort_key(code, default_hospital_code))
     hospital_name_map = await load_hospital_name_map(hospital_codes)
 
     options = [

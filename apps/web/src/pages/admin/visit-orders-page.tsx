@@ -38,7 +38,7 @@ function exportVisitOrders(rows: VisitOrder[]) {
     '到诊单号', '行项目', '数据日期', '机构编码',
     '客户编码', '客户姓名', '预约单号', '预约医生编码', '会员星级',
     '客户性别', '客户类型', '30天类型', '会员状态',
-    '分诊顾问编码', '分诊顾问姓名', '现场咨询编码', '现场咨询姓名',
+    '分诊顾问编码', '分诊顾问姓名', '现场咨询编码', '现场咨询姓名', '科室顾问编码', '科室顾问姓名',
     '客服编码', '当前顾问编码', '当前客服编码',
     '分诊单号', '分诊时间', '分诊状态', '等待时长', '补划扣', '顾问助理',
     '机构科室',
@@ -50,7 +50,7 @@ function exportVisitOrders(rows: VisitOrder[]) {
     r.dzdh, r.dzseg ?? '', r.sjrq ?? '', r.jgbm ?? '',
     r.kunr ?? '', r.ninam ?? '', r.yydh ?? '', r.yyuer ?? '', r.kulvl_dq ?? '',
     r.kusex_txt ?? '', r.kut30_dq_txt ?? '', r.kutyp_dq_txt ?? '', r.kusta_dq_txt ?? '',
-    r.fzuer ?? '', r.fzuer_long ?? '', r.advxc ?? '', r.advxc_long ?? '',
+    r.fzuer ?? '', r.fzuer_long ?? '', r.advxc ?? '', r.advxc_long ?? '', r.ksgw ?? '', r.ksgw_long ?? '',
     r.vipkf ?? '', r.d_fzuer ?? '', r.d_vipkf ?? '',
     r.fzdh ?? '', r.fzsj ?? '', r.fzsta_txt ?? '', r.ddsc ?? '', r.bhkx ?? '', r.assxc ?? '',
     r.jgks_txt ?? r.jgks ?? '',
@@ -330,11 +330,12 @@ export default function VisitOrdersPage() {
     },
     {
       title: '顾问信息',
-      width: 168,
+      width: 184,
       render: (_value, row) => (
         <div className="visit-order-cell">
           <VisitOrderInfoRow label="美学顾问" value={row.fzuer_long || row.fzuer || '-'} emphasis />
           <VisitOrderInfoRow label="现场咨询" value={row.advxc_long || row.advxc || '-'} />
+          <VisitOrderInfoRow label="科室顾问" value={row.ksgw_long || row.ksgw || '-'} />
           <VisitOrderInfoRow label="客服" value={row.vipkf || row.d_vipkf || '-'} />
         </div>
       ),
@@ -524,6 +525,7 @@ export default function VisitOrdersPage() {
           <Descriptions.Item label="机构编码">{matchingVisitOrder?.jgbm || '-'}</Descriptions.Item>
           <Descriptions.Item label="机构科室">{matchingVisitOrder?.jgks_txt || matchingVisitOrder?.jgks || '-'}</Descriptions.Item>
           <Descriptions.Item label="顾问编号">{matchData?.advisor_code || '-'}</Descriptions.Item>
+          <Descriptions.Item label="科室顾问">{matchingVisitOrder?.ksgw_long || matchingVisitOrder?.ksgw || '-'}</Descriptions.Item>
           <Descriptions.Item label="当前已绑定录音">
             {matchData?.linked_recording_ids.length ? `${matchData.linked_recording_ids.length} 条` : '暂无'}
           </Descriptions.Item>

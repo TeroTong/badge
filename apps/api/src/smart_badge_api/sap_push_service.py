@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import Recording, RecordingVisitAnalysis, SapConsultationReview, SapPushLog
+from smart_badge_api.db.models import AnalysisTask, Recording, RecordingVisitAnalysis, SapConsultationReview, SapPushLog
 from smart_badge_api.db.session import _session_factory
 from smart_badge_api.sap_consultation import generate_sap_consultation_payloads
 from smart_badge_api.sap_push_notifications import notify_sap_push_result
@@ -304,6 +304,27 @@ def summarize_sap_push_log_result(log: SapPushLog | dict[str, Any]) -> dict[str,
     }
 
 
+async def _analysis_quality_review_reason(db: AsyncSession, recording_id: str) -> str | None:
+    task = (
+        await db.execute(
+            select(AnalysisTask)
+            .where(
+                AnalysisTask.file_name == f"recording_{recording_id}.json",
+                AnalysisTask.status == "done",
+            )
+            .order_by(AnalysisTask.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if task is None or not isinstance(task.result, dict):
+        return None
+    quality = task.result.get("analysis_quality")
+    if not isinstance(quality, dict) or not quality.get("requires_review"):
+        return None
+    issues = [str(item).strip() for item in quality.get("issues") or [] if str(item or "").strip()]
+    return "；".join(issues[:3]) or "质量门槛未通过"
+
+
 async def create_sap_push_log(
     db: AsyncSession,
     recording_id: str,
@@ -316,6 +337,10 @@ async def create_sap_push_log(
     preview = await generate_sap_consultation_payloads(db, recording_id, target_visit_id=target_visit_id)
     if "error" in preview:
         raise SapPushPreparationError(preview["error"], preview["message"])
+    if trigger_mode.startswith("auto"):
+        review_reason = await _analysis_quality_review_reason(db, recording_id)
+        if review_reason:
+            raise SapPushPreparationError("analysis_requires_review", f"分析结果需要人工复核：{review_reason}")
 
     settings = get_settings()
     recording = await db.get(Recording, recording_id)

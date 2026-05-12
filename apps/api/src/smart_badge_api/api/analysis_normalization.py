@@ -392,6 +392,95 @@ def _looks_like_explicit_family_decision(text: str) -> bool:
     )
 
 
+_GENERIC_DECISION_FACTOR_LABELS = {"特殊身份", "支付/流程限制", "时间/到院限制", "治疗条件限制"}
+
+
+_GENERIC_DECISION_FACTOR_LABELS = _GENERIC_DECISION_FACTOR_LABELS | {
+    "支付流程限制",
+    "流程限制",
+    "时间到院限制",
+    "到院限制",
+}
+
+
+def _decision_factor_detail_from_text(factor: str, text: str) -> str:
+    normalized_factor = _normalize_text(factor)
+    normalized_text = _normalize_text(text)
+    if not normalized_factor:
+        return ""
+    if not normalized_text:
+        return "" if normalized_factor in _GENERIC_DECISION_FACTOR_LABELS else normalized_factor
+    if normalized_factor == "生理期" or any(keyword in normalized_text for keyword in ("生理期", "经期", "月经", "大姨妈", "姨妈", "例假", "来事")):
+        return "客户处于生理期，治疗时间受限"
+    if normalized_factor == "特殊身份" or any(keyword in normalized_text for keyword in ("竞对同行", "竞品机构", "竞对机构", "同行机构", "黑名单", "黑名单人物")):
+        if any(keyword in normalized_text for keyword in ("黑名单", "黑名单人物")):
+            return "客户涉及黑名单身份，接待需谨慎"
+        if any(keyword in normalized_text for keyword in ("竞对", "竞品", "同行", "医美上班", "美容院上班", "整形医院上班")):
+            return "客户疑似竞对或同行身份，接待需谨慎"
+    if normalized_factor == "支付/流程限制" or any(keyword in normalized_text for keyword in ("支付失败", "付不了", "刷不了", "扫码不了", "下载不了", "验证码", "身份证", "流程")):
+        if any(keyword in normalized_text for keyword in ("支付失败", "付不了", "刷不了", "扫码不了")):
+            return "支付或扫码失败影响下单"
+        if "下载不了" in normalized_text:
+            return "客户无法完成下载操作，流程推进受限"
+        if "验证码" in normalized_text:
+            return "验证码流程受阻，流程推进受限"
+        if "身份证" in normalized_text:
+            return "身份证信息或验证流程影响办理"
+        if "流程" in normalized_text:
+            return "现场流程推进受限"
+    if normalized_factor == "时间/到院限制" or any(keyword in normalized_text for keyword in ("赶时间", "路程远", "外地", "高铁", "飞机", "过几天要回去", "今天上班", "无法到院")):
+        if "赶时间" in normalized_text:
+            return "客户赶时间，治疗安排受限"
+        if "今天上班" in normalized_text:
+            return "客户当天上班，治疗安排受限"
+        if any(keyword in normalized_text for keyword in ("路程远", "外地", "高铁", "飞机", "过几天要回去")):
+            return "客户外地或路程安排受限，复诊到院不便"
+        if "无法到院" in normalized_text:
+            return "客户无法到院，治疗安排受限"
+    if normalized_factor == "治疗条件限制" or any(keyword in normalized_text for keyword in ("妊娠", "怀孕", "备孕", "哺乳", "禁忌", "不能做", "不能打", "不适合")):
+        if any(keyword in normalized_text for keyword in ("妊娠", "怀孕")):
+            return "客户处于孕期，治疗条件受限"
+        if "备孕" in normalized_text:
+            return "客户备孕，治疗条件受限"
+        if "哺乳" in normalized_text:
+            return "客户处于哺乳期，治疗条件受限"
+        if "禁忌" in normalized_text:
+            return "存在治疗禁忌，项目选择受限"
+        if any(keyword in normalized_text for keyword in ("不能做", "不能打", "不适合")):
+            return "医生判断当前不适合治疗或注射"
+    return "" if normalized_factor in _GENERIC_DECISION_FACTOR_LABELS else normalized_factor
+
+
+def _decision_factor_source_matches_label(factor: str, text: str) -> bool:
+    normalized_factor = _normalize_text(factor)
+    normalized_text = _normalize_text(text)
+    if not normalized_factor or not normalized_text:
+        return False
+    if normalized_factor not in _GENERIC_DECISION_FACTOR_LABELS and normalized_factor != "生理期":
+        return True
+    if normalized_factor == "生理期":
+        return any(keyword in normalized_text for keyword in ("生理期", "经期", "月经", "大姨妈", "姨妈", "例假", "来事"))
+    if normalized_factor == "特殊身份":
+        return any(keyword in normalized_text for keyword in ("竞对同行", "竞品机构", "竞对机构", "同行机构", "黑名单", "黑名单人物", "竞对", "竞品", "同行", "医美上班", "美容院上班", "整形医院上班"))
+    if normalized_factor in {"支付/流程限制", "支付流程限制", "流程限制"}:
+        return any(keyword in normalized_text for keyword in ("支付失败", "付不了", "刷不了", "扫码不了", "下载不了", "验证码", "身份证", "流程"))
+    if normalized_factor in {"时间/到院限制", "时间到院限制", "到院限制"}:
+        return any(keyword in normalized_text for keyword in ("赶时间", "路程远", "外地", "高铁", "飞机", "过几天要回去", "今天上班", "无法到院"))
+    if normalized_factor == "治疗条件限制":
+        return any(keyword in normalized_text for keyword in ("妊娠", "怀孕", "备孕", "哺乳", "禁忌", "不能做", "不能打", "不适合"))
+    return True
+
+
+def _specific_decision_factor_from_sources(factor: str, sources: list[str]) -> str:
+    for source in sources:
+        if not _decision_factor_source_matches_label(factor, source):
+            continue
+        detail = _decision_factor_detail_from_text(factor, source)
+        if detail:
+            return detail
+    return _decision_factor_detail_from_text(factor, "")
+
+
 # Subjective concern labels belong in customer_concerns, not in
 # decision_factors. Always strip them from "其他影响因素".
 _CONCERN_CATEGORY_LABELS = {"价格", "恢复期", "效果", "疼痛", "风险", "家庭决策", "对比机构"}
@@ -468,6 +557,12 @@ def _filter_decision_factors(
 
     filtered: list[str] = []
     for factor in _dedupe_text_list(decision_factors):
+        factor = _specific_decision_factor_from_sources(
+            factor,
+            [*evidence_texts, *loss_reasons, *concern_texts],
+        )
+        if not factor:
+            continue
         if factor in _CONCERN_CATEGORY_LABELS:
             continue
         if _looks_like_subjective_decision_factor(factor):
@@ -714,12 +809,14 @@ def _build_consultation_result(normalized: dict[str, Any]) -> dict[str, Any]:
     profile_existing = _as_dict(existing.get("customer_profile_summary"))
     deal_factors_existing = _as_dict(existing.get("deal_factors"))
     plan_existing = _as_dict(existing.get("recommended_plan"))
+    seed_plan_existing = _as_dict(existing.get("seed_plan"))
     outcome_existing = _as_dict(existing.get("deal_outcome"))
 
     primary_demands = _as_dict(normalized.get("customer_primary_demands"))
     standardized_indications = _as_dict(normalized.get("standardized_indications"))
     consumption_intent = _as_dict(normalized.get("consumption_intent"))
     staff_recommendations = _as_dict(normalized.get("staff_recommendations"))
+    staff_seed_recommendations = _as_dict(normalized.get("staff_seed_recommendations"))
     customer_concerns = _as_dict(normalized.get("customer_concerns"))
     customer_profile = _as_dict(normalized.get("customer_profile"))
 
@@ -728,6 +825,7 @@ def _build_consultation_result(normalized: dict[str, Any]) -> dict[str, Any]:
     has_consumption_payload = isinstance(normalized.get("consumption_intent"), dict)
     has_concern_payload = isinstance(normalized.get("customer_concerns"), dict)
     has_recommendation_payload = isinstance(normalized.get("staff_recommendations"), dict)
+    has_seed_recommendation_payload = isinstance(normalized.get("staff_seed_recommendations"), dict)
 
     chief_summary = _rename_legacy_consultation_text(
         _normalize_text(primary_demands.get("summary"))
@@ -862,6 +960,25 @@ def _build_consultation_result(normalized: dict[str, Any]) -> dict[str, Any]:
         if has_recommendation_payload
         else _normalize_text(plan_existing.get("summary"))
     )
+    seed_items = (
+        [
+            {
+                "plan": _format_recommendation_plan_text(_as_dict(item)),
+                "acceptance": _normalize_text(_as_dict(item).get("customer_response")) or "未明确回应",
+                "evidence": _normalize_text(_as_dict(item).get("evidence")),
+            }
+            for item in _as_list(staff_seed_recommendations.get("items"))
+            if _normalize_text(_as_dict(item).get("recommendation"))
+            or _normalize_text(_as_dict(item).get("product_or_solution"))
+        ]
+        if has_seed_recommendation_payload
+        else _as_list(seed_plan_existing.get("items"))
+    )
+    seed_summary = (
+        _normalize_text(staff_seed_recommendations.get("summary"))
+        if has_seed_recommendation_payload
+        else _normalize_text(seed_plan_existing.get("summary"))
+    )
 
     outcome_status = _normalize_text(outcome_existing.get("status")) or "未明确"
     if outcome_status not in {"已成交", "未成交", "未明确"}:
@@ -948,6 +1065,10 @@ def _build_consultation_result(normalized: dict[str, Any]) -> dict[str, Any]:
         "recommended_plan": {
             "summary": plan_summary,
             "items": recommended_items,
+        },
+        "seed_plan": {
+            "summary": seed_summary,
+            "items": seed_items,
         },
         "deal_outcome": {
             "status": outcome_status,
@@ -1694,17 +1815,24 @@ def normalize_analysis_result(result: dict[str, Any] | None) -> dict[str, Any] |
     normalized = deepcopy(result)
 
     # Normalize demand_priority: int|None → list[int] for backward compat
-    recs = normalized.get("staff_recommendations")
-    if isinstance(recs, dict):
-        for item in _as_list(recs.get("items")):
-            if isinstance(item, dict):
-                dp = item.get("demand_priority")
-                if isinstance(dp, list):
-                    item["demand_priority"] = [int(x) for x in dp if isinstance(x, (int, float))]
-                elif isinstance(dp, (int, float)):
-                    item["demand_priority"] = [int(dp)]
-                else:
-                    item["demand_priority"] = []
+    for recommendation_key in ("staff_recommendations", "staff_seed_recommendations"):
+        recs = normalized.get(recommendation_key)
+        if isinstance(recs, dict):
+            recs.setdefault("summary", "")
+            recs.setdefault("items", [])
+            for item in _as_list(recs.get("items")):
+                if isinstance(item, dict):
+                    dp = item.get("demand_priority")
+                    if recommendation_key == "staff_seed_recommendations":
+                        item["demand_priority"] = []
+                    elif isinstance(dp, list):
+                        item["demand_priority"] = [int(x) for x in dp if isinstance(x, (int, float))]
+                    elif isinstance(dp, (int, float)):
+                        item["demand_priority"] = [int(dp)]
+                    else:
+                        item["demand_priority"] = []
+        elif recommendation_key == "staff_seed_recommendations":
+            normalized[recommendation_key] = {"summary": "", "items": []}
 
     standardized_indications = normalized.get("standardized_indications")
     if isinstance(standardized_indications, dict):

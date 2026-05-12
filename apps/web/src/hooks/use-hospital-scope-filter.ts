@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import * as adminApi from '@/api/admin'
-import { isHospitalAdminOrAbove } from '@/app/roles'
+import { isHospitalAdminOrAbove, isSystemAdminOrAbove } from '@/app/roles'
 import { useAuth } from '@/app/use-auth'
+
+const DEFAULT_HOSPITAL_CODE = '6501'
 
 export function useHospitalScopeFilter() {
   const auth = useAuth()
@@ -29,11 +31,18 @@ export function useHospitalScopeFilter() {
   )
 
   const defaultHospitalCode = useMemo(() => {
-    if (userHospitalCode && (!hospitalOptions.length || hospitalOptionCodes.has(userHospitalCode))) {
+    if (
+      userHospitalCode
+      && !isSystemAdminOrAbove(user?.role)
+      && (!hospitalOptions.length || hospitalOptionCodes.has(userHospitalCode))
+    ) {
       return userHospitalCode
     }
+    if (hospitalOptionCodes.has(DEFAULT_HOSPITAL_CODE)) {
+      return DEFAULT_HOSPITAL_CODE
+    }
     return hospitalOptions[0]?.hospital_code || userHospitalCode
-  }, [hospitalOptionCodes, hospitalOptions, userHospitalCode])
+  }, [hospitalOptionCodes, hospitalOptions, user?.role, userHospitalCode])
 
   const validSelectedHospitalCode =
     selectedHospitalCode && (!hospitalOptions.length || hospitalOptionCodes.has(selectedHospitalCode))

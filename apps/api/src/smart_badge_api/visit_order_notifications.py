@@ -177,6 +177,10 @@ def _iter_triage_rows(serialized: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _candidate_staff_key(code: str | None, name: str | None) -> str | None:
+    return _clean_text(code) or _clean_text(name)
+
+
 def _extract_candidates(payloads: list[SapHanaVisitOrderPushIn]) -> list[VisitOrderAdvisorCandidate]:
     result: list[VisitOrderAdvisorCandidate] = []
     seen: set[tuple[str, str, str, str | None]] = set()
@@ -196,9 +200,20 @@ def _extract_candidates(payloads: list[SapHanaVisitOrderPushIn]) -> list[VisitOr
         if not triage_rows:
             triage_rows = [serialized]
 
+        first_triage = triage_rows[0] if triage_rows else {}
+        first_triage_no = _clean_text(first_triage.get("FZDH")) if isinstance(first_triage, dict) else None
+        first_visit_order_seg = _derive_visit_order_segment(visit_order_no, first_triage_no, 1)
+        first_visit_time = (
+            _normalize_sap_time_token(first_triage.get("FZSJ")) if isinstance(first_triage, dict) else None
+        ) or _normalize_sap_time_token(serialized.get("CRTTM"))
+        order_triage_staff_keys: set[str] = set()
+
         for index, triage in enumerate(triage_rows, start=1):
             advisor_code = _clean_text(triage.get("ADVXC"))
             advisor_name = _clean_text(triage.get("ADVXC_LONG"))
+            staff_key = _candidate_staff_key(advisor_code, advisor_name)
+            if staff_key:
+                order_triage_staff_keys.add(staff_key)
             if not advisor_code and not advisor_name:
                 continue
 
@@ -230,6 +245,36 @@ def _extract_candidates(payloads: list[SapHanaVisitOrderPushIn]) -> list[VisitOr
                     demand=_clean_text(serialized.get("REMARK_DZ")),
                 )
             )
+
+        department_advisor_code = _clean_text(serialized.get("KSGW"))
+        department_advisor_name = _clean_text(serialized.get("KSGW_LONG"))
+        department_staff_key = _candidate_staff_key(department_advisor_code, department_advisor_name)
+        if department_staff_key and department_staff_key not in order_triage_staff_keys:
+            key = (hospital_code, visit_order_no, first_visit_order_seg, department_staff_key)
+            if key not in seen:
+                seen.add(key)
+                result.append(
+                    VisitOrderAdvisorCandidate(
+                        hospital_code=hospital_code,
+                        visit_order_no=visit_order_no,
+                        visit_order_seg=first_visit_order_seg,
+                        triage_no=first_triage_no,
+                        advisor_code=department_advisor_code,
+                        advisor_name=department_advisor_name,
+                        customer_code=_clean_text(serialized.get("KUNR")),
+                        customer_name=_clean_text(serialized.get("NINAM")),
+                        customer_type_code=normalize_customer_type_code(serialized.get("KUT30_DQ")),
+                        customer_type_label=normalize_customer_type_label(
+                            serialized.get("KUT30_DQ"),
+                            serialized.get("KUT30_DQ_TXT") or serialized.get("KHLX_T30"),
+                        ),
+                        visit_date=_normalize_sap_date_token(serialized.get("CRTDT")),
+                        visit_time=first_visit_time,
+                        department_code=_clean_text(serialized.get("JGKS")),
+                        arrival_purpose=arrival_purpose_label,
+                        demand=_clean_text(serialized.get("REMARK_DZ")),
+                    )
+                )
 
     return result
 

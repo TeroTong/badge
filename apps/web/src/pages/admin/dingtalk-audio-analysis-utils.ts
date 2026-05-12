@@ -222,6 +222,7 @@ function buildConsultationResult(value: unknown): ConsultationResult {
   const profile = asRecord(source?.customer_profile_summary)
   const factors = asRecord(source?.deal_factors)
   const plan = asRecord(source?.recommended_plan)
+  const seedPlan = asRecord(source?.seed_plan)
   const outcome = asRecord(source?.deal_outcome)
 
   const rawProfileSummaryTags = asArray(profile?.tags)
@@ -273,6 +274,17 @@ function buildConsultationResult(value: unknown): ConsultationResult {
     recommended_plan: {
       summary: asText(plan?.summary) || '',
       items: asArray(plan?.items)
+        .map((item) => asRecord(item))
+        .filter((item): item is Record<string, unknown> => Boolean(item))
+        .map((item) => ({
+          plan: asText(item.plan) || '',
+          acceptance: asText(item.acceptance),
+          evidence: asText(item.evidence),
+        })),
+    },
+    seed_plan: {
+      summary: asText(seedPlan?.summary) || '',
+      items: asArray(seedPlan?.items)
         .map((item) => asRecord(item))
         .filter((item): item is Record<string, unknown> => Boolean(item))
         .map((item) => ({
@@ -345,6 +357,7 @@ export function buildArchiveAnalysisDetail(detail: DingtalkArchiveRecordingDetai
   const customerProfile = asRecord(result.customer_profile)
   const consumptionIntent = asRecord(result.consumption_intent)
   const staffRecommendations = asRecord(result.staff_recommendations)
+  const staffSeedRecommendations = asRecord(result.staff_seed_recommendations)
   const evaluation = asRecord(result.consultation_evaluation)
   const consultationResult = buildConsultationResult(result.consultation_result)
   const consultationProcessEvaluation = {
@@ -421,6 +434,17 @@ export function buildArchiveAnalysisDetail(detail: DingtalkArchiveRecordingDetai
         .map((entry) => asNumber(entry))
         .filter((entry): entry is number => entry != null),
     }))
+  const seedRecommendationItems = asArray(staffSeedRecommendations?.items)
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .map((item) => ({
+      recommendation: asText(item.recommendation) || '未命名种草方案',
+      product_or_solution: asText(item.product_or_solution),
+      body_part: asText(item.body_part),
+      evidence: asText(item.evidence) || '',
+      customer_response: asText(item.customer_response) || '未明确回应',
+      demand_priority: [] as number[],
+    }))
 
   const focusAreas = asArray(customerDemands?.focus_areas)
     .map((item) => asRecord(item))
@@ -492,6 +516,10 @@ export function buildArchiveAnalysisDetail(detail: DingtalkArchiveRecordingDetai
     staff_recommendations: {
       summary: asText(staffRecommendations?.summary) || '暂无推荐摘要',
       items: recommendationItems,
+    },
+    staff_seed_recommendations: {
+      summary: asText(staffSeedRecommendations?.summary) || '暂无种草方案摘要',
+      items: seedRecommendationItems,
     },
     standardized_indications: {
       inference_note: asText(standardizedIndications?.inference_note),

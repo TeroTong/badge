@@ -16,7 +16,7 @@ from smart_badge_api.api.routes.visit_orders import (
 )
 from smart_badge_api.db.base import Base
 from smart_badge_api.db.models import Customer, Recording, Staff, User, WecomTenant
-from smart_badge_api.db.models import Visit, VisitOrder
+from smart_badge_api.db.models import SapHanaVisitOrder, Visit, VisitOrder
 
 
 def test_to_out_excludes_legacy_customer_fields() -> None:
@@ -189,6 +189,11 @@ def test_staff_list_visit_orders_returns_participated_orders_before_recording_up
                     advxc="86000001",
                     assxc="86000002",
                 )
+                sap_snapshot = SapHanaVisitOrder(
+                    jgbm="6101",
+                    dzdh="DZ1001",
+                    source_payload={"KSGW": "86009999", "KSGW_LONG": "科室顾问"},
+                )
 
                 db.add_all([
                     staff,
@@ -199,6 +204,7 @@ def test_staff_list_visit_orders_returns_participated_orders_before_recording_up
                     wrong_institution,
                     later_participated,
                     wrong_participant,
+                    sap_snapshot,
                 ])
                 await db.commit()
 
@@ -221,6 +227,9 @@ def test_staff_list_visit_orders_returns_participated_orders_before_recording_up
                     "vo_match_3",
                     "vo_later_participated",
                 }
+                primary = next(item for item in result["items"] if item.id == "vo_match_1")
+                assert primary.ksgw == "86009999"
+                assert primary.ksgw_long == "科室顾问"
         finally:
             await engine.dispose()
 

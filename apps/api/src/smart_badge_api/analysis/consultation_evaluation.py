@@ -99,6 +99,30 @@ _AUTHENTICITY_KEYWORDS = ("验真", "扫码", "正品", "仪器码", "药品码"
 _FOLLOWUP_KEYWORDS = ("回访", "回去考虑", "保持联系", "我再联系你", "下次来", "给你发微信")
 _ADD_WECOM_KEYWORDS = ("加个微信", "加我微信", "企业微信", "微信联系", "扫我微信", "留个微信")
 _INCORRECT_INTRO_KEYWORDS = ("错误", "不正确", "夸大", "误导", "说错", "不准")
+_PROFESSIONAL_KNOWLEDGE_KEYWORDS = (
+    "颧突",
+    "颧弓",
+    "颧骨",
+    "内轮廓线",
+    "外轮廓线",
+    "玻尿酸",
+    "瑞德喜",
+    "胶原",
+    "支撑",
+    "馒化",
+    "吸水",
+    "鼻基底",
+    "中面部",
+    "上颌骨",
+    "苹果肌",
+    "泪沟",
+    "法令纹",
+    "材料",
+    "注射",
+    "填充",
+    "恢复期",
+)
+_PROFESSIONAL_MECHANISM_KEYWORDS = ("因为", "所以", "原理", "区别", "支撑", "吸水", "发泡", "馒化", "恢复", "风险", "维持")
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -369,6 +393,38 @@ def _find_keyword_evidences(dialogue: str | None, keywords: tuple[str, ...], *, 
     return results
 
 
+def _find_professional_knowledge_evidences(dialogue: str | None, *, limit: int = 2) -> list[str]:
+    if not dialogue:
+        return []
+    results: list[str] = []
+    seen: set[str] = set()
+    for line in dialogue.splitlines():
+        text = line.strip()
+        if not text or text in seen:
+            continue
+        if not any(keyword in text for keyword in _PROFESSIONAL_KNOWLEDGE_KEYWORDS):
+            continue
+        if any(keyword in text for keyword in _PROFESSIONAL_MECHANISM_KEYWORDS) or sum(
+            keyword in text for keyword in _PROFESSIONAL_KNOWLEDGE_KEYWORDS
+        ) >= 2:
+            seen.add(text)
+            results.append(text)
+            if len(results) >= limit:
+                break
+    return results
+
+
+def _find_combined_treatment_evidences(dialogue: str | None) -> list[str]:
+    evidences = _find_keyword_evidences(dialogue, _COMBINED_TREATMENT_KEYWORDS, limit=3)
+    filtered: list[str] = []
+    for evidence in evidences:
+        compact = re.sub(r"\s+", "", evidence)
+        if "一起做" in compact and any(keyword in compact for keyword in ("左右", "两边", "一边", "这一边", "那一边")):
+            continue
+        filtered.append(evidence)
+    return filtered[:2]
+
+
 def _issue_payload(description: str, evidence: str = "") -> dict[str, str]:
     return {"description": _as_text(description), "evidence": _as_text(evidence)}
 
@@ -552,11 +608,20 @@ def _build_dimension_map(existing_evaluation: dict[str, Any]) -> dict[str, dict[
     return result
 
 
-def _build_professional_dimension(existing: dict[str, Any]) -> dict[str, Any]:
+def _build_professional_dimension(existing: dict[str, Any], *, dialogue: str | None = None) -> dict[str, Any]:
     summary = _as_text(existing.get("summary") or existing.get("comment"))
     issues = _normalize_issues(existing.get("issues"))
     point_score = _normalize_existing_point_score(existing)
     missing = any(keyword in summary for keyword in _PROFESSIONAL_MISSING_KEYWORDS)
+    evidence = _find_professional_knowledge_evidences(dialogue)
+
+    if evidence and (point_score is None or point_score <= 0 or missing or issues):
+        return _dimension_payload(
+            name="医美专业知识",
+            point_score=1.0,
+            summary="已识别到围绕部位解剖、材料选择、风险机理或方案原理的专业讲解。",
+            issues=[],
+        )
 
     if issues or missing or point_score == 0:
         if not issues:
@@ -896,7 +961,7 @@ def rebuild_consultation_process_evaluation(
             if not point_score:
                 issues = [_issue_payload("未识别到方案价值与对比讲解。")]
         elif code == "5.3":
-            evidence = _find_keyword_evidences(dialogue, _COMBINED_TREATMENT_KEYWORDS)
+            evidence = _find_combined_treatment_evidences(dialogue)
             multi_plans = len(recommendation_items) > 1
             point_score = 1.0 if evidence or multi_plans else 0.0
             summary = "已提及联合治疗或组合方案。" if point_score else "未识别到联合治疗项目的介绍。"
@@ -1008,7 +1073,7 @@ def rebuild_consultation_evaluation(
     existing_dimensions = _build_dimension_map(existing_evaluation)
 
     dimensions = [
-        _build_professional_dimension(existing_dimensions.get("医美专业知识", {})),
+        _build_professional_dimension(existing_dimensions.get("医美专业知识", {}), dialogue=dialogue),
         _build_indication_dimension(existing_dimensions.get(INDICATION_DIMENSION_NAME, {}), result_dict),
         _build_profile_dimension(result_dict, historical_profile_tags),
         _build_hospital_dimension(existing_dimensions.get("医院和医生介绍", {}), dialogue),

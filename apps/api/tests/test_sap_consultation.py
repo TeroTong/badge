@@ -194,6 +194,11 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
                     {"plan": "玻尿酸下巴填充", "acceptance": "犹豫"},
                 ]
             },
+            "seed_plan": {
+                "items": [
+                    {"plan": "水光针维护皮肤状态", "acceptance": "未明确回应"},
+                ]
+            },
             "deal_outcome": {
                 "status": "未成交",
                 "summary": "客户还需再考虑。",
@@ -210,6 +215,7 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
     assert "●本次预算：5000-8000" in text
     assert "●顾客顾虑：①担心不自然；\n ②担心超预算" in text
     assert "●推荐方案：①玻尿酸下巴填充（认可程度：犹豫）" in text
+    assert "●种草方案：①水光针维护皮肤状态（认可程度：未明确回应）" in text
     assert "●未成交原因：" not in text
     assert "●总结信息：\n1、客户基础信息：" in text
     assert "从消费基础看，既往医美经历相对空白；本次已出现5000-8000的预算或金额线索" in text
@@ -278,7 +284,8 @@ def test_extract_existing_sap_preview_text_wraps_multi_item_fields() -> None:
                         "●顾客主诉：调整眶外C线/眉尾轮廓；改善鼻基底/中面部衔接\n"
                         "●本次预算：无\n"
                         "●顾客顾虑：担心风险；担心安全性\n"
-                        "●推荐方案：咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；玻尿酸填充塑形（认可程度：未明确回应）"
+                        "●推荐方案：咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；玻尿酸填充塑形（认可程度：未明确回应）\n"
+                        "●种草方案：水光针维护；光子嫩肤提亮"
                     )
                 }
             ]
@@ -293,6 +300,7 @@ def test_extract_existing_sap_preview_text_wraps_multi_item_fields() -> None:
         "●推荐方案：①咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；\n"
         " ②玻尿酸填充塑形（认可程度：未明确回应）"
     ) in text
+    assert "●种草方案：①水光针维护；\n ②光子嫩肤提亮" in text
 
 
 def test_build_consultation_text_prefers_model_sap_summary_materials() -> None:
@@ -426,6 +434,7 @@ def test_build_consultation_text_defaults_budget_and_blocks_to_none_marker() -> 
     assert "●本次预算：无" in text
     assert "●顾客顾虑：无" in text
     assert "●推荐方案：无" in text
+    assert "●种草方案：无" in text
     assert "●总结信息：" in text
 
 

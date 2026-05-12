@@ -63,6 +63,16 @@ from smart_badge_api.staff_sync import (
 
 router = APIRouter(prefix="/staff", tags=["人员管理"])
 logger = logging.getLogger("smart_badge.staff_routes")
+DEFAULT_HOSPITAL_CODE = "6501"
+
+
+def _hospital_option_sort_key(code: str, *, is_default: bool = False) -> tuple[int, int, str]:
+    normalized = str(code or "").strip()
+    return (
+        0 if is_default else 1,
+        0 if normalized == DEFAULT_HOSPITAL_CODE else 1,
+        normalized,
+    )
 ALL_INSTITUTIONS_LABEL = "所有机构"
 
 
@@ -739,12 +749,12 @@ async def list_staff_hospital_options(
 ):
     scope = await build_permission_scope(current_user)
     tenant_stmt = (
-        select(WecomTenant.default_hospital_code, WecomTenant.name)
+        select(WecomTenant.default_hospital_code, WecomTenant.name, WecomTenant.is_default)
         .where(
             WecomTenant.default_hospital_code.is_not(None),
             WecomTenant.default_hospital_code != "",
         )
-        .order_by(WecomTenant.default_hospital_code.asc(), WecomTenant.is_active.desc(), WecomTenant.updated_at.desc())
+        .order_by(WecomTenant.is_default.desc(), WecomTenant.is_active.desc(), WecomTenant.default_hospital_code.asc())
     )
     if not is_global_role(scope.role):
         if not scope.hospital_code:
@@ -753,16 +763,22 @@ async def list_staff_hospital_options(
 
     tenant_rows = (await db.execute(tenant_stmt)).all()
     options: dict[str, str] = {}
-    for hospital_code, hospital_name in tenant_rows:
+    default_codes: set[str] = set()
+    for hospital_code, hospital_name, is_default in tenant_rows:
         code = _clean_text(hospital_code)
         name = _clean_text(hospital_name)
         if code and name and code not in options:
             options[code] = name
+        if code and is_default:
+            default_codes.add(code)
 
     if options:
         return [
             StaffHospitalOptionOut(hospital_code=code, hospital_name=name)
-            for code, name in sorted(options.items())
+            for code, name in sorted(
+                options.items(),
+                key=lambda item: _hospital_option_sort_key(item[0], is_default=item[0] in default_codes),
+            )
         ]
 
     rows = (
@@ -780,7 +796,7 @@ async def list_staff_hospital_options(
             .order_by(Staff.hospital_code.asc())
         )
     ).all()
-    return [
+    staff_options = [
         StaffHospitalOptionOut(
             hospital_code=str(hospital_code).strip(),
             hospital_name=str(hospital_name or hospital_code).strip(),
@@ -788,6 +804,8 @@ async def list_staff_hospital_options(
         for hospital_code, hospital_name in rows
         if str(hospital_code or "").strip()
     ]
+    staff_options.sort(key=lambda item: _hospital_option_sort_key(item.hospital_code))
+    return staff_options
 
 
 @router.get("/identity-lookup", response_model=StaffIdentityLookupOut)

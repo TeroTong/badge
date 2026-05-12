@@ -215,6 +215,10 @@ _CUSTOMER_RESPONSE_HINTS = (
     "回去考虑",
     "考虑一下",
     "商量",
+    "帮我算",
+    "给我算",
+    "算一下价格",
+    "给我看一下",
     "找父母",
     "跟父母",
     "分期",
@@ -306,6 +310,17 @@ _STAFF_STATEMENT_HINTS = (
     "我给你",
     "我帮你",
     "我带你",
+    "我带您",
+    "我带下一位",
+    "带下一位",
+    "带客户",
+    "带你过去",
+    "带您过去",
+    "带你去",
+    "带您去",
+    "东西带好",
+    "坐对面",
+    "对面房间",
     "接待你",
     "美学设计师",
     "美学顾问",
@@ -334,7 +349,10 @@ _STAFF_STATEMENT_HINTS = (
     "手术",
     "恢复",
     "优惠",
-    "价格",
+    "给你报价",
+    "给您报价",
+    "帮你算价格",
+    "帮您算价格",
     "建议",
     "其实",
     "为什么",
@@ -373,7 +391,18 @@ _EXPLICIT_PRIMARY_CUSTOMER_SOURCES = frozenset(
         "explicit_customer_treatment_history_context",
     }
 )
-_PER_UTTERANCE_ROLE_SOURCES = _EXPLICIT_BADGE_OWNER_SOURCES | _EXPLICIT_PRIMARY_CUSTOMER_SOURCES
+_CONTENT_OVERRIDE_ROLE_SOURCES = frozenset(
+    {
+        "content_non_doctor_staff",
+        "content_doctor_explanation",
+        "content_staff_explanation_context",
+    }
+)
+_PER_UTTERANCE_ROLE_SOURCES = (
+    _EXPLICIT_BADGE_OWNER_SOURCES
+    | _EXPLICIT_PRIMARY_CUSTOMER_SOURCES
+    | _CONTENT_OVERRIDE_ROLE_SOURCES
+)
 _STALE_HEURISTIC_ROLE_SOURCES = frozenset({"local_heuristic"})
 _STAFF_SELF_INTRO_ROLE_HINTS = (
     "负责现场接待",
@@ -391,6 +420,133 @@ _STAFF_SELF_INTRO_ROLE_HINTS = (
     "院长",
     "护士",
     "老师",
+    "专家助理",
+    "医生助理",
+    "医助",
+    "院长助理",
+    "咨询助理",
+)
+_NON_DOCTOR_STAFF_IDENTITY_HINTS = (
+    "专家助理",
+    "医生助理",
+    "医助",
+    "院长助理",
+    "咨询助理",
+    "美学顾问",
+    "美学设计师",
+    "现场接待",
+)
+_NON_DOCTOR_STAFF_DELEGATION_HINTS = (
+    "王院长的手术",
+    "约了我们王院长",
+    "我去看一下他的手术",
+    "我去看一下手术",
+    "如果快结束",
+    "先让他看一下",
+    "帮我面诊",
+    "喊他面诊",
+    "我带顾客来",
+    "我带您到手术室",
+    "手术进展",
+    "在手术不",
+    "没上手术",
+    "下一台手术",
+    "划线",
+    "消毒",
+    "换衣服",
+    "重新洗手",
+)
+_STAFF_EXPLANATION_ADDRESS_HINTS = (
+    "给你讲一下",
+    "给您讲一下",
+    "你看",
+    "您看",
+    "你这个",
+    "您这个",
+    "你的",
+    "您的",
+    "对你的影响",
+    "对您的影响",
+    "你要清楚",
+    "您要清楚",
+    "我要告诉你",
+    "我要告诉您",
+    "我可以把你",
+    "我可以把您",
+    "我给你",
+    "我给您",
+    "是不是感觉",
+)
+_DOCTOR_EXPLANATION_MEDICAL_HINTS = (
+    "眼袋",
+    "泪沟",
+    "苹果肌",
+    "上眼窝",
+    "脂肪",
+    "内切",
+    "外切",
+    "回填",
+    "填充",
+    "凹陷",
+    "存活率",
+    "术前",
+    "模拟",
+    "皮肤松弛",
+    "脂肪渗",
+    "屏障功能",
+    "手术",
+    "麻药",
+    "局麻",
+    "拆线",
+    "恢复期",
+    "遗传",
+)
+_DOCTOR_EXPLANATION_FLOW_HINTS = (
+    "不仅仅是",
+    "除了",
+    "其实",
+    "为什么",
+    "正常你",
+    "正常您",
+    "整体",
+    "我术前",
+    "通过模拟",
+    "推平整",
+    "分开来",
+    "合在一起看",
+    "我要告诉",
+)
+_STAFF_EXPLANATION_FOLLOWUP_HINTS = (
+    "这边",
+    "这一块",
+    "这个地方",
+    "包括这边",
+    "是不是感觉",
+    "好一些",
+    "明显",
+    "凹进去",
+    "推平整",
+    "脂肪",
+    "眼袋",
+    "泪沟",
+)
+_NON_DOCTOR_STAFF_CONTEXT_HINTS = (
+    "王院长",
+    "手术",
+    "顾客",
+    "面诊",
+    "门口",
+    "案例",
+    "稍等",
+    "先带",
+    "带您",
+    "带你",
+    "这边",
+    "那边",
+    "划线",
+    "消毒",
+    "换衣服",
+    "电话",
 )
 _STAFF_SERVICE_FOLLOWUP_HINTS = (
     "他们刚刚跟我说",
@@ -868,6 +1024,8 @@ def _looks_like_standalone_customer_turn(text: str) -> bool:
     normalized = _normalize_fragment_text(text)
     if not normalized or len(normalized) > 100:
         return False
+    if _looks_like_badge_owner_self_intro_fragment(normalized, None):
+        return False
     if any(hint in normalized for hint in _STAFF_SELF_EXAMPLE_HINTS):
         return False
     if any(hint in normalized for hint in ("你可以叫我", "您可以叫我", "叫我", "比你大", "比您大", "你多大", "您多大")):
@@ -875,6 +1033,44 @@ def _looks_like_standalone_customer_turn(text: str) -> bool:
     if any(hint in normalized for hint in ("您", "我们这边", "我帮您", "我给您", "我带您")):
         return False
     return _looks_like_customer_self_report_fragment(normalized) or _looks_like_customer_answer_fragment(normalized)
+
+
+def _looks_like_badge_owner_self_intro_fragment(text: str, staff_name: str | None) -> bool:
+    compact = _compact_fragment_text(text)
+    if not compact:
+        return False
+
+    normalized_name = re.sub(r"\s+", "", _clean_text(staff_name))
+    if normalized_name and normalized_name in compact and re.search(
+        rf"(?:我是|我叫){re.escape(normalized_name)}(?:老师|顾问|医生|设计师|咨询师|助理|护士)?",
+        compact,
+    ):
+        return True
+
+    role_descriptor = (
+        r"(?:医生助理|医助|护士|咨询师|咨询顾问|美学顾问|美学设计师|设计师|顾问|"
+        r"负责接待|现场接待|接待你|接待您|服务你|服务您)"
+    )
+    if re.search(rf"(?:我是|我叫|我这边是|我负责|由我负责|我来负责).{{0,18}}{role_descriptor}", compact):
+        return True
+    if re.search(rf"{role_descriptor}.{{0,18}}(?:是我|我来|我负责|我接待)", compact):
+        return True
+    return False
+
+
+def _looks_like_short_staff_followup_after_intro(text: str) -> bool:
+    compact = _compact_fragment_text(text)
+    if not compact or len(compact) > 20:
+        return False
+    return compact in {
+        "我看一下",
+        "我帮你看一下",
+        "我帮您看一下",
+        "我给你看一下",
+        "我给您看一下",
+        "我这边看一下",
+        "我先看一下",
+    }
 
 
 def _pick_resolved_role_key(utterances: list[dict], role: str) -> str | None:
@@ -937,12 +1133,32 @@ def _split_mixed_customer_turns(
         clauses = _split_text_clauses(text)
         assignments: list[tuple[str, str]] = []
         pending_customer_response = False
+        badge_owner_intro_context = False
         for index, clause in enumerate(clauses):
             normalized_clause = _normalize_fragment_text(clause)
             if not normalized_clause:
                 continue
             prev_clause = clauses[index - 1] if index > 0 else ""
             next_clause = clauses[index + 1] if index + 1 < len(clauses) else ""
+            if (
+                _looks_like_badge_owner_self_intro_fragment(normalized_clause, staff_name)
+                or (
+                    re.fullmatch(r"我(?:叫|是).{1,12}", _compact_fragment_text(normalized_clause))
+                    and _looks_like_badge_owner_self_intro_fragment(next_clause, staff_name)
+                )
+                or (
+                    badge_owner_intro_context
+                    and (
+                        _looks_like_short_staff_followup_after_intro(normalized_clause)
+                        or _looks_like_staff_statement_fragment(normalized_clause)
+                        or _looks_like_customer_question_fragment(normalized_clause)
+                    )
+                )
+            ):
+                assignments.append((badge_owner_key, normalized_clause))
+                badge_owner_intro_context = True
+                pending_customer_response = False
+                continue
             customer_self_report = _looks_like_customer_self_report_fragment(normalized_clause)
             if _looks_like_customer_question_fragment(normalized_clause):
                 assignments.append((badge_owner_key, normalized_clause))
@@ -1080,6 +1296,175 @@ def _mark_as_explicit_badge_owner(
         owner_staff_name=staff_name,
         matched_staff_name=normalized_staff_name,
     )
+
+
+def _mark_as_content_staff(
+    utterance: dict,
+    *,
+    business_role: str,
+    label: str,
+    source: str,
+) -> None:
+    coarse_role = BUSINESS_ROLE_TO_COARSE_ROLE.get(business_role, "consultant")
+    utterance["speaker"] = coarse_role
+    utterance["speaker_role"] = coarse_role
+    utterance["speaker_role_source"] = source
+    utterance["speaker_identity_type"] = "staff"
+    utterance["speaker_business_role"] = business_role
+    utterance["speaker_display_label"] = label
+    if business_role != "badge_owner":
+        utterance.pop("speaker_staff_id", None)
+        utterance.pop("speaker_staff_name", None)
+
+
+def _content_override_keys(utterance: dict) -> set[str]:
+    keys = {_speaker_key(utterance)}
+    for field in ("asr_original_speaker_id", "asr_original_speaker"):
+        value = _clean_text(utterance.get(field))
+        if value:
+            keys.add(value)
+    return {key for key in keys if key and key != "unknown"}
+
+
+def _looks_like_non_doctor_staff_content(text: str) -> bool:
+    compact = _compact_text(text)
+    if not compact:
+        return False
+    if any(hint in compact for hint in _NON_DOCTOR_STAFF_IDENTITY_HINTS):
+        return True
+    return any(hint in compact for hint in _NON_DOCTOR_STAFF_DELEGATION_HINTS)
+
+
+def _doctor_explanation_score(text: str) -> tuple[int, int, bool]:
+    compact = _compact_text(text)
+    medical_hits = sum(1 for hint in _DOCTOR_EXPLANATION_MEDICAL_HINTS if hint in compact)
+    flow_hits = sum(1 for hint in _DOCTOR_EXPLANATION_FLOW_HINTS if hint in compact)
+    has_address = any(hint in compact for hint in _STAFF_EXPLANATION_ADDRESS_HINTS)
+    return medical_hits, flow_hits, has_address
+
+
+def _looks_like_doctor_explanation_mislabeled_as_customer(text: str) -> bool:
+    compact = _compact_text(text)
+    if len(compact) < 18:
+        return False
+    medical_hits, flow_hits, has_address = _doctor_explanation_score(text)
+    if not has_address:
+        return False
+    if medical_hits >= 2 and flow_hits >= 1:
+        return True
+    return medical_hits >= 3 and len(compact) >= 36
+
+
+def _looks_like_staff_explanation_context(text: str) -> bool:
+    compact = _compact_text(text)
+    if len(compact) < 3:
+        return False
+    if any(hint in compact for hint in _STAFF_EXPLANATION_FOLLOWUP_HINTS):
+        return True
+    medical_hits, flow_hits, has_address = _doctor_explanation_score(text)
+    return has_address and (medical_hits >= 1 or flow_hits >= 1)
+
+
+def _looks_like_non_doctor_staff_context(text: str) -> bool:
+    compact = _compact_text(text)
+    if not compact:
+        return False
+    if len(compact) <= 18 and not _looks_like_customer_treatment_history_self_report(compact):
+        return True
+    return any(hint in compact for hint in _NON_DOCTOR_STAFF_CONTEXT_HINTS)
+
+
+def _apply_content_role_overrides(utterances: list[dict]) -> list[dict]:
+    active_staff_until_by_key: dict[str, int] = {}
+    active_doctor_until_by_key: dict[str, int] = {}
+
+    for utterance in utterances:
+        if not isinstance(utterance, dict):
+            continue
+
+        text = _clean_text(utterance.get("text"))
+        begin_ms = int(utterance.get("begin_ms") or 0)
+        end_ms = int(utterance.get("end_ms") or begin_ms)
+        keys = _content_override_keys(utterance)
+        speaker_key = _speaker_key(utterance)
+        current_business_role = _clean_text(utterance.get("speaker_business_role"))
+        if current_business_role == "badge_owner":
+            continue
+        for key in list(active_staff_until_by_key):
+            if active_staff_until_by_key[key] < begin_ms:
+                active_staff_until_by_key.pop(key, None)
+        for key in list(active_doctor_until_by_key):
+            if active_doctor_until_by_key[key] < begin_ms:
+                active_doctor_until_by_key.pop(key, None)
+
+        if _looks_like_non_doctor_staff_content(text):
+            _mark_as_content_staff(
+                utterance,
+                business_role="staff_peer",
+                label="专家助理" if "专家助理" in _compact_text(text) else "员工同事",
+                source="content_non_doctor_staff",
+            )
+            for key in keys:
+                active_staff_until_by_key[key] = end_ms + 90_000
+            continue
+
+        if _looks_like_doctor_explanation_mislabeled_as_customer(text):
+            _mark_as_content_staff(
+                utterance,
+                business_role="doctor",
+                label="医生",
+                source="content_doctor_explanation",
+            )
+            for key in keys:
+                active_doctor_until_by_key[key] = end_ms + 45_000
+            continue
+
+        active_staff_keys = keys & set(active_staff_until_by_key)
+        active_staff_by_speaker = speaker_key in active_staff_until_by_key
+        active_staff_by_raw_only = bool(active_staff_keys) and not active_staff_by_speaker
+        if (
+            keys
+            and active_staff_keys
+            and (
+                _looks_like_non_doctor_staff_context(text)
+                if active_staff_by_speaker
+                else any(hint in _compact_text(text) for hint in _NON_DOCTOR_STAFF_CONTEXT_HINTS)
+                or (not active_staff_by_raw_only and _looks_like_non_doctor_staff_context(text))
+            )
+        ):
+            _mark_as_content_staff(
+                utterance,
+                business_role="staff_peer",
+                label="员工同事",
+                source="content_staff_explanation_context",
+            )
+            for key in keys:
+                active_staff_until_by_key[key] = end_ms + 45_000
+            continue
+
+        if keys and _looks_like_staff_explanation_context(text):
+            if any(key in active_doctor_until_by_key for key in keys):
+                _mark_as_content_staff(
+                    utterance,
+                    business_role="doctor",
+                    label="医生",
+                    source="content_staff_explanation_context",
+                )
+                for key in keys:
+                    active_doctor_until_by_key[key] = end_ms + 45_000
+                continue
+            if any(key in active_staff_until_by_key for key in keys):
+                _mark_as_content_staff(
+                    utterance,
+                    business_role="staff_peer",
+                    label="员工同事",
+                    source="content_staff_explanation_context",
+                )
+                for key in keys:
+                    active_staff_until_by_key[key] = end_ms + 45_000
+                continue
+
+    return utterances
 
 
 def _looks_like_customer_treatment_history_self_report(text: str) -> bool:
@@ -1720,7 +2105,7 @@ def _annotate_speaker_taxonomy(
         if coarse_role:
             utterance.setdefault("speaker_role", coarse_role)
 
-    return utterances
+    return _apply_content_role_overrides(utterances)
 
 
 def resolve_speaker_roles(

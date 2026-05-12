@@ -16,6 +16,7 @@ from smart_badge_api.db.models import (
 from smart_badge_api.tag_catalog_reference import NEGATIVE_PROJECT_EMPTY_VALUE, NEGATIVE_PROJECT_TAG_CATEGORY
 
 _PROFILE_TAG_EXCLUDED_CATEGORIES = frozenset({"本次消费预算"})
+_AUTO_MINED_HOTWORD_MARKERS = ("ASR自动挖词", "自动挖词候选")
 
 
 async def _load_tag_categories(db: AsyncSession) -> list[TagCategory]:
@@ -36,6 +37,11 @@ async def _load_hotword_groups(db: AsyncSession) -> list[HotwordGroup]:
         .options(selectinload(HotwordGroup.words))
     )
     return list(result.scalars().all())
+
+
+def _is_auto_mined_hotword_group(group: HotwordGroup) -> bool:
+    descriptor = f"{group.name or ''} {group.source_label or ''}".casefold()
+    return any(marker.casefold() in descriptor for marker in _AUTO_MINED_HOTWORD_MARKERS)
 
 
 def _build_tag_section(categories: list[TagCategory]) -> str:
@@ -90,6 +96,8 @@ def _build_hotword_list(groups: list[HotwordGroup]) -> str:
     """构建热词参考列表。"""
     lines: list[str] = []
     for g in groups:
+        if _is_auto_mined_hotword_group(g):
+            continue
         words = [w.word for w in g.words if w.is_active]
         if words:
             lines.append(f"- {g.name}：{'、'.join(words[:8])}")

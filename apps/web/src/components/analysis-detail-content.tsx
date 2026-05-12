@@ -780,11 +780,13 @@ export function AnalysisDetailContent({
   const time = data.recorded_at ? formatBeijingTime(data.recorded_at) : '未知时间'
   const primaryDemands = data.customer_primary_demands
   const recommendations = data.staff_recommendations
+  const seedRecommendations = data.staff_seed_recommendations
   const standardizedIndications = data.standardized_indications
   const consumptionIntent = data.consumption_intent
   const concerns = data.customer_concerns
   const profile = data.customer_profile
   const consultationResult = data.consultation_result
+  const consultationSeedPlan = consultationResult.seed_plan ?? { summary: '', items: [] }
   const processEvaluation = data.consultation_process_evaluation
   const primarySapText = sapPreviewText(data.sap_consultation_preview)
   const processTotalScore = processEvaluation.total_score
@@ -832,6 +834,15 @@ export function AnalysisDetailContent({
       relatedDemandPriorities: relatedPriorities,
     }
   })
+  const seedPlanItems = (
+    consultationSeedPlan.items.length > 0
+      ? consultationSeedPlan.items
+      : (seedRecommendations?.items ?? []).map((item) => ({
+          plan: item.product_or_solution || item.recommendation || '',
+          acceptance: item.customer_response || null,
+          evidence: item.evidence || null,
+        }))
+  )
   // Only surface budget evidence when:
   //   1. An actual budget value was extracted (otherwise no figure to support);
   //   2. Limited to evidence lines that actually mention price / money keywords —
@@ -894,6 +905,8 @@ export function AnalysisDetailContent({
     ...(budgetEvidence ? [budgetEvidence] : []),
   ])).filter(Boolean).join('\n') || null
   const hasRecommendedPlanDetails = recommendedPlanItemsWithRelations.some((item) => Boolean(item.plan && item.plan !== '-'))
+  const hasSeedPlanDetails = seedPlanItems.some((item) => Boolean(item.plan && item.plan !== '-'))
+  const hasAnyRecommendationDetails = hasRecommendedPlanDetails || hasSeedPlanDetails
   const processScoreTitle = formatScoreWithUnit(processTotalScore ?? 0)
   const profileAge = consultationResult.customer_profile_summary.age || profile.age || null
   const profileAgeEvidence = consultationResult.customer_profile_summary.age_evidence || profile.age_evidence || null
@@ -1270,41 +1283,76 @@ export function AnalysisDetailContent({
             </div>
 
             <div className="ad-result-card ad-result-card--recommend-panel">
-              <span className="ad-result-card__eyebrow">2. 推荐给顾客的方案和认可程度</span>
-              {!embeddedSimplified && !hasRecommendedPlanDetails ? (
+              <span className="ad-result-card__eyebrow">2. 推荐方案和种草方案</span>
+              {!embeddedSimplified && !hasAnyRecommendationDetails ? (
                 <p className="ad-result-card__summary">
-                  {consultationResult.recommended_plan.summary || '当前未生成推荐方案总结。'}
+                  {consultationResult.recommended_plan.summary || consultationSeedPlan.summary || '当前未生成推荐方案或种草方案。'}
                 </p>
               ) : null}
-              <div className="ad-demand-list ad-demand-list--recommend">
-                {(recommendedPlanItemsWithRelations.length > 0
-                  ? recommendedPlanItemsWithRelations
-                  : [{ plan: '-', acceptance: null, evidence: null, relatedDemandPriorities: [] as number[] }]
-                ).map((item, index) => (
-                  <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
-                    <div className="ad-demand-item__header">
-                      <Tag color="cyan">方案 #{index + 1}</Tag>
-                      {item.relatedDemandPriorities.length > 0 ? (
-                        <span className="ad-demand-item__header-relation">
-                          对应主诉 {item.relatedDemandPriorities.map((priority) => `#${priority}`).join('/')}
-                        </span>
-                      ) : null}
-                      {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
-                        <span
-                          className={`ad-recommend-item__response ad-recommend-item__response--${
-                            item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
-                          }`}
-                        >
-                          {item.acceptance || '未明确回应'}
-                        </span>
+              <div className="ad-recommend-section">
+                <div className="ad-recommend-section__title">
+                  <strong>推荐方案</strong>
+                </div>
+                <div className="ad-demand-list ad-demand-list--recommend">
+                  {(recommendedPlanItemsWithRelations.length > 0
+                    ? recommendedPlanItemsWithRelations
+                    : [{ plan: '-', acceptance: null, evidence: null, relatedDemandPriorities: [] as number[] }]
+                  ).map((item, index) => (
+                    <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
+                      <div className="ad-demand-item__header">
+                        <Tag color="cyan">方案 #{index + 1}</Tag>
+                        {item.relatedDemandPriorities.length > 0 ? (
+                          <span className="ad-demand-item__header-relation">
+                            对应主诉 {item.relatedDemandPriorities.map((priority) => `#${priority}`).join('/')}
+                          </span>
+                        ) : null}
+                        {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
+                          <span
+                            className={`ad-recommend-item__response ad-recommend-item__response--${
+                              item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
+                            }`}
+                          >
+                            {item.acceptance || '未明确回应'}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="ad-demand-item__text">{item.plan || '-'}</p>
+                      {item.evidence ? (
+                        <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
                       ) : null}
                     </div>
-                    <p className="ad-demand-item__text">{item.plan || '-'}</p>
-                    {item.evidence ? (
-                      <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
-                    ) : null}
-                  </div>
-                ))}
+                  ))}
+                </div>
+              </div>
+              <div className="ad-recommend-section">
+                <div className="ad-recommend-section__title">
+                  <strong>种草方案</strong>
+                </div>
+                <div className="ad-demand-list ad-demand-list--recommend">
+                  {(seedPlanItems.length > 0
+                    ? seedPlanItems
+                    : [{ plan: '-', acceptance: null, evidence: null }]
+                  ).map((item, index) => (
+                    <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
+                      <div className="ad-demand-item__header">
+                        <Tag color="purple">种草 #{index + 1}</Tag>
+                        {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
+                          <span
+                            className={`ad-recommend-item__response ad-recommend-item__response--${
+                              item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
+                            }`}
+                          >
+                            {item.acceptance || '未明确回应'}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="ad-demand-item__text">{item.plan || '-'}</p>
+                      {item.evidence ? (
+                        <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 

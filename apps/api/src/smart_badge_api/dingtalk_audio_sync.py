@@ -132,6 +132,26 @@ CUSTOMER_CONSULTATION_KEYWORDS = {
     "法令纹",
     "面诊",
     "顾虑",
+    "方案",
+    "材料",
+    "支撑力",
+    "注射",
+    "打针",
+    "填充",
+    "塑形",
+    "鼻部",
+    "鼻尖",
+    "鼻梁",
+    "鼻背",
+    "鼻综合",
+    "耳朵",
+    "丰耳",
+    "精灵耳",
+    "艾拉斯提",
+    "艾拉提斯",
+    "艾提",
+    "减龄",
+    "减盐",
 }
 POST_ANALYSIS_MEDICAL_BUSINESS_KEYWORDS = {
     *CUSTOMER_CONSULTATION_KEYWORDS,
@@ -647,6 +667,76 @@ async def _sync_recording_analysis_task(
     await db.flush()
 
 
+def _load_json_object(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _reconcile_completed_manifest_to_recording(
+    db: AsyncSession,
+    manifest: dict[str, Any],
+) -> bool:
+    status = (_clean_text(manifest.get("status")) or "").lower()
+    if status not in {"transcribed", "analyzed"}:
+        return False
+
+    transcript_path = _resolve_stage_manifest_file_path(manifest.get("transcriptPath"))
+    if transcript_path is None or not transcript_path.is_file():
+        return False
+
+    result_path = _resolve_stage_manifest_file_path(manifest.get("analysisResultPath"))
+    if status == "analyzed" and (result_path is None or not result_path.is_file()):
+        return False
+
+    try:
+        utterances, full_text, duration_ms, provider = _load_transcript_document(transcript_path)
+    except (OSError, ValueError, TypeError):
+        logger.exception("failed to load transcript while reconciling staged manifest stage_key=%s", manifest.get("stageKey"))
+        return False
+
+    recording = await _ensure_recording_stub_from_manifest(db, manifest, status=status)
+    if recording is None:
+        return False
+
+    resolved_provider = provider or get_settings().asr_provider
+    await _sync_recording_transcript(
+        db,
+        recording,
+        manifest=manifest,
+        utterances=utterances,
+        full_text=full_text,
+        duration_ms=duration_ms or _coerce_int(manifest.get("durationMs")) or 0,
+        provider=resolved_provider,
+    )
+
+    if status == "analyzed":
+        result_dict = _load_json_object(result_path)
+        if result_dict is None:
+            return False
+        analysis_input_path = _resolve_stage_manifest_file_path(manifest.get("analysisInputPath"))
+        raw_payload = _load_json_object(analysis_input_path)
+        await _sync_recording_analysis_task(
+            db,
+            recording,
+            result_dict=result_dict,
+            raw=raw_payload,
+            duration_ms=duration_ms or _coerce_int(manifest.get("durationMs")) or 0,
+            utterance_count=len(utterances),
+        )
+        recording.status = "analyzed"
+    else:
+        recording.status = "transcribed"
+
+    await try_auto_link_visit_card_recording(db, recording)
+    await db.flush()
+    return True
+
+
 def clear_staged_device_staff_assignments(device_code: str) -> int:
     normalized_code = _clean_text(device_code)
     if not normalized_code:
@@ -850,9 +940,12 @@ def _post_analysis_business_signal_reasons(
 
     field_checks = (
         ("customer_primary_demands", "已提取客户主诉"),
+        ("customer_demands", "已提取客户需求画像"),
+        ("staff_recommendations", "已提取推荐方案"),
         ("recommended_solutions", "已提取推荐方案"),
         ("decision_factors", "已提取成交影响因素"),
         ("deal_summary", "已提取成交/跟进信息"),
+        ("sap_summary_materials", "已生成SAP咨询素材"),
     )
     for key, label in field_checks:
         if _result_has_non_empty_items(result_dict.get(key)):
@@ -1481,6 +1574,14 @@ async def sync_dingtalk_audio_files(
                 and not (existing_audio_path and existing_audio_path.is_file())
             )
             if existing_manifest_path.exists() and not should_redownload_missing_audio:
+                if isinstance(existing_manifest, dict):
+                    try:
+                        reconciled = await _reconcile_completed_manifest_to_recording(db, existing_manifest)
+                        if reconciled:
+                            await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("failed to reconcile existing DingTalk manifest stage_key=%s", current_stage_key)
                 result.skipped += 1
                 result.items.append(
                     DingTalkAudioSyncItem(

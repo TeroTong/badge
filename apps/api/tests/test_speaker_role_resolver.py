@@ -442,6 +442,36 @@ def test_resolve_speaker_roles_does_not_treat_looking_for_staff_as_staff_intro()
     assert resolved[1]["speaker_business_role"] == "primary_customer"
 
 
+def test_resolve_speaker_roles_keeps_price_calculation_request_as_customer() -> None:
+    utterances = [
+        {
+            "speaker": "speaker_0",
+            "speaker_id": "speaker_0",
+            "text": "我是今天接待您的李苏玲，先帮您看方案。",
+            "begin_ms": 0,
+            "end_ms": 3000,
+        },
+        {
+            "speaker": "speaker_1",
+            "speaker_id": "speaker_1",
+            "text": "您帮我算一下这些多少钱，给我看一下，我考虑一下。",
+            "begin_ms": 4000,
+            "end_ms": 9000,
+        },
+    ]
+
+    resolved = resolve_speaker_roles(
+        utterances,
+        staff_id="staff-lsl",
+        staff_name="李苏玲",
+        staff_role="consultant",
+        respect_speaker_diarization=True,
+    )
+
+    assert resolved[1]["speaker_business_role"] == "primary_customer"
+    assert resolved[1]["speaker_identity_type"] == "visitor"
+
+
 def test_resolve_speaker_roles_overrides_direct_customer_treatment_history_self_report() -> None:
     utterances = [
         {

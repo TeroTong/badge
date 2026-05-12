@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-from smart_badge_api.asr.hotword_mining import build_auto_hotword_candidates
+from smart_badge_api.asr.hotword_mining import (
+    AUTO_HOTWORD_GROUP_ACTIVE,
+    AUTO_HOTWORD_GROUP_NAME,
+    AUTO_HOTWORD_SOURCE_LABEL,
+    AUTO_HOTWORD_WORD_ACTIVE,
+    build_auto_hotword_candidates,
+)
+
+
+def test_auto_hotword_library_is_pending_review_by_default() -> None:
+    assert "候选" in AUTO_HOTWORD_GROUP_NAME
+    assert "待审核" in AUTO_HOTWORD_SOURCE_LABEL
+    assert AUTO_HOTWORD_GROUP_ACTIVE is False
+    assert AUTO_HOTWORD_WORD_ACTIVE is False
 
 
 def test_build_auto_hotword_candidates_prefers_domain_terms_and_filters_generic_noise() -> None:

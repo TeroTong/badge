@@ -58,6 +58,7 @@ def test_tencent_hotword_group_filter_keeps_high_value_asr_terms() -> None:
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="concern", name="常见顾虑热词", source_label="运营"))
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="通用", name="通用服务热词", source_label="运营"))
     assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="industry", name="ASR自动挖词", source_label="ASR自动挖词"))
+    assert not _is_tencent_hotword_group_enabled(SimpleNamespace(group_type="brand", name="ASR自动挖词候选", source_label="ASR自动挖词候选（待审核）"))
 
 
 def test_normalize_medical_aesthetic_text_fixes_common_medical_terms() -> None:

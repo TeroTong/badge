@@ -13,6 +13,8 @@ class VisitOrderOut(BaseModel):
     fzuer_long: str | None
     advxc: str | None
     advxc_long: str | None
+    ksgw: str | None = None
+    ksgw_long: str | None = None
     advyq: str | None
     kunr: str | None
     ninam: str | None

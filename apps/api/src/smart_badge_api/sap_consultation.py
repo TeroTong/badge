@@ -55,8 +55,9 @@ _VISIT_RESULT_FUSION_SYSTEM_PROMPT = """\
 4. standardized_indications 只能从输入 allowed_standardized_indications 复制已有编码整组，不得新增、猜测或改码。
 5. 鼻基底/面中/苹果肌/八字纹在填充、注射、玻尿酸、胶原、瑞德喜语境下归面部填充；泪沟/卧蚕注射复配归塑美（眼部D）；否定、历史、机构闲聊或弱证据项目不要进入适应症。
 6. deal_outcome 以最终落地动作为准：付款、定金、下单、锁档、确定治疗/日期为已成交；仅咨询、考虑、对比、未付款为未成交或未明确。
-7. recommended_plan 输出到诊单级最终方案清单。治疗目标、材料/产品族、项目组合相同或高度相近的方案要合并，保留更清楚、更可执行的名称，并按时间线保留最终或最有信息量的客户反馈；不要同时输出“主方案”和“后续补充/加强版”这类重复表达。
-8. sap_summary_materials 写自然业务复盘，优先输出 sections；若输入已有机构级模板段落，sections.name 必须沿用模板段落名和顺序，每个 content 写一个准确、流畅、可跟进的自然段。总结要基于已有分析证据和多录音时间线归纳，不要只改写前置字段；只引用合并后的方案名称，同一方案不要在同一段反复出现，不要把“认可程度”等字段标签写成流水账，也不要把多个编号段落挤在 summary 的同一行。冲突信息以后续录音或最终落地动作为准。
+7. recommended_plan 输出到诊单级最终推荐方案清单，只保留针对本次主诉的解决方案。治疗目标、材料/产品族、项目组合相同或高度相近的方案要合并，保留更清楚、更可执行的名称，并按时间线保留最终或最有信息量的客户反馈；不要同时输出“主方案”和“后续补充/加强版”这类重复表达。
+8. seed_plan 输出到诊单级最终种草方案清单，只保留主诉之外的顺带建议、下次可做或后续维护升级方向；不要和 recommended_plan 重复。
+9. sap_summary_materials 写自然业务复盘，优先输出 sections；若输入已有机构级模板段落，sections.name 必须沿用模板段落名和顺序，每个 content 写一个准确、流畅、可跟进的自然段。总结要基于已有分析证据和多录音时间线归纳，不要只改写前置字段；只引用合并后的方案名称，同一方案不要在同一段反复出现，不要把“认可程度”等字段标签写成流水账，也不要把多个编号段落挤在 summary 的同一行。冲突信息以后续录音或最终落地动作为准。
 
 输出严格 JSON，键结构如下：
 {
@@ -64,6 +65,7 @@ _VISIT_RESULT_FUSION_SYSTEM_PROMPT = """\
     "chief_complaint_and_indications": {"primary_demands": [], "standardized_indications": []},
     "deal_factors": {"budget": null, "concerns": [], "decision_factors": []},
     "recommended_plan": {"items": [{"plan": "", "acceptance": "未明确回应"}]},
+    "seed_plan": {"items": [{"plan": "", "acceptance": "未明确回应"}]},
     "deal_outcome": {"status": "未明确", "deal_items": [], "amount": null, "loss_reasons": [], "summary": ""},
     "customer_profile_summary": {"tags": []}
   },
@@ -86,7 +88,7 @@ def _join_non_empty(values: list[str]) -> str:
 _SAP_FIELD_CONTINUATION_INDENT = " "
 _SAP_ITEM_MARKERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 _SAP_BULLET_FIELD_RE = re.compile(r"^●\s*([^：:\n]+?)\s*[：:]\s*(.*)$")
-_SAP_MULTILINE_FIELD_LABELS = {"顾客主诉", "顾客顾虑", "推荐方案", "未成交原因"}
+_SAP_MULTILINE_FIELD_LABELS = {"顾客主诉", "顾客顾虑", "推荐方案", "种草方案", "未成交原因"}
 
 
 def _strip_sap_item_separator(value: str) -> str:
@@ -715,6 +717,54 @@ def _collect_recommendation_items(result: dict) -> list[str]:
     return []
 
 
+def _collect_seed_recommendation_items(result: dict) -> list[str]:
+    consultation_result = result.get("consultation_result", {}) if isinstance(result.get("consultation_result"), dict) else {}
+    seed_plan = consultation_result.get("seed_plan", {})
+    if isinstance(seed_plan, dict):
+        items = seed_plan.get("items")
+        if isinstance(items, list):
+            values: list[str] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                plan, acceptance = _split_recommendation_plan_and_acceptance(
+                    _format_recommendation_plan_for_sap(item, "plan", "recommendation", "content"),
+                    str(item.get("acceptance") or "").strip(),
+                )
+                if not plan:
+                    continue
+                if acceptance:
+                    values.append(f"{plan}（认可程度：{acceptance}）")
+                else:
+                    values.append(plan)
+            values = _merge_recommendation_display_items(values)
+            if values:
+                return values
+
+    seed_recommendations = result.get("staff_seed_recommendations", {})
+    if isinstance(seed_recommendations, dict):
+        items = seed_recommendations.get("items")
+        if isinstance(items, list):
+            values = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                plan, response = _split_recommendation_plan_and_acceptance(
+                    _format_recommendation_plan_for_sap(item, "recommendation", "product_or_solution"),
+                    str(item.get("customer_response") or "").strip(),
+                )
+                if not plan:
+                    continue
+                if response:
+                    values.append(f"{plan}（认可程度：{response}）")
+                else:
+                    values.append(plan)
+            values = _merge_recommendation_display_items(values)
+            if values:
+                return values
+    return []
+
+
 def _transcript_text_for_price_quotes(
     transcript_full_text: str | None,
     transcript_utterances: list[dict] | None,
@@ -947,6 +997,52 @@ def _collect_recommendation_acceptance_items(result: dict) -> list[tuple[str, st
     staff_recommendations = result.get("staff_recommendations", {})
     if isinstance(staff_recommendations, dict):
         for item in staff_recommendations.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            plan, response = _split_recommendation_plan_and_acceptance(
+                _format_recommendation_plan_for_sap(item, "recommendation", "product_or_solution"),
+                str(item.get("customer_response") or "").strip(),
+            )
+            if plan:
+                items.append((plan, response or "未明确回应"))
+
+    by_key: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for plan, acceptance in items:
+        key = _recommendation_plan_semantic_key(plan)
+        if not key:
+            continue
+        if key not in by_key:
+            order.append(key)
+            by_key[key] = {"plan": plan, "acceptance": acceptance}
+            continue
+        by_key[key]["plan"] = _prefer_recommendation_plan(by_key[key]["plan"], plan)
+        by_key[key]["acceptance"] = _merge_recommendation_acceptance(by_key[key]["acceptance"], acceptance)
+    return [
+        (by_key[key]["plan"], by_key[key]["acceptance"] or "未明确回应")
+        for key in order
+        if by_key.get(key, {}).get("plan")
+    ]
+
+
+def _collect_seed_recommendation_acceptance_items(result: dict) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    consultation_result = result.get("consultation_result", {}) if isinstance(result.get("consultation_result"), dict) else {}
+    seed_plan = consultation_result.get("seed_plan", {})
+    if isinstance(seed_plan, dict):
+        for item in seed_plan.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            plan, acceptance = _split_recommendation_plan_and_acceptance(
+                _format_recommendation_plan_for_sap(item, "plan", "recommendation", "content"),
+                str(item.get("acceptance") or "").strip(),
+            )
+            if plan:
+                items.append((plan, acceptance or "未明确回应"))
+
+    staff_seed_recommendations = result.get("staff_seed_recommendations", {})
+    if isinstance(staff_seed_recommendations, dict):
+        for item in staff_seed_recommendations.get("items", []) or []:
             if not isinstance(item, dict):
                 continue
             plan, response = _split_recommendation_plan_and_acceptance(
@@ -2423,6 +2519,7 @@ def build_consultation_text(
     ●本次预算
     ●顾客顾虑
     ●推荐方案
+    ●种草方案
     ●未成交原因（仅当到诊单最终状态为未成交）
     ●总结信息
     """
@@ -2437,6 +2534,7 @@ def build_consultation_text(
             transcript_utterances,
         )
     lines.append(_format_sap_multiline_field("推荐方案", recommendation_items))
+    lines.append(_format_sap_multiline_field("种草方案", _collect_seed_recommendation_items(result)))
     if _is_visit_order_final_not_deal(visit_order):
         lines.append(_format_sap_multiline_field("未成交原因", _collect_loss_reason_items(result)))
     if _is_sap_summary_section_enabled(visit_order, sap_summary_config):
@@ -2997,6 +3095,25 @@ def _merge_recommendation_plan_items(results: list[dict]) -> list[dict[str, str]
     return list(by_key.values())
 
 
+def _merge_seed_plan_items(results: list[dict]) -> list[dict[str, str]]:
+    by_key: dict[str, dict[str, str]] = {}
+    for result in results:
+        for plan, acceptance in _collect_seed_recommendation_acceptance_items(result):
+            normalized_plan = str(plan or "").strip()
+            if not normalized_plan:
+                continue
+            key = _recommendation_plan_semantic_key(normalized_plan)
+            if key in by_key:
+                existing = by_key.pop(key)
+                normalized_plan = _prefer_recommendation_plan(existing.get("plan", ""), normalized_plan)
+                acceptance = _merge_recommendation_acceptance(existing.get("acceptance", ""), acceptance)
+            by_key[key] = {
+                "plan": normalized_plan,
+                "acceptance": str(acceptance or "").strip() or "未明确回应",
+            }
+    return list(by_key.values())
+
+
 def _normalize_result_recommendation_plan_items(result: dict) -> dict:
     consultation_result = result.get("consultation_result")
     if not isinstance(consultation_result, dict):
@@ -3010,6 +3127,22 @@ def _normalize_result_recommendation_plan_items(result: dict) -> dict:
         if str(plan or "").strip()
     ]
     recommended_plan["items"] = items
+    return result
+
+
+def _normalize_result_seed_plan_items(result: dict) -> dict:
+    consultation_result = result.get("consultation_result")
+    if not isinstance(consultation_result, dict):
+        return result
+    seed_plan = consultation_result.get("seed_plan")
+    if not isinstance(seed_plan, dict):
+        return result
+    items = [
+        {"plan": plan, "acceptance": acceptance or "未明确回应"}
+        for plan, acceptance in _collect_seed_recommendation_acceptance_items(result)
+        if str(plan or "").strip()
+    ]
+    seed_plan["items"] = items
     return result
 
 
@@ -3058,6 +3191,7 @@ def _merge_analysis_results(results: list[dict]) -> dict:
         ]
     )
     recommendation_items = _merge_recommendation_plan_items(normalized_results)
+    seed_items = _merge_seed_plan_items(normalized_results)
     loss_reasons = _dedupe_preserve_order(
         [
             reason
@@ -3092,6 +3226,9 @@ def _merge_analysis_results(results: list[dict]) -> dict:
             },
             "recommended_plan": {
                 "items": recommendation_items,
+            },
+            "seed_plan": {
+                "items": seed_items,
             },
             "deal_outcome": {
                 "status": deal_status,
@@ -3151,6 +3288,7 @@ def _analysis_result_for_visit_fusion(result: dict) -> dict:
         "customer_concerns": normalized.get("customer_concerns"),
         "customer_profile": normalized.get("customer_profile"),
         "staff_recommendations": normalized.get("staff_recommendations"),
+        "staff_seed_recommendations": normalized.get("staff_seed_recommendations"),
         "consultation_result": normalized.get("consultation_result"),
         "sap_summary_materials": normalized.get("sap_summary_materials"),
     }
@@ -3279,6 +3417,7 @@ def _apply_visit_result_fusion(fallback: dict, fused: dict) -> dict:
         "note": "已基于同一到诊单多条录音的既有面诊分析结果做融合分析",
     }
     _normalize_result_recommendation_plan_items(merged)
+    _normalize_result_seed_plan_items(merged)
     return _normalize_result_payload(merged)
 
 

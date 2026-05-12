@@ -488,6 +488,7 @@ async def get_result(
         "transcript": transcript_context,
         "customer_primary_demands": result_data.get("customer_primary_demands"),
         "staff_recommendations": result_data.get("staff_recommendations"),
+        "staff_seed_recommendations": result_data.get("staff_seed_recommendations"),
         "standardized_indications": result_data.get("standardized_indications"),
         "customer_demands": result_data.get("customer_demands"),
         "customer_concerns": result_data.get("customer_concerns"),

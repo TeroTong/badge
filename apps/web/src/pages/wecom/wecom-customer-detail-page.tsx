@@ -299,6 +299,10 @@ function buildFallbackAnalysisDetail(
         demand_priority: [],
       })),
     },
+    staff_seed_recommendations: {
+      summary: '',
+      items: [],
+    },
     standardized_indications: {
       inference_note: null,
       summary: '',
@@ -378,6 +382,10 @@ function buildFallbackAnalysisDetail(
           acceptance: '未明确回应',
           evidence: null,
         })),
+      },
+      seed_plan: {
+        summary: '',
+        items: [],
       },
       deal_outcome: {
         status: '未明确',

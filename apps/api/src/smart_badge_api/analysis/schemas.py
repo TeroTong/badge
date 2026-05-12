@@ -140,7 +140,7 @@ class StaffRecommendationItem(BaseModel):
 class StaffRecommendations(BaseModel):
     """员工推荐/种草抽取结果。"""
 
-    summary: str = Field(..., description="一句话概括员工本次主要推荐")
+    summary: str = Field(default="", description="一句话概括员工本次主要推荐")
     items: list[StaffRecommendationItem] = Field(default_factory=list)
 
 
@@ -815,6 +815,7 @@ class ConsultationResult(BaseModel):
     )
     deal_factors: ConsultationResultDealFactors = Field(default_factory=ConsultationResultDealFactors)
     recommended_plan: ConsultationResultRecommendedPlan = Field(default_factory=ConsultationResultRecommendedPlan)
+    seed_plan: ConsultationResultRecommendedPlan = Field(default_factory=ConsultationResultRecommendedPlan)
     deal_outcome: ConsultationResultDealOutcome = Field(default_factory=ConsultationResultDealOutcome)
     customer_profile_summary: ConsultationResultProfileSummary = Field(
         default_factory=ConsultationResultProfileSummary
@@ -923,6 +924,13 @@ class ConsultationProcessEvaluation(BaseModel):
     sections: list[ConsultationProcessEvaluationSection] = Field(default_factory=list)
 
 
+class AnalysisQuality(BaseModel):
+    """分析结果质量门槛，用于决定自动 SAP 回传是否需要人工复核。"""
+
+    requires_review: bool = Field(default=False, description="是否建议人工复核后再自动回传")
+    issues: list[str] = Field(default_factory=list, description="需要复核的原因")
+
+
 # ── 完整分析结果 ──────────────────────────────────────────────
 class AnalysisResult(BaseModel):
     """一段录音的完整 AI 分析结果。"""
@@ -931,6 +939,7 @@ class AnalysisResult(BaseModel):
     standardized_indications: StandardizedIndications
     consumption_intent: ConsumptionIntent
     staff_recommendations: StaffRecommendations
+    staff_seed_recommendations: StaffRecommendations = Field(default_factory=StaffRecommendations)
     customer_demands: CustomerDemands
     customer_concerns: CustomerConcerns
     customer_profile: CustomerProfile
@@ -940,6 +949,7 @@ class AnalysisResult(BaseModel):
     consultation_process_evaluation: ConsultationProcessEvaluation = Field(
         default_factory=ConsultationProcessEvaluation
     )
+    analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
 
     @model_validator(mode="before")
     @classmethod
@@ -960,6 +970,10 @@ class AnalysisResult(BaseModel):
         recommendations = normalized.setdefault("staff_recommendations", {})
         recommendations.setdefault("summary", "")
         recommendations.setdefault("items", [])
+
+        seed_recommendations = normalized.setdefault("staff_seed_recommendations", {})
+        seed_recommendations.setdefault("summary", "")
+        seed_recommendations.setdefault("items", [])
 
         demands = normalized.setdefault("customer_demands", {})
         demands.setdefault("focus_areas", [])
@@ -986,6 +1000,7 @@ class AnalysisResult(BaseModel):
         consultation_result.setdefault("customer_profile_summary", {})
         consultation_result.setdefault("deal_factors", {})
         consultation_result.setdefault("recommended_plan", {})
+        consultation_result.setdefault("seed_plan", {})
         consultation_result.setdefault("deal_outcome", {})
 
         sap_summary = normalized.setdefault("sap_summary_materials", {})

@@ -700,6 +700,8 @@ export type VisitOrder = {
   fzuer_long: string | null
   advxc: string | null
   advxc_long: string | null
+  ksgw: string | null
+  ksgw_long: string | null
   advyq: string | null
   kunr: string | null
   ninam: string | null

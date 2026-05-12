@@ -4,17 +4,21 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from smart_badge_api.asr.domain_terms import _TEXT_REPLACEMENTS
 from smart_badge_api.db.models import Hotword, HotwordGroup
 
-AUTO_HOTWORD_GROUP_NAME = "ASR自动挖词"
+AUTO_HOTWORD_GROUP_NAME = "ASR自动挖词候选"
+LEGACY_AUTO_HOTWORD_GROUP_NAME = "ASR自动挖词"
 AUTO_HOTWORD_GROUP_TYPE = "industry"
-AUTO_HOTWORD_SOURCE_LABEL = "ASR自动挖词"
+AUTO_HOTWORD_SOURCE_LABEL = "ASR自动挖词候选（待审核）"
+LEGACY_AUTO_HOTWORD_SOURCE_LABEL = "ASR自动挖词"
 AUTO_HOTWORD_LIBRARY_SCOPE = "public"
+AUTO_HOTWORD_GROUP_ACTIVE = False
+AUTO_HOTWORD_WORD_ACTIVE = False
 
 _AUTO_HOTWORD_IGNORE = {
     "设计师",
@@ -143,10 +147,19 @@ async def upsert_auto_hotword_candidates(
 ) -> dict[str, Any]:
     result = await db.execute(
         select(HotwordGroup)
-        .where(HotwordGroup.name == AUTO_HOTWORD_GROUP_NAME)
+        .where(
+            or_(
+                HotwordGroup.name == AUTO_HOTWORD_GROUP_NAME,
+                HotwordGroup.name == LEGACY_AUTO_HOTWORD_GROUP_NAME,
+                HotwordGroup.source_label == LEGACY_AUTO_HOTWORD_SOURCE_LABEL,
+                HotwordGroup.source_label == AUTO_HOTWORD_SOURCE_LABEL,
+            )
+        )
         .options(selectinload(HotwordGroup.words))
+        .order_by(HotwordGroup.updated_at.desc(), HotwordGroup.created_at.desc())
     )
-    group = result.scalar_one_or_none()
+    groups = list(result.scalars().all())
+    group = next((item for item in groups if item.name == AUTO_HOTWORD_GROUP_NAME), None) or (groups[0] if groups else None)
     created_group = False
     if group is None:
         group = HotwordGroup(
@@ -154,11 +167,25 @@ async def upsert_auto_hotword_candidates(
             group_type=AUTO_HOTWORD_GROUP_TYPE,
             library_scope=AUTO_HOTWORD_LIBRARY_SCOPE,
             source_label=AUTO_HOTWORD_SOURCE_LABEL,
-            is_active=True,
+            is_active=AUTO_HOTWORD_GROUP_ACTIVE,
         )
         db.add(group)
         await db.flush()
         created_group = True
+    else:
+        group.name = AUTO_HOTWORD_GROUP_NAME
+        group.group_type = AUTO_HOTWORD_GROUP_TYPE
+        group.library_scope = AUTO_HOTWORD_LIBRARY_SCOPE
+        group.source_label = AUTO_HOTWORD_SOURCE_LABEL
+        group.is_active = AUTO_HOTWORD_GROUP_ACTIVE
+
+    merged_group_count = 0
+    for other_group in groups:
+        if other_group.id == group.id:
+            continue
+        other_group.is_active = False
+        other_group.source_label = AUTO_HOTWORD_SOURCE_LABEL
+        merged_group_count += 1
 
     existing = (
         {
@@ -182,7 +209,7 @@ async def upsert_auto_hotword_candidates(
                 group_id=group.id,
                 word=candidate.term,
                 weight=candidate.weight,
-                is_active=True,
+                is_active=AUTO_HOTWORD_WORD_ACTIVE,
             )
             db.add(current)
             existing[key] = current
@@ -197,8 +224,8 @@ async def upsert_auto_hotword_candidates(
         if next_weight != current.weight:
             current.weight = next_weight
             changed = True
-        if not current.is_active:
-            current.is_active = True
+        if current.is_active != AUTO_HOTWORD_WORD_ACTIVE:
+            current.is_active = AUTO_HOTWORD_WORD_ACTIVE
             changed = True
         if changed:
             updated += 1
@@ -223,5 +250,8 @@ async def upsert_auto_hotword_candidates(
         "updated": updated,
         "unchanged": unchanged,
         "deactivated": deactivated,
+        "merged_group_count": merged_group_count,
+        "candidate_mode": "pending_review",
+        "is_active": bool(group.is_active),
         "terms": [asdict(item) for item in candidates],
     }

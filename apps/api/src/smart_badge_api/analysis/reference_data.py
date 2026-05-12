@@ -7,7 +7,7 @@ from typing import Any
 # Prompt/reference construction is code-owned and must not read repository
 # Excel files at runtime.
 _STATIC_FEATURE_OBJECTIVES = """\
-- 提取客户主诉、标准适应症、画像标签、预算/报价、顾虑、推荐方案、成交结果和 SAP 总结素材。
+- 提取客户主诉、标准适应症、画像标签、预算/报价、顾虑、推荐方案、种草方案、成交结果和 SAP 总结素材。
 - 所有结论必须有带时间戳原话证据；第三方案例、咨询师泛化介绍、假设话术、角色误标内容不得直接当成客户事实。
 - 成交只认客户接受并出现付款/定金/下单/锁档/确定日期/安排治疗等落地动作；未成交需提取具体原因。"""
 

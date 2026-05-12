@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, false, func, select, true
+from sqlalchemy import and_, false, func, select, true, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.api.data_scope import (
@@ -17,7 +17,7 @@ from smart_badge_api.api.data_scope import (
 from smart_badge_api.api.deps import get_current_user, get_db
 from smart_badge_api.api.hospital_scope import normalize_hospital_code
 from smart_badge_api.customer_type import customer_type_from_visit_order
-from smart_badge_api.db.models import Recording, RecordingVisitLink, Staff, User, Visit, VisitOrder
+from smart_badge_api.db.models import Recording, RecordingVisitLink, SapHanaVisitOrder, Staff, User, Visit, VisitOrder
 from smart_badge_api.schemas.matching import VisitOrderRecordingMatchOut
 from smart_badge_api.schemas.visit_order import VisitOrderOut, VisitOrderSyncResult
 from smart_badge_api.visit_order_sync import sync_visit_orders_for_context, sync_visit_orders
@@ -36,11 +36,56 @@ router = APIRouter(prefix="/visit-orders", tags=["visit-orders"])
 _BUSINESS_TZ = ZoneInfo("Asia/Shanghai")
 
 
-def _to_out(vo: VisitOrder) -> VisitOrderOut:
+def _clean_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _visit_order_sap_key(vo: VisitOrder) -> tuple[str, str] | None:
+    hospital_code = _clean_text(vo.jgbm)
+    visit_order_no = _clean_text(vo.dzdh)
+    if not hospital_code or not visit_order_no:
+        return None
+    return hospital_code, visit_order_no
+
+
+def _extract_department_advisor(payload: object) -> dict[str, str | None]:
+    if not isinstance(payload, dict):
+        return {"ksgw": None, "ksgw_long": None}
+    return {
+        "ksgw": _clean_text(payload.get("KSGW") or payload.get("ksgw")),
+        "ksgw_long": _clean_text(payload.get("KSGW_LONG") or payload.get("ksgw_long")),
+    }
+
+
+async def _load_department_advisor_map(
+    db: AsyncSession,
+    visit_orders: list[VisitOrder],
+) -> dict[tuple[str, str], dict[str, str | None]]:
+    keys = sorted({key for vo in visit_orders if (key := _visit_order_sap_key(vo)) is not None})
+    if not keys:
+        return {}
+
+    rows = (
+        await db.execute(
+            select(SapHanaVisitOrder.jgbm, SapHanaVisitOrder.dzdh, SapHanaVisitOrder.source_payload).where(
+                tuple_(SapHanaVisitOrder.jgbm, SapHanaVisitOrder.dzdh).in_(keys)
+            )
+        )
+    ).all()
+    return {
+        (_clean_text(jgbm) or "", _clean_text(dzdh) or ""): _extract_department_advisor(source_payload)
+        for jgbm, dzdh, source_payload in rows
+    }
+
+
+def _to_out(vo: VisitOrder, department_advisor: dict[str, str | None] | None = None) -> VisitOrderOut:
     data = {
         field_name: getattr(vo, field_name, None)
         for field_name in VisitOrderOut.model_fields
     }
+    if department_advisor:
+        data.update(department_advisor)
     return VisitOrderOut(**data)
 
 
@@ -323,8 +368,12 @@ async def list_visit_orders(
             await db.execute(stmt.offset((page - 1) * page_size).limit(page_size))
         ).scalars().all()
 
+    department_advisor_map = await _load_department_advisor_map(db, items)
     return {
-        "items": [_to_out(vo) for vo in items],
+        "items": [
+            _to_out(vo, department_advisor_map.get(_visit_order_sap_key(vo)))
+            for vo in items
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -498,7 +547,8 @@ async def get_visit_order(
     ).scalar_one_or_none()
     if vo is None:
         raise HTTPException(status_code=404, detail="到诊单不存在")
-    return _to_out(vo)
+    department_advisor_map = await _load_department_advisor_map(db, [vo])
+    return _to_out(vo, department_advisor_map.get(_visit_order_sap_key(vo)))
 
 
 @router.get("/{visit_order_id}/recording-match", response_model=VisitOrderRecordingMatchOut)

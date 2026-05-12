@@ -226,6 +226,64 @@ def test_visit_order_notification_arrival_purpose_falls_back_to_dymd_code() -> N
     assert candidates[0].arrival_purpose == "咨询"
 
 
+def test_visit_order_notification_includes_department_advisor_from_ksgw() -> None:
+    payload = SapHanaVisitOrderPushIn(
+        JGBM="6101",
+        DZDH="DZ1003",
+        CRTDT="20260509",
+        CRTTM="101010",
+        KUNR="70000123",
+        NINAM="Customer A",
+        KUT30_DQ="V",
+        DYMD="A",
+        KSGW="81039999",
+        KSGW_LONG="Department Advisor",
+        FZDATA=[
+            {
+                "FZDH": "FZ1003-001",
+                "ADVXC": "81034062",
+                "ADVXC_LONG": "Advisor A",
+                "FZSJ": "102030",
+            }
+        ],
+    )
+
+    candidates = _extract_candidates([payload])
+
+    assert [(item.advisor_code, item.advisor_name, item.visit_order_seg) for item in candidates] == [
+        ("81034062", "Advisor A", "001"),
+        ("81039999", "Department Advisor", "001"),
+    ]
+
+
+def test_visit_order_notification_does_not_duplicate_ksgw_when_it_is_triage_advisor() -> None:
+    payload = SapHanaVisitOrderPushIn(
+        JGBM="6101",
+        DZDH="DZ1003",
+        CRTDT="20260509",
+        CRTTM="101010",
+        KUNR="70000123",
+        NINAM="Customer A",
+        KUT30_DQ="V",
+        DYMD="A",
+        KSGW="81034062",
+        KSGW_LONG="Advisor A",
+        FZDATA=[
+            {
+                "FZDH": "FZ1003-001",
+                "ADVXC": "81034062",
+                "ADVXC_LONG": "Advisor A",
+                "FZSJ": "102030",
+            }
+        ],
+    )
+
+    candidates = _extract_candidates([payload])
+
+    assert len(candidates) == 1
+    assert candidates[0].advisor_code == "81034062"
+
+
 def test_notify_pushed_visit_order_advisors_sends_wecom_card_once() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -461,6 +519,8 @@ def test_notify_pushed_visit_order_advisors_skips_non_arrival_purposes() -> None
                         NINAM="Customer A",
                         KUT30_DQ="V",
                         DYMD=dymd,
+                        KSGW="81039999",
+                        KSGW_LONG="Department Advisor",
                         FZDATA=[
                             {
                                 "FZDH": f"FZ_SKIP_{dymd}-001",

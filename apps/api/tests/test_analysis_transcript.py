@@ -1928,6 +1928,84 @@ def test_main_fact_floor_requires_sparse_medical_business_scene() -> None:
     assert pipeline._allows_main_fact_floor(sparse_medical_segments) is True
 
 
+def test_sparse_fallback_keeps_short_filler_consultation_with_ear_and_chin_context() -> None:
+    raw = {
+        "payload": {
+            "transcribeResult": [
+                {
+                    "role": "badge_owner",
+                    "speaker_label": "李珍玉（工牌本人）",
+                    "begin": 400,
+                    "end": 5750,
+                    "text": "有两支玻尿酸需要用一下，用一下对艾拉斯提和一支碘盐。",
+                },
+                {
+                    "role": "badge_owner",
+                    "speaker_label": "李珍玉（工牌本人）",
+                    "begin": 6100,
+                    "end": 14650,
+                    "text": "你的下巴肯定是需要衔接一下的呀。",
+                },
+                {
+                    "role": "primary_customer",
+                    "speaker_label": "主客户",
+                    "begin": 46465,
+                    "end": 51840,
+                    "text": "好的，谢谢。他的耳朵还要不要再长出来一点点？",
+                },
+                {
+                    "role": "primary_customer",
+                    "speaker_label": "主客户",
+                    "begin": 56340,
+                    "end": 57340,
+                    "text": "那就小一点。",
+                },
+                {
+                    "role": "badge_owner",
+                    "speaker_label": "李珍玉（工牌本人）",
+                    "begin": 57340,
+                    "end": 65790,
+                    "text": "每天来两只就可以了，不要打太多，要选一种材质，建议用硬的，越硬越好。",
+                },
+            ]
+        }
+    }
+    result = {
+        "customer_primary_demands": {"summary": "", "items": []},
+        "standardized_indications": {"summary": "对话中未识别出可标准化的适应症", "items": []},
+        "consumption_intent": {"budget": None, "willingness": "未明确", "decision_factors": [], "evidence": []},
+        "staff_recommendations": {"summary": "", "items": []},
+        "customer_demands": {
+            "focus_areas": [
+                {"area": "下巴衔接", "surface_need": "改善衔接不自然"},
+                {"area": "耳部塑形", "surface_need": "耳朵稍微长出来一点"},
+            ]
+        },
+        "customer_concerns": {"summary": "", "items": []},
+        "customer_profile": {"tags": []},
+        "consultation_result": {
+            "chief_complaint_and_indications": {
+                "summary": "对话中未识别出可标准化的适应症",
+                "primary_demands": [],
+                "standardized_indications": [],
+            },
+            "recommended_plan": {"items": []},
+        },
+    }
+
+    changed = pipeline.sanitize_analysis_result_with_raw(result, raw=raw)
+
+    assert changed is True
+    primary_items = result["customer_primary_demands"]["items"]
+    indication_items = result["standardized_indications"]["items"]
+    assert primary_items[0]["demand"] == "改善耳部轮廓，希望耳部更立体精致"
+    assert indication_items[0]["indication_name"] == "塑美"
+    assert indication_items[0]["body_part_name"] == "耳部（大O）"
+    assert result["consultation_result"]["chief_complaint_and_indications"]["standardized_indications"] == [
+        "微创（Y2）｜塑美（SYZ2001）｜耳部（大O）（BW2004）"
+    ]
+
+
 def test_analyze_transcript_backfills_outer_c_primary_demand_when_indication_exists(tmp_path, monkeypatch) -> None:
     transcript_path = tmp_path / "sample_outer_c_primary_demand.json"
     transcript_path.write_text(

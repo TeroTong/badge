@@ -66,6 +66,11 @@ _PRIMARY_DEMAND_SEED_HINTS: tuple[tuple[str, str | None, tuple[str, ...]], ...] 
 
 _PRIMARY_DEMAND_ISSUE_HINTS: tuple[tuple[str, str | None, tuple[str, ...]], ...] = (
     (
+        "改善颧骨/颧弓显宽和面部不流畅，希望轮廓更自然协调",
+        "颧骨/面部轮廓",
+        ("颧骨", "颧弓", "颧突", "全突", "面部不流畅", "不流畅", "内轮廓线", "外轮廓线", "脸型", "脸没那么宽", "颧骨没那么宽", "左右不对称"),
+    ),
+    (
         "调整眶外C线/眉尾轮廓，希望面部轮廓更自然协调",
         "眶外C线/眉尾",
         (
@@ -161,7 +166,8 @@ _PLAN_CONTEXT_PRIMARY_DEMAND_KEYWORDS = (
 _BODY_PART_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("眶外C线（小O）", ("眶外C", "眶外c", "框外C", "框外c", "外框C", "外框c", "髋外C", "髋外c", "外科C", "外科c", "外方C", "外方c", "外方斜", "眉尾")),
     ("颞区（大O）", ("颞区", "太阳穴", "眉弓")),
-    ("面部", ("面部", "中面部", "面中", "苹果肌", "法令纹", "嘴角囊带", "鼻基底", "鼻翼基底", "八字纹", "外轮廓线", "全脸", "脸")),
+    ("耳部（大O）", ("耳部", "耳朵", "精灵耳", "丰耳")),
+    ("面部", ("面部", "中面部", "面中", "苹果肌", "法令纹", "嘴角囊带", "鼻基底", "鼻翼基底", "八字纹", "外轮廓线", "全脸", "脸", "下巴")),
     ("眼部", ("眼部", "眼尾", "眼周", "眼睛", "双眼皮", "单眼皮", "泪沟", "卧蚕", "眼袋", "眶周", "眉下", "上眼睑", "眼型", "美杜莎")),
     ("鼻部", ("鼻部", "鼻子", "鼻综合", "山根", "鼻头", "鼻翼")),
     ("唇部（D）", ("唇部", "嘴唇", "嘴巴", "唇形", "唇纹", "唇珠", "丰唇", "口周", "嘴角", "口下")),
@@ -329,6 +335,8 @@ _INDICATION_HINTS: tuple[dict[str, Any], ...] = (
             "瘦肩", "肩颈", "斜方肌", "斜方肌肉毒", "肉毒瘦肩", "瘦肩针",
             "口周", "嘴唇", "唇部", "唇形", "丰唇", "唇珠", "唇纹", "嘴角", "口下",
             "仙人掌", "注射嘴唇", "溶解", "溶解酶",
+            "耳部", "耳朵", "精灵耳", "丰耳", "下颌轮廓线", "下巴", "额角", "额区",
+            "玻尿酸", "艾拉斯提", "艾拉斯题", "艾拉提斯", "碘盐", "简言", "减盐", "夜曲",
         ),
     },
     {
@@ -949,6 +957,7 @@ _AGE_EXAMPLE_OR_NEGATION_HINTS = (
 )
 
 _PRIMARY_DEMAND_CONCEPT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("facial_contour", ("颧骨", "颧弓", "颧突", "全突", "内轮廓线", "外轮廓线", "面部不流畅", "不流畅", "脸型", "左右不对称")),
     ("lip_perioral", ("口周", "嘴唇", "嘴巴", "唇部", "嘴角", "口下", "鼻基底", "唇形", "唇纹")),
     ("eye_bag_tear_trough_fatigue", ("眼袋", "泪沟", "疲态", "疲惫", "没精神")),
     ("eyelid_shape", ("双眼皮", "单眼皮", "眼型", "美杜莎")),
@@ -1266,19 +1275,21 @@ _PLAN_HINTS: tuple[tuple[str, str | None, tuple[str, ...]], ...] = (
     ("水光针", "面部", ("水光",)),
     ("光子嫩肤", "面部", ("光子嫩肤", "光子")),
     ("热玛吉/超声抗衰", "面部", ("热玛吉", "超声炮", "热拉提", "射频")),
-    ("鼻部局部玻尿酸/再生材料支撑调整", "鼻部", ("鼻小柱", "鼻尖", "鼻头", "鼻背", "鼻基底", "鼻坎基底", "鼻部", "鼻子", "定彩", "瑞德喜", "芭比", "再生", "玻尿酸")),
-    ("玻尿酸填充塑形", "面部", ("玻尿酸", "填充", "斐然", "润致", "乔雅登", "海薇", "艾莉薇", "伊婉", "濡白天使")),
-    ("肉毒/除皱瘦脸", "面部", ("肉毒", "瘦脸针", "除皱")),
-    ("胶原/胶原蛋白泪沟填充", "眼部", ("泪沟", "胶原", "胶原蛋白", "胶原针")),
+    ("鼻基底/中面部支撑型注射调整", "鼻基底/面中", ("鼻基底", "鼻坎基底", "中面部", "面中", "上颌骨", "苹果肌", "泪沟纹", "法令纹", "四个点", "瑞德喜", "支撑力强", "不容易吸水")),
+    ("鼻部局部玻尿酸/再生材料支撑调整", "鼻部", ("鼻小柱", "鼻尖", "鼻头", "鼻背", "山根", "鼻部玻尿酸", "鼻子玻尿酸", "定彩", "再生", "玻尿酸")),
+    ("下巴硬玻尿酸塑形", "下巴", ("下巴", "后缩", "硬玻尿酸", "两支硬玻尿酸", "2支硬玻尿酸", "定彩", "海派", "海薇", "海魅")),
+    ("玻尿酸填充塑形", "面部", ("玻尿酸", "填充", "斐然", "润致", "乔雅登", "海薇", "艾莉薇", "伊婉", "濡白天使", "瑞德喜", "瑞丽", "艾拉斯提", "艾拉斯题", "艾拉提斯")),
+    ("肉毒/除皱瘦脸", "面部", ("肉毒", "瘦脸针", "除皱", "吉适", "集市", "英伦大提拉", "乐提葆", "保妥适")),
+    ("胶原/胶原蛋白泪沟填充", "眼部", ("泪沟", "胶原", "胶原蛋白", "胶原针", "双美")),
     ("提眉联合双眼皮", "眼部", ("提眉加双眼皮", "提眉和双眼皮", "提眉双眼皮")),
     ("双眼皮", "眼部", ("双眼皮", "全切", "埋线")),
     ("眼袋/眶隔脂肪释放", "眼部", ("眼袋", "眶隔", "眶隔脂肪", "内切")),
     ("提眉", "眼部", ("提眉", "眉下切")),
     ("鼻综合", "鼻部", ("鼻综合", "隆鼻", "鼻翼", "鼻头", "山根", "膨体", "假体")),
-    ("面部填充", "面部", ("脂肪填充", "苹果肌", "太阳穴填充", "法令纹填充", "丰唇", "小圆唇")),
+    ("面部填充", "面部", ("脂肪填充", "苹果肌", "太阳穴填充", "太阳穴", "颞区", "额区", "额颞", "法令纹填充", "内轮廓线", "外轮廓线", "颧突", "颧弓", "下巴", "丰唇", "小圆唇")),
     ("吸脂塑形", "身体", ("吸脂", "抽脂", "腰腹", "大腿", "手臂", "后背", "背部", "小后背", "大后背", "超脂", "超脂术", "富贵包")),
 )
-_PLAN_RECOMMENDATION_CUES = ("建议", "适合", "推荐", "可以考虑", "先做", "先打", "打除皱", "下次", "更适合", "方案", "从", "选择")
+_PLAN_RECOMMENDATION_CUES = ("建议", "适合", "推荐", "可以考虑", "先做", "先打", "打除皱", "继续打", "再打", "复打", "补打", "下次", "更适合", "方案", "从", "选择", "首选")
 _RECOMMENDATION_EVIDENCE_CUES = (
     "建议",
     "推荐",
@@ -1286,6 +1297,10 @@ _RECOMMENDATION_EVIDENCE_CUES = (
     "可以考虑",
     "先做",
     "先打",
+    "继续打",
+    "再打",
+    "复打",
+    "补打",
     "可以做",
     "可以打",
     "能做",
@@ -1309,6 +1324,8 @@ _RECOMMENDATION_EVIDENCE_CUES = (
     "给你打",
     "医生建议",
     "要打",
+    "首选",
+    "只能买",
     "结合",
     "至少",
     "支的量",
@@ -1643,6 +1660,8 @@ def _naturalize_primary_body_part(body_part: str | None, *, evidence: str) -> st
         return normalized or "面部"
     if any(keyword in compact_evidence for keyword in ("脸很垮", "脸很很垮", "脸也很垮", "脸垮")):
         return "面部"
+    if any(keyword in compact_evidence for keyword in ("颧骨", "颧弓", "颧突", "全突", "内轮廓线", "外轮廓线")):
+        return "颧骨/面部轮廓"
     if any(keyword in compact_evidence for keyword in ("鼻基底", "鼻翼基底", "鼻子底", "鼻底")) and not any(keyword in compact_evidence for keyword in ("嘴唇", "唇部", "唇形", "唇纹")):
         return "鼻基底/面中"
     return normalized or body_part
@@ -1663,6 +1682,10 @@ def _naturalize_primary_demand(demand: str, *, body_part: str | None, evidence: 
 
     if any(keyword in compact for keyword in ("脸稍微紧一点", "脸稍微紧", "脸紧一点", "紧一点", "收紧一点")):
         return "脸稍微紧一点，想让面部更紧致"
+    if any(keyword in compact for keyword in ("颧骨", "颧弓", "颧突", "全突", "内轮廓线", "外轮廓线")):
+        if "左右不对称" in compact or "对称" in compact:
+            return "改善颧骨/颧弓显宽和左右不对称，希望面部轮廓更自然协调"
+        return "改善颧骨/颧弓显宽和面部不流畅，希望轮廓更自然协调"
     if any(keyword in compact for keyword in ("脸很垮", "脸很很垮", "脸也很垮", "脸垮")):
         if "眼睛" in compact and "老态" in compact:
             return "脸部下垮、眼睛显老态，希望整体改善"
@@ -1745,6 +1768,12 @@ def _should_naturalize_existing_primary_demand(
         and any(keyword in evidence_compact for keyword in ("鼻基底", "鼻翼基底", "鼻子底", "鼻底", "中面部", "面中", "苹果肌", "八字纹"))
         and any(keyword in evidence_compact for keyword in ("凹", "空", "平整", "衔接", "填充", "瑞德喜", "玻尿酸"))
         and not _looks_like_rhinoplasty_indication_statement(evidence_compact)
+    ):
+        return True
+
+    if (
+        any(keyword in normalized for keyword in ("面部轮廓", "脸型", "脸看起来更小", "提升紧致", "更自然协调"))
+        and any(keyword in evidence_compact for keyword in ("颧骨", "颧弓", "颧突", "全突", "内轮廓线", "外轮廓线"))
     ):
         return True
 
@@ -4403,6 +4432,19 @@ def _age_mention_is_example_or_negation(text: str, match: re.Match[str]) -> bool
 
     if _looks_like_staff_self_treatment_or_age_example(window):
         return True
+    if re.search(
+        re.escape(compact_age)
+        + r"(?:做|做的|做过|打|打的|打过|填|填的|填过|注射|注射过|割|割的|割过|隆|吸脂|抽脂|手术|时|时候|那年|那会|当时|开始)",
+        compact_window,
+    ):
+        return True
+    if re.search(
+        r"(?:我|你|您|她|他)?.{0,4}"
+        + re.escape(compact_age)
+        + r".{0,8}(?:做|打|填|注射|割|隆|吸脂|抽脂|手术)",
+        compact_window,
+    ):
+        return True
     if any(hint in window for hint in ("案例", "顾客", "别人", "人家", "朋友", "同事", "比如", "比如说")):
         return True
     if re.search(r"比(?:你|您|她|他).{0,4}(?:大|小)" + re.escape(age_text), window):
@@ -4868,6 +4910,51 @@ def _looks_like_positive_health_statement(text: str, value: str) -> bool:
     normalized = _clean_text(text)
     if _looks_like_negative_health_statement(normalized):
         return False
+    compact = re.sub(r"\s+", "", normalized)
+    if value == "精神类疾病":
+        diagnosis_cues = (
+            "精神类疾病",
+            "精神病",
+            "精神科",
+            "焦虑症",
+            "抑郁症",
+            "双相",
+            "确诊",
+            "诊断",
+            "病史",
+        )
+        medication_cues = (
+            "服药",
+            "吃药",
+            "用药",
+        )
+        negated_medication = any(
+            cue in compact
+            for cue in (
+                "没服药",
+                "没有服药",
+                "未服药",
+                "没吃药",
+                "没有吃药",
+                "未吃药",
+                "没用药",
+                "没有用药",
+                "未用药",
+            )
+        )
+        if negated_medication and not any(cue in compact for cue in diagnosis_cues):
+            return False
+        if any(cue in compact for cue in ("如果有焦虑", "有没有焦虑", "比较焦虑", "容易焦虑")) and not any(
+            cue in compact for cue in diagnosis_cues
+        ):
+            return False
+        if "焦虑" in compact and not any(cue in compact for cue in diagnosis_cues + medication_cues):
+            return False
+        if any(cue in compact for cue in medication_cues) and not negated_medication and any(
+            cue in compact for cue in ("焦虑", "抑郁", "精神")
+        ):
+            return True
+        return any(cue in compact for cue in diagnosis_cues)
     if any(keyword in normalized for keyword in _HEALTH_QUESTION_HINTS) or any(
         keyword in normalized for keyword in ("要查", "查你", "查一下", "筛查", "检查")
     ):
@@ -5015,6 +5102,11 @@ def _looks_like_profile_tag_statement(category: str, value: str, text: str) -> b
 def _profile_tag_evidence_supports_value(category: str, value: str, evidence: str) -> bool:
     if _looks_like_profile_tag_statement(category, value, evidence):
         return True
+    if category == "治疗项目" and value == "注射类":
+        if _looks_like_injection_history_question(evidence) and _looks_like_injection_history_answer(evidence):
+            return True
+    if category == "负面项目/设备/原材料" and value == "无":
+        return _looks_like_no_prior_treatment_statement(evidence)
     aliases: list[str] = []
     if category == "历史用的设备/原材料名称":
         aliases.extend(
@@ -5886,11 +5978,69 @@ def _sync_chief_complaint_standardized_indications(result_dict: dict[str, Any]) 
 _LIP_CONTEXT_HINTS = ("唇", "嘴唇", "嘴巴", "口周", "嘴角", "口下", "丰唇", "唇纹")
 _EYE_CONTEXT_HINTS = ("眼", "眼袋", "泪沟", "眼下", "眶周", "双眼皮", "单眼皮", "提眉")
 _NOSE_CONTEXT_HINTS = ("鼻", "山根", "鼻头", "鼻翼", "鼻尖", "鼻背", "鼻综合")
-_FACE_CONTEXT_HINTS = ("面部", "中面部", "面中", "鼻基底", "鼻翼基底", "口下", "口周", "苹果肌", "八字纹", "外轮廓线", "法令纹", "太阳穴", "颞", "下巴", "全脸", "脸型", "轮廓", "凹陷", "松弛", "下垂", "抗衰")
-_FILLER_CONTEXT_HINTS = ("面部填充", "填充", "注射", "玻尿酸", "瑞德喜", "胶原", "凹陷", "凹了", "空了", "苹果肌", "八字纹", "外轮廓线", "法令纹", "太阳穴", "颞", "鼻基底", "鼻翼基底", "下巴")
+_FACE_CONTEXT_HINTS = ("面部", "中面部", "面中", "鼻基底", "鼻翼基底", "口下", "口周", "苹果肌", "八字纹", "内轮廓线", "外轮廓线", "颧骨", "颧弓", "颧突", "法令纹", "太阳穴", "颞", "下巴", "全脸", "脸型", "轮廓", "凹陷", "松弛", "下垂", "抗衰")
+_FILLER_CONTEXT_HINTS = ("面部填充", "填充", "注射", "玻尿酸", "瑞德喜", "胶原", "凹陷", "凹了", "空了", "苹果肌", "八字纹", "内轮廓线", "外轮廓线", "颧骨", "颧弓", "颧突", "法令纹", "太阳穴", "颞", "鼻基底", "鼻翼基底", "下巴")
 _BODY_CONTEXT_HINTS = ("身体", "腰腹", "大腿", "手臂", "肩颈", "斜方肌", "后背", "背部", "小后背", "大后背", "吸脂", "抽脂", "超脂", "超脂术", "富贵包", "疤")
 _CHEST_CONTEXT_HINTS = ("胸", "乳房", "隆胸", "丰胸")
 _NECK_CONTEXT_HINTS = ("颈", "脖子", "颈纹")
+_GENERIC_FACE_BODY_PARTS = ("面部", "脸部", "脸", "全脸", "整体面部", "面部整体")
+_FACE_STRICT_CONTEXT_HINTS = (
+    "中面部",
+    "面中",
+    "鼻基底",
+    "鼻翼基底",
+    "苹果肌",
+    "八字纹",
+    "内轮廓线",
+    "外轮廓线",
+    "颧骨",
+    "颧弓",
+    "颧突",
+    "法令纹",
+    "太阳穴",
+    "颞",
+    "下巴",
+    "脸型",
+    "轮廓",
+    "凹陷",
+    "松弛",
+    "下垂",
+    "提升",
+    "提拉",
+    "紧致",
+    "抗衰",
+)
+_SEED_RECOMMENDATION_CONTEXT_CUES = (
+    "种草",
+    "后期",
+    "后续",
+    "下次",
+    "以后",
+    "之后",
+    "顺便",
+    "顺带",
+    "还可以",
+    "也可以",
+    "可以再",
+    "再考虑",
+    "维护",
+    "升级",
+    "你还有",
+    "还有一点",
+    "还有点",
+    "另外",
+    "暂缓",
+    "暂不",
+    "先不",
+    "先别",
+    "先不要",
+    "不建议现在",
+    "稳定后",
+    "一个多月",
+    "两个月以后",
+    "1-2个月",
+    "一两个月",
+)
 
 
 def _primary_demand_item_context(item: dict[str, Any]) -> str:
@@ -6528,6 +6678,112 @@ def _append_decision_factor(factors: list[str], factor: str) -> bool:
     return True
 
 
+_GENERIC_DECISION_FACTOR_LABELS = {"特殊身份", "支付/流程限制", "支付流程限制", "流程限制", "时间/到院限制", "时间到院限制", "到院限制", "治疗条件限制"}
+
+
+def _decision_factor_detail_from_text(factor: str, text: str) -> str:
+    normalized_factor = _clean_text(factor)
+    normalized_text = _clean_text(text)
+    if not normalized_factor:
+        return ""
+    if normalized_factor not in _GENERIC_DECISION_FACTOR_LABELS and normalized_factor != "生理期":
+        return normalized_factor
+    if not normalized_text:
+        return "" if normalized_factor in _GENERIC_DECISION_FACTOR_LABELS else normalized_factor
+
+    factor_category = ""
+    if normalized_factor in {"特殊身份"}:
+        factor_category = "identity"
+    elif normalized_factor in {"支付/流程限制", "支付流程限制", "流程限制"}:
+        factor_category = "payment"
+    elif normalized_factor in {"时间/到院限制", "时间到院限制", "到院限制"}:
+        factor_category = "time"
+    elif normalized_factor == "治疗条件限制":
+        factor_category = "treatment"
+
+    if (not factor_category or factor_category == "period") and (
+        normalized_factor == "生理期" or any(keyword in normalized_text for keyword in ("生理期", "经期", "月经", "大姨妈", "姨妈", "例假", "来事"))
+    ):
+        return "客户处于生理期，治疗时间受限"
+    if factor_category == "identity":
+        if any(keyword in normalized_text for keyword in ("黑名单", "黑名单人物")):
+            return "客户涉及黑名单身份，接待需谨慎"
+        if any(keyword in normalized_text for keyword in ("竞对", "竞品", "同行", "医美上班", "美容院上班", "整形医院上班")):
+            return "客户疑似竞对或同行身份，接待需谨慎"
+    if factor_category == "payment":
+        if any(keyword in normalized_text for keyword in ("支付失败", "付不了", "刷不了", "扫码不了")):
+            return "支付或扫码失败影响下单"
+        if "下载不了" in normalized_text:
+            return "客户无法完成下载操作，流程推进受限"
+        if "验证码" in normalized_text:
+            return "验证码流程受阻，流程推进受限"
+        if "身份证" in normalized_text:
+            return "身份证信息或验证流程影响办理"
+        if "流程" in normalized_text:
+            return "现场流程推进受限"
+    if factor_category == "time":
+        if "赶时间" in normalized_text:
+            return "客户赶时间，治疗安排受限"
+        if "今天上班" in normalized_text:
+            return "客户当天上班，治疗安排受限"
+        if any(keyword in normalized_text for keyword in ("路程远", "外地", "高铁", "飞机", "过几天要回去")):
+            return "客户外地或路程安排受限，复诊到院不便"
+        if "无法到院" in normalized_text:
+            return "客户无法到院，治疗安排受限"
+    if factor_category == "treatment":
+        if any(keyword in normalized_text for keyword in ("妊娠", "怀孕")):
+            return "客户处于孕期，治疗条件受限"
+        if "备孕" in normalized_text:
+            return "客户备孕，治疗条件受限"
+        if "哺乳" in normalized_text:
+            return "客户处于哺乳期，治疗条件受限"
+        if "禁忌" in normalized_text:
+            return "存在治疗禁忌，项目选择受限"
+        if any(keyword in normalized_text for keyword in ("不能做", "不能打", "不适合")):
+            return "医生判断当前不适合治疗或注射"
+    return "" if normalized_factor in _GENERIC_DECISION_FACTOR_LABELS else normalized_factor
+
+
+def _decision_factor_keywords_for_label(factor: str) -> tuple[str, ...]:
+    normalized = _clean_text(factor)
+    for label, keywords in _DECISION_FACTOR_HINTS:
+        if normalized == label:
+            return keywords
+    keywords: list[str] = []
+    for keyword in tuple(keyword for _, values in _DECISION_FACTOR_HINTS for keyword in values):
+        if keyword in normalized:
+            keywords.append(keyword)
+    if "支付" in normalized:
+        keywords.extend(["支付", "支付失败", "付不了", "刷不了", "扫码不了"])
+    if "扫码" in normalized:
+        keywords.extend(["扫码", "扫码不了"])
+    if "流程" in normalized:
+        keywords.extend(["流程", "下载不了", "验证码", "身份证"])
+    if "外地" in normalized or "路程" in normalized:
+        keywords.extend(["外地", "路程远", "高铁", "飞机", "过几天要回去"])
+    if "赶时间" in normalized:
+        keywords.append("赶时间")
+    if "上班" in normalized:
+        keywords.append("今天上班")
+    if "备孕" in normalized:
+        keywords.append("备孕")
+    if "哺乳" in normalized:
+        keywords.append("哺乳")
+    if "孕期" in normalized or "怀孕" in normalized:
+        keywords.extend(["怀孕", "妊娠"])
+    if "禁忌" in normalized:
+        keywords.append("禁忌")
+    return tuple(_dedupe_text_list(keywords)) or (normalized,)
+
+
+def _specific_decision_factor_from_sources(factor: str, sources: list[str]) -> str:
+    for source in sources:
+        detail = _decision_factor_detail_from_text(factor, source)
+        if detail:
+            return detail
+    return _decision_factor_detail_from_text(factor, "")
+
+
 def _text_implies_family_decision(text: str) -> bool:
     normalized = _clean_text(text)
     if not normalized:
@@ -6625,6 +6881,12 @@ def _filter_overlapping_decision_factors(
     filtered: list[str] = []
     for factor in factors:
         normalized = _clean_text(factor)
+        if not normalized:
+            continue
+        normalized = _specific_decision_factor_from_sources(
+            normalized,
+            [*evidence_texts, *loss_reasons, *concern_texts],
+        )
         if not normalized:
             continue
         # Drop concern-category labels — they belong in customer_concerns.
@@ -6809,6 +7071,10 @@ def _normalize_explicit_no_prior_treatment_profile_tags(
                 canonicalize_profile_tag_category(item.get("category")) == "历史用的设备/原材料名称"
                 and canonicalize_profile_tag_value("历史用的设备/原材料名称", item.get("value")) != "无"
             )
+            or (
+                canonicalize_profile_tag_category(item.get("category")) == "负面项目/设备/原材料"
+                and canonicalize_profile_tag_value("负面项目/设备/原材料", item.get("value")) != "无"
+            )
         )
         for item in tags
         if isinstance(item, dict)
@@ -6823,6 +7089,9 @@ def _normalize_explicit_no_prior_treatment_profile_tags(
                 changed = True
                 continue
             if category == "历史用的设备/原材料名称" and value == "无":
+                changed = True
+                continue
+            if category == "负面项目/设备/原材料" and value == "无":
                 changed = True
                 continue
             filtered.append(item)
@@ -6859,12 +7128,24 @@ def _normalize_explicit_no_prior_treatment_profile_tags(
             else:
                 changed = True
             continue
+        if category == "负面项目/设备/原材料":
+            if value == "无" and category not in dependent_defaults:
+                dependent_defaults[category] = {
+                    **item,
+                    "category": category,
+                    "value": "无",
+                    "weight_level": weight_by_category.get(category),
+                    "evidence": item.get("evidence") or default_evidence,
+                }
+            else:
+                changed = True
+            continue
         normalized.append(item)
 
     if insert_index is None:
         return tags, False
 
-    for offset, category in enumerate(("历史用的设备/原材料名称",)):
+    for offset, category in enumerate(("历史用的设备/原材料名称", "负面项目/设备/原材料")):
         if category not in dependent_defaults:
             dependent_defaults[category] = {
                 "category": category,
@@ -7471,6 +7752,14 @@ _SPARSE_MEDICAL_BUSINESS_INTENT_CUES = (
     "调整",
     "修复",
     "建议",
+    "要不要",
+    "需要",
+    "需要用",
+    "使用",
+    "用一下",
+    "用掉",
+    "修一下",
+    "修补",
     "打",
     "注射",
     "体验",
@@ -7497,6 +7786,21 @@ _SPARSE_MEDICAL_BUSINESS_EXTRA_KEYWORDS = (
     "美白",
     "光子",
     "玻尿酸",
+    "艾拉斯提",
+    "艾拉斯题",
+    "艾拉提斯",
+    "碘盐",
+    "简言",
+    "减盐",
+    "夜曲",
+    "材质",
+    "支撑力",
+    "耳朵",
+    "耳部",
+    "精灵耳",
+    "丰耳",
+    "下巴",
+    "额角",
     "肉毒",
     "瘦脸针",
     "除皱针",
@@ -7520,6 +7824,8 @@ _SPARSE_INDICATION_SUPPLEMENTAL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "鼻综合": ("鼻部", "隆鼻", "山根", "鼻背", "鼻头", "鼻翼", "鼻孔"),
     "双眼皮": ("双眼皮", "单眼皮", "眼型"),
     "眼袋": ("眼袋", "泪沟", "眶隔"),
+    "面部填充": ("下巴", "下巴衔接", "口周", "额角", "玻尿酸", "艾拉斯提", "艾拉斯题", "艾拉提斯", "碘盐", "简言", "减盐", "夜曲", "材质", "支撑力"),
+    "塑美": ("耳朵", "耳部", "耳朵长出来", "精灵耳", "丰耳", "额角", "下巴", "下颌轮廓线", "艾拉斯提", "艾拉斯题", "艾拉提斯", "碘盐", "简言", "减盐", "夜曲", "玻尿酸", "材质", "支撑力"),
     "疤痕": ("瘢痕", "斑痕", "疤", "留疤", "手上有一块"),
 }
 _SPARSE_MAIN_FACT_FALLBACK_NOTE = (
@@ -7788,6 +8094,18 @@ def _sparse_fallback_primary_demand(
         return "改善眼袋问题，希望眼下更平整", body_part or "眼部"
     if indication_name == "鼻综合":
         return "咨询鼻部塑形方案，希望鼻型更协调", body_part or "鼻部"
+    if indication_name == "面部填充":
+        if "下巴" in compact:
+            return "改善下巴/口周衔接，希望面部线条更自然", "面部"
+        if any(keyword in compact for keyword in ("额角", "额区")):
+            return "改善额角/额区轮廓，希望面部衔接更精致", "面部"
+        return "咨询面部填充塑形，希望轮廓更自然协调", body_part or "面部"
+    if indication_name == "塑美":
+        if any(keyword in compact for keyword in ("耳朵", "耳部", "精灵耳", "丰耳")):
+            return "改善耳部轮廓，希望耳部更立体精致", "耳部"
+        if any(keyword in compact for keyword in ("下巴", "下颌")):
+            return "改善下颌/下巴轮廓，希望线条更自然", body_part or "面部"
+        return "咨询注射塑形方案，希望局部轮廓更精致", body_part or _clean_text(hint.get("default_body_part")) or "面部"
     if indication_name == "疤痕":
         return "修复疤痕/瘢痕，希望外观更平整", body_part or "面部"
     if indication_name == "痤疮":
@@ -7795,12 +8113,24 @@ def _sparse_fallback_primary_demand(
     return f"咨询{indication_name or '医美'}相关改善方案", body_part or _clean_text(hint.get("default_body_part")) or "面部"
 
 
+def _has_generic_sparse_primary_demand(primary_payload: dict[str, Any]) -> bool:
+    items = [item for item in _as_list(primary_payload.get("items")) if isinstance(item, dict)]
+    if len(items) != 1:
+        return False
+    demand = _clean_text(items[0].get("demand"))
+    if not demand:
+        return False
+    compact = re.sub(r"\s+", "", demand)
+    return compact in {"咨询塑美方案", "咨询塑美相关改善方案", "咨询医美相关改善方案"}
+
+
 def _force_sparse_medical_business_main_facts(result_dict: dict[str, Any], *, raw: dict[str, Any]) -> bool:
     primary_payload = _as_dict(result_dict.setdefault("customer_primary_demands", {}))
     indication_payload = _as_dict(result_dict.setdefault("standardized_indications", {}))
     has_primary = bool(_as_list(primary_payload.get("items")))
     has_indication = bool(_as_list(indication_payload.get("items")))
-    if has_primary and has_indication:
+    has_generic_primary = _has_generic_sparse_primary_demand(primary_payload)
+    if has_primary and has_indication and not has_generic_primary:
         return False
 
     segments = _consultation_segments(raw)
@@ -7826,7 +8156,7 @@ def _force_sparse_medical_business_main_facts(result_dict: dict[str, Any], *, ra
         return False
 
     changed = False
-    if not has_primary:
+    if not has_primary or has_generic_primary:
         demand, body_part = _sparse_fallback_primary_demand(
             hint=hint,
             body_part=matched.body_part_name,
@@ -7897,7 +8227,9 @@ def sanitize_analysis_result_with_raw(result_dict: dict[str, Any], *, raw: dict[
     changed = _sanitize_staff_recommendations(result_dict, raw=raw) or changed
     changed = _backfill_staff_recommendations(result_dict, raw=raw) or changed
     changed = _sanitize_staff_recommendations(result_dict, raw=raw) or changed
+    changed = _split_seed_recommendations_from_staff_recommendations(result_dict) or changed
     changed = _sync_consultation_result_recommended_plan(result_dict) or changed
+    changed = _sync_consultation_result_seed_plan(result_dict) or changed
     changed = _backfill_empty_standardized_indications(result_dict, raw=raw) or changed
     changed = _sanitize_standardized_indications(result_dict, raw=raw) or changed
     changed = _backfill_primary_demands_from_plan_context(result_dict, raw=raw) or changed
@@ -7908,8 +8240,13 @@ def sanitize_analysis_result_with_raw(result_dict: dict[str, Any], *, raw: dict[
     changed = _sanitize_customer_concerns(result_dict, raw=raw) or changed
     changed = _force_sparse_medical_business_main_facts(result_dict, raw=raw) or changed
     changed = _backfill_empty_customer_primary_demands(result_dict, raw=raw) or changed
+    changed = _split_seed_recommendations_from_staff_recommendations(result_dict) or changed
     changed = _sync_consultation_result_recommended_plan(result_dict) or changed
+    changed = _sync_consultation_result_seed_plan(result_dict) or changed
+    if "consultation_result" in result_dict:
+        changed = _backfill_consultation_result_outcome(result_dict, raw=raw) or changed
     changed = _sync_consultation_result_customer_profile_summary(result_dict) or changed
+    changed = _update_analysis_quality_flags(result_dict, raw=raw) or changed
     return changed
 
 
@@ -7945,7 +8282,9 @@ def _backfill_consumption_intent(result_dict: dict[str, Any], *, raw: dict[str, 
 
         for factor, keywords in _DECISION_FACTOR_HINTS:
             if any(keyword in text for keyword in keywords):
-                changed = _append_decision_factor(decision_factors, factor) or changed
+                detail = _decision_factor_detail_from_text(factor, text)
+                if detail:
+                    changed = _append_decision_factor(decision_factors, detail) or changed
                 if evidence and evidence not in evidence_list:
                     evidence_list.append(evidence)
     if not changed:
@@ -8008,8 +8347,7 @@ def _sanitize_consumption_intent(result_dict: dict[str, Any], *, raw: dict[str, 
             kept_evidence.append(evidence)
             continue
 
-        hint = next((entry for entry in _DECISION_FACTOR_HINTS if factor == entry[0]), None)
-        keywords = hint[1] if hint else (factor,)
+        keywords = _decision_factor_keywords_for_label(factor)
         evidence = None
         for existing in evidence_list:
             evidence = _find_supported_evidence_from_existing_text(
@@ -8023,7 +8361,13 @@ def _sanitize_consumption_intent(result_dict: dict[str, Any], *, raw: dict[str, 
         if evidence is None:
             changed = True
             continue
-        _append_decision_factor(kept_factors, factor)
+        detail = _decision_factor_detail_from_text(factor, evidence)
+        if not detail:
+            changed = True
+            continue
+        if detail != factor:
+            changed = True
+        _append_decision_factor(kept_factors, detail)
         kept_evidence.append(evidence)
 
     if not changed and kept_factors == decision_factors and (not budget or kept_evidence):
@@ -8546,6 +8890,17 @@ def _naturalize_staff_recommendation(plan: str, *, body_part: str | None, eviden
             return "4999二代超声炮全脸提升紧致"
         return "超声/射频类抗衰提升紧致"
 
+    if any(keyword in compact for keyword in ("颧骨", "颧弓", "颧突", "全突", "内轮廓线", "外轮廓线")):
+        return "内外轮廓线联合填充改善颧骨显宽与凹陷"
+
+    if any(keyword in compact for keyword in ("鼻基底", "鼻坎基底", "中面部", "面中", "上颌骨", "苹果肌", "法令纹")) and any(
+        keyword in compact for keyword in ("瑞德喜", "玻尿酸", "支撑", "填充", "不含玻尿酸", "不容易吸水")
+    ):
+        return "鼻基底/中面部支撑型注射调整"
+
+    if "下巴" in compact and any(keyword in compact for keyword in ("硬玻尿酸", "两支", "2支", "后缩", "定彩", "海派", "海薇", "海魅")):
+        return "下巴硬玻尿酸塑形改善轻度后缩"
+
     if any(keyword in context for keyword in _NOSE_CONTEXT_HINTS):
         if any(keyword in compact for keyword in ("鼻小柱", "鼻头", "鼻尖", "鼻基底", "鼻坎基底")) and any(
             keyword in compact for keyword in ("定彩", "瑞德喜", "芭比", "再生", "玻尿酸", "支撑")
@@ -8754,6 +9109,10 @@ def _recommendation_brand_choices_from_evidence(evidence: str) -> tuple[str, ...
         or ("瑞典" in text and any(keyword in text for keyword in ("两个选择", "两种选择", "补性材料", "不含玻尿酸")))
     ):
         choices.append("瑞德喜")
+    if "定彩" in text:
+        choices.append("定彩")
+    if any(keyword in text for keyword in ("海派", "海薇", "海魅")):
+        choices.append("海薇/海魅（原文疑似海派）" if "海派" in text else "海薇/海魅")
 
     deduped: list[str] = []
     for choice in choices:
@@ -8772,6 +9131,46 @@ def _merge_recommendation_brand_values(existing: str, choices: tuple[str, ...]) 
         if normalized and normalized not in values:
             values.append(normalized)
     return "或".join(values)
+
+
+def _recommendation_material_from_evidence(evidence: str) -> str:
+    compact = re.sub(r"\s+", "", _clean_text(evidence))
+    if not compact:
+        return ""
+    if "硬玻尿酸" in compact:
+        return "硬玻尿酸"
+    if "胶原" in compact:
+        return "胶原/胶原蛋白"
+    if "不含玻尿酸" in compact and any(keyword in compact for keyword in ("支撑", "补性材料", "瑞德喜")):
+        return "不含玻尿酸的支撑型材料"
+    if "瑞德喜" in compact:
+        return "再生类支撑材料"
+    glass_negated = any(cue in compact for cue in ("别再", "可别再", "不能", "不用", "不要", "不建议", "避免")) and "玻尿酸" in compact
+    if "玻尿酸" in compact and not glass_negated:
+        return "玻尿酸"
+    return ""
+
+
+def _recommendation_dosage_from_evidence(evidence: str) -> str:
+    compact = re.sub(r"\s+", "", _clean_text(evidence))
+    if not compact:
+        return ""
+    if any(keyword in compact for keyword in ("内轮廓线", "外轮廓线", "颧弓", "颧突", "颧骨")):
+        has_front = any(keyword in compact for keyword in ("前面这条线", "前区", "前面不用玻尿酸", "每个一支", "每个1支"))
+        has_back = any(keyword in compact for keyword in ("后面这条线", "后区", "后面用玻尿酸", "一支到一支半", "1-1.5支", "一支半"))
+        if has_front and has_back:
+            return "前区每个点/每条线约1支；后区每边约1-1.5支"
+        if has_front:
+            return "前区每个点/每条线约1支"
+        if has_back:
+            return "后区每边约1-1.5支"
+    if "四个点" in compact and any(keyword in compact for keyword in ("1就可以", "一支", "1支")):
+        return "4个点位约1支"
+    if "两支硬玻尿酸" in compact or "2支硬玻尿酸" in compact:
+        return "2支硬玻尿酸"
+    if re.search(r"(?:每边|每天).{0,4}一支到一支半", compact):
+        return "每边约1-1.5支"
+    return ""
 
 
 def _enrich_recommendation_item_from_evidence(item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -8794,6 +9193,19 @@ def _enrich_recommendation_item_from_evidence(item: dict[str, Any]) -> tuple[dic
         target_material = "不含玻尿酸的补性材料"
         if not material or material in {"再生类材料", "胶原/胶原蛋白", "胶原蛋白"}:
             updated = {**updated, "material": target_material}
+            changed = True
+    material_from_evidence = _recommendation_material_from_evidence(evidence)
+    if material_from_evidence:
+        material = _clean_text(updated.get("material"))
+        if not material or material in {"再生类材料", "胶原/胶原蛋白", "胶原蛋白", "材料"}:
+            updated = {**updated, "material": material_from_evidence}
+            changed = True
+
+    dosage_from_evidence = _recommendation_dosage_from_evidence(evidence)
+    if dosage_from_evidence:
+        dosage = _clean_text(updated.get("dosage"))
+        if not dosage or dosage in {"一支", "1支", "前区1支；后区1-1.5支"}:
+            updated = {**updated, "dosage": dosage_from_evidence}
             changed = True
 
     recommendation = _clean_text(updated.get("recommendation"))
@@ -8854,6 +9266,92 @@ def _recommendation_matches_primary_demand_item(item: dict[str, Any], primary_it
     if _context_contains_any(rec_context, _FACE_CONTEXT_HINTS):
         return _context_contains_any(primary_context, _FACE_CONTEXT_HINTS)
     return False
+
+
+def _is_generic_face_body_part(value: str | None) -> bool:
+    normalized = _clean_text(value)
+    return bool(normalized and normalized in _GENERIC_FACE_BODY_PARTS)
+
+
+def _contexts_share_keyword(left: str, right: str, keywords: tuple[str, ...]) -> bool:
+    if not left or not right:
+        return False
+    return any(keyword in left and keyword in right for keyword in keywords)
+
+
+def _recommendation_matches_primary_demand_item_strict(item: dict[str, Any], primary_item: dict[str, Any]) -> bool:
+    rec_context = _recommendation_context_text(item)
+    primary_context = _primary_demand_item_context(primary_item)
+    if not rec_context or not primary_context:
+        return False
+
+    rec_body = _clean_text(item.get("body_part"))
+    primary_body = _clean_text(primary_item.get("body_part"))
+    if rec_body and primary_body and (
+        rec_body == primary_body
+        or rec_body in primary_body
+        or primary_body in rec_body
+    ):
+        if not (_is_generic_face_body_part(rec_body) or _is_generic_face_body_part(primary_body)):
+            return True
+
+    specific_checks = (
+        _LIP_CONTEXT_HINTS,
+        _EYE_CONTEXT_HINTS,
+        _NOSE_CONTEXT_HINTS,
+        _CHEST_CONTEXT_HINTS,
+        _NECK_CONTEXT_HINTS,
+        _BODY_CONTEXT_HINTS,
+    )
+    for keywords in specific_checks:
+        if _context_contains_any(rec_context, keywords) and _context_contains_any(primary_context, keywords):
+            return True
+
+    return _contexts_share_keyword(rec_context, primary_context, _FACE_STRICT_CONTEXT_HINTS)
+
+
+def _strict_demand_priorities_for_recommendation(
+    item: dict[str, Any],
+    primary_items: list[dict[str, Any]],
+) -> list[int]:
+    priorities: list[int] = []
+    for primary_item in primary_items:
+        if not isinstance(primary_item, dict):
+            continue
+        priority = primary_item.get("priority")
+        if not isinstance(priority, int):
+            continue
+        if _recommendation_matches_primary_demand_item_strict(item, primary_item):
+            priorities.append(priority)
+    deduped: list[int] = []
+    for priority in priorities:
+        if priority not in deduped:
+            deduped.append(priority)
+    return deduped
+
+
+def _recommendation_looks_like_seed_context(item: dict[str, Any]) -> bool:
+    context = _recommendation_context_text(item)
+    if not context:
+        return False
+    compact = re.sub(r"\s+", "", context)
+    return any(cue in compact for cue in _SEED_RECOMMENDATION_CONTEXT_CUES)
+
+
+def _recommendation_identity_key(item: dict[str, Any]) -> tuple[str, str]:
+    return (
+        _recommendation_family(
+            " ".join(
+                part
+                for part in (
+                    _clean_text(item.get("recommendation")),
+                    _clean_text(item.get("product_or_solution")),
+                )
+                if part
+            )
+        ),
+        _clean_text(item.get("body_part")),
+    )
 
 
 def _matching_primary_demand_for_recommendation(item: dict[str, Any], primary_items: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -9163,6 +9661,10 @@ def _plan_keywords_have_recommendation_context(text: str, keywords: tuple[str, .
         "适合",
         "可以",
         "能",
+        "继续",
+        "再打",
+        "复打",
+        "补打",
         "方案",
         "选择",
         "联合",
@@ -9179,6 +9681,8 @@ def _plan_keywords_have_recommendation_context(text: str, keywords: tuple[str, .
         "先买",
         "购买",
         "用",
+        "首选",
+        "只能买",
         "填",
         "填充",
         "注射",
@@ -9314,6 +9818,43 @@ def _first_evidence_timestamp_ms(evidence: str) -> int | None:
     return (minutes * 60 + seconds) * 1000
 
 
+def _looks_like_customer_price_or_dosage_request(text: str) -> bool:
+    compact = re.sub(r"\s+", "", _clean_text(text))
+    if not compact:
+        return False
+    if any(cue in compact for cue in ("帮我算", "给我算", "给我看一下", "让我考虑", "我考虑一下")) and any(
+        cue in compact for cue in ("价格", "多少钱", "报价", "费用", "几支", "几毫升")
+    ):
+        return True
+    if re.search(r"我.{0,12}(?:价格|多少钱|报价|费用|几支|几毫升).{0,12}(?:考虑|看看|算一下)", compact):
+        return True
+    return False
+
+
+def _looks_like_explicit_staff_recommendation_source(text: str) -> bool:
+    compact = re.sub(r"\s+", "", _clean_text(text))
+    if not compact:
+        return False
+    staff_source_cues = ("我们这边", "我们建议", "给你", "给您", "建议你", "建议您", "医生建议")
+    recommendation_cues = ("建议", "推荐", "可以", "适合", "继续打", "再打", "复打", "补打", "首选", "方案")
+    return any(cue in compact for cue in staff_source_cues) and any(cue in compact for cue in recommendation_cues)
+
+
+def _segment_can_source_staff_recommendation(segment: dict[str, Any], segments: list[dict[str, Any]]) -> bool:
+    text = _clean_text(segment.get("text"))
+    if not text:
+        return False
+    if _is_staff_side_segment(segment) or _looks_like_mislabeled_staff_customer_segment(segment):
+        return True
+    if _looks_like_explicit_staff_recommendation_source(text):
+        return True
+    if _looks_like_customer_price_or_dosage_request(text):
+        return False
+    if _is_customer_side_segment(segment):
+        return _looks_like_staff_explanatory_statement(text)
+    return _looks_like_staff_explanatory_statement(text)
+
+
 def _recommendation_context_evidence(
     segments: list[dict[str, Any]],
     index: int,
@@ -9396,7 +9937,12 @@ def _find_supported_recommendation_evidence(
         for raw_line in existing_lines:
             for segment_index, segment in enumerate(segments):
                 text = _clean_text(segment.get("text"))
-                if text and raw_line in text and _staff_segment_looks_like_recommendation(text, keywords):
+                if (
+                    text
+                    and raw_line in text
+                    and _segment_can_source_staff_recommendation(segment, segments)
+                    and _staff_segment_looks_like_recommendation(text, keywords)
+                ):
                     return _recommendation_context_evidence(segments, segment_index, keywords=keywords)
         timestamp_ms = _first_evidence_timestamp_ms(existing_evidence)
         if timestamp_ms is not None:
@@ -9404,9 +9950,8 @@ def _find_supported_recommendation_evidence(
                 if abs(_segment_begin_ms(segment) - timestamp_ms) > 3_000:
                     continue
                 text = _clean_text(segment.get("text"))
-                if _staff_segment_looks_like_recommendation(text, keywords):
+                if _segment_can_source_staff_recommendation(segment, segments) and _staff_segment_looks_like_recommendation(text, keywords):
                     return _recommendation_context_evidence(segments, segment_index, keywords=keywords)
-        return existing_evidence
 
     for raw_text in _normalize_text_list(existing_evidence):
         for raw_line in raw_text.splitlines():
@@ -9417,11 +9962,13 @@ def _find_supported_recommendation_evidence(
                 text = _clean_text(segment.get("text"))
                 if not text or line not in text:
                     continue
-                if _staff_segment_looks_like_recommendation(text, keywords):
+                if _segment_can_source_staff_recommendation(segment, segments) and _staff_segment_looks_like_recommendation(text, keywords):
                     return _recommendation_context_evidence(segments, segments.index(segment), keywords=keywords)
 
     for segment_index, segment in enumerate(segments):
         text = _clean_text(segment.get("text"))
+        if not _segment_can_source_staff_recommendation(segment, segments):
+            continue
         if not _staff_segment_looks_like_recommendation(text, keywords):
             continue
         evidence = _recommendation_context_evidence(segments, segment_index, keywords=keywords)
@@ -9503,6 +10050,8 @@ def _backfill_staff_recommendations(result_dict: dict[str, Any], *, raw: dict[st
         evidence = _segment_evidence(segment)
         for plan_name, body_part, keywords in _PLAN_HINTS:
             if not any(keyword in text for keyword in keywords):
+                continue
+            if not _segment_can_source_staff_recommendation(segment, segments):
                 continue
             if plan_name == "胶原/胶原蛋白泪沟填充" and not (
                 "泪沟" in text and any(keyword in text for keyword in ("胶原", "胶原蛋白", "胶原针"))
@@ -9722,8 +10271,123 @@ def _sanitize_staff_recommendations(result_dict: dict[str, Any], *, raw: dict[st
     return True
 
 
-def _sync_consultation_result_recommended_plan(result_dict: dict[str, Any]) -> bool:
+def _split_seed_recommendations_from_staff_recommendations(result_dict: dict[str, Any]) -> bool:
+    primary_items = [
+        item
+        for item in _as_list(_as_dict(result_dict.get("customer_primary_demands")).get("items"))
+        if isinstance(item, dict)
+    ]
+    if not primary_items:
+        return False
+
     recommendations = _as_dict(result_dict.get("staff_recommendations"))
+    items = [item for item in _as_list(recommendations.get("items")) if isinstance(item, dict)]
+    if not items:
+        items = []
+
+    seed_payload = _as_dict(result_dict.setdefault("staff_seed_recommendations", {}))
+    existing_seed_items = [item for item in _as_list(seed_payload.get("items")) if isinstance(item, dict)]
+
+    seed_items: list[dict[str, Any]] = []
+    seed_seen: set[tuple[str, str]] = set()
+    promoted_seed_items: list[dict[str, Any]] = []
+    changed = False
+
+    def add_seed_item(seed_item: dict[str, Any]) -> None:
+        seed_key = _recommendation_identity_key(seed_item)
+        if seed_key in seed_seen:
+            return
+        seed_items.append(seed_item)
+        seed_seen.add(seed_key)
+
+    for seed_item in existing_seed_items:
+        strict_priorities = _strict_demand_priorities_for_recommendation(seed_item, primary_items)
+        if strict_priorities:
+            promoted_seed_items.append({**seed_item, "demand_priority": strict_priorities})
+            changed = True
+            continue
+        normalized_seed_item = seed_item
+        if _as_list(seed_item.get("demand_priority")):
+            normalized_seed_item = {**seed_item, "demand_priority": []}
+            changed = True
+        add_seed_item(normalized_seed_item)
+
+    kept_items: list[dict[str, Any]] = []
+    kept_seen: set[tuple[str, str]] = set()
+
+    def add_kept_item(kept_item: dict[str, Any]) -> None:
+        kept_key = _recommendation_identity_key(kept_item)
+        if kept_key in kept_seen:
+            return
+        kept_items.append(kept_item)
+        kept_seen.add(kept_key)
+
+    for item in items:
+        body_part = _clean_text(item.get("body_part"))
+        context = _recommendation_context_text(item)
+        strict_priorities = _strict_demand_priorities_for_recommendation(item, primary_items)
+        inferred_priorities = _infer_demand_priority(primary_items, body_part=body_part, text=context)
+        explicit_priorities = [
+            int(priority)
+            for priority in _as_list(item.get("demand_priority"))
+            if isinstance(priority, (int, float))
+        ]
+        looks_like_seed = _recommendation_looks_like_seed_context(item)
+        if strict_priorities:
+            if strict_priorities != _as_list(item.get("demand_priority")):
+                item = {**item, "demand_priority": strict_priorities}
+                changed = True
+            add_kept_item(item)
+            continue
+        if looks_like_seed:
+            seed_item = {**item, "demand_priority": []}
+            add_seed_item(seed_item)
+            changed = True
+            continue
+        if explicit_priorities or inferred_priorities:
+            next_priorities = explicit_priorities or inferred_priorities
+            if inferred_priorities:
+                next_priorities = inferred_priorities
+            if next_priorities != _as_list(item.get("demand_priority")):
+                item = {**item, "demand_priority": next_priorities}
+                changed = True
+            add_kept_item(item)
+            continue
+
+        seed_item = {**item, "demand_priority": []}
+        add_seed_item(seed_item)
+        changed = True
+
+    for promoted_item in promoted_seed_items:
+        add_kept_item(promoted_item)
+
+    if not changed:
+        return False
+
+    recommendations["items"] = kept_items
+    recommendations["summary"] = "；".join(
+        _format_recommendation_plan_text(item)
+        for item in kept_items[:3]
+        if _format_recommendation_plan_text(item)
+    )
+    seed_payload["items"] = seed_items
+    seed_payload["summary"] = "；".join(
+        _format_recommendation_plan_text(item)
+        for item in seed_items[:3]
+        if _format_recommendation_plan_text(item)
+    )
+    result_dict["staff_recommendations"] = recommendations
+    result_dict["staff_seed_recommendations"] = seed_payload
+    return True
+
+
+def _sync_consultation_result_plan_from_recommendations(
+    result_dict: dict[str, Any],
+    *,
+    recommendations_key: str,
+    plan_key: str,
+) -> bool:
+    recommendations = _as_dict(result_dict.get(recommendations_key))
     recommendation_items = [
         item for item in _as_list(recommendations.get("items")) if isinstance(item, dict)
     ]
@@ -9747,7 +10411,7 @@ def _sync_consultation_result_recommended_plan(result_dict: dict[str, Any]) -> b
     if not plan_items:
         return False
 
-    recommended_plan = _as_dict(consultation_result.get("recommended_plan"))
+    recommended_plan = _as_dict(consultation_result.get(plan_key))
     new_summary = "；".join(item["plan"] for item in plan_items)
     changed = False
     if _clean_text(recommended_plan.get("summary")) != new_summary:
@@ -9760,17 +10424,35 @@ def _sync_consultation_result_recommended_plan(result_dict: dict[str, Any]) -> b
     if not changed:
         return False
 
-    consultation_result["recommended_plan"] = recommended_plan
+    consultation_result[plan_key] = recommended_plan
     result_dict["consultation_result"] = consultation_result
     return True
 
 
+def _sync_consultation_result_recommended_plan(result_dict: dict[str, Any]) -> bool:
+    return _sync_consultation_result_plan_from_recommendations(
+        result_dict,
+        recommendations_key="staff_recommendations",
+        plan_key="recommended_plan",
+    )
+
+
+def _sync_consultation_result_seed_plan(result_dict: dict[str, Any]) -> bool:
+    return _sync_consultation_result_plan_from_recommendations(
+        result_dict,
+        recommendations_key="staff_seed_recommendations",
+        plan_key="seed_plan",
+    )
+
+
 def _sync_consultation_result_customer_profile_summary(result_dict: dict[str, Any]) -> bool:
     customer_profile = _as_dict(result_dict.get("customer_profile"))
-    consultation_result = _as_dict(result_dict.setdefault("consultation_result", {}))
     tags = [item for item in _as_list(customer_profile.get("tags")) if isinstance(item, dict)]
     age = _clean_text(customer_profile.get("age")) or None
     age_evidence = _clean_text(customer_profile.get("age_evidence")) or None
+    if not tags and not age and "consultation_result" not in result_dict:
+        return False
+    consultation_result = _as_dict(result_dict.setdefault("consultation_result", {}))
     summary = f"本次录音共提取 {len(tags)} 个画像标签。" if tags else "本次录音暂未提取出明确画像标签。"
     next_summary = {
         "summary": summary,
@@ -9864,6 +10546,49 @@ def _backfill_consultation_result_outcome(result_dict: dict[str, Any], *, raw: d
     has_pending_or_loss = any(
         keyword in text_blob for keyword in (_DEAL_PENDING_HINTS + _DEAL_PRICE_LOSS_HINTS + _DEAL_SCHEDULE_LOSS_HINTS)
     )
+    landed_action_hints = (
+        "付款",
+        "付钱",
+        "交钱",
+        "刷卡",
+        "定金",
+        "意向金",
+        "下单",
+        "开单",
+        "验券",
+        "核销",
+        "敷麻药",
+        "今天做",
+        "今天治疗",
+        "安排治疗",
+        "安排手术",
+        "排手术",
+        "确定做",
+        "确认做",
+    )
+    deal_items = _normalize_text_list(deal_outcome.get("deal_items"))
+    amount = _clean_text(deal_outcome.get("amount"))
+    summary_text = _clean_text(deal_outcome.get("summary"))
+    has_landed_action = any(keyword in text_blob for keyword in landed_action_hints)
+    has_contradictory_success_summary = any(
+        keyword in summary_text
+        for keyword in (
+            "未形成明确",
+            "未明确成交",
+            "未成交",
+            "未付款",
+            "未下单",
+            "未落地",
+            "未确认",
+            "仍需考虑",
+            "回去考虑",
+            "商量",
+        )
+    )
+    stale_loss_summary = any(
+        keyword in summary_text
+        for keyword in ("未形成明确", "未明确成交", "未成交", "未付款", "未下单", "未落地", "未确认", "对话中未形成成交")
+    )
     inferred_status = existing_status
     if has_strong_success:
         inferred_status = "已成交"
@@ -9871,9 +10596,22 @@ def _backfill_consultation_result_outcome(result_dict: dict[str, Any], *, raw: d
         inferred_status = "未成交"
     elif existing_status == "已成交":
         inferred_status = "未明确"
+    elif existing_status == "未成交" and not has_pending_or_loss:
+        if stale_loss_summary and not deal_items and not amount:
+            inferred_status = "未明确"
+    if inferred_status == "已成交" and (
+        has_contradictory_success_summary
+        or (not has_landed_action and not deal_items and not amount)
+    ):
+        inferred_status = "未成交" if has_pending_or_loss else "未明确"
     if inferred_status != existing_status:
         deal_outcome["status"] = inferred_status
         changed = True
+    if inferred_status == "未明确" and stale_loss_summary:
+        neutral_summary = "对话中未出现付款、下单或明确拒绝，成交状态未明确。"
+        if summary_text != neutral_summary:
+            deal_outcome["summary"] = neutral_summary
+            changed = True
 
     loss_reasons = _normalize_text_list(deal_outcome.get("loss_reasons"))
     current_status = _clean_text(deal_outcome.get("status")) or inferred_status
@@ -9904,7 +10642,9 @@ def _backfill_consultation_result_outcome(result_dict: dict[str, Any], *, raw: d
     if not decision_factors:
         for factor, keywords in _DECISION_FACTOR_HINTS:
             if any(keyword in text_blob for keyword in keywords):
-                changed = _append_decision_factor(decision_factors, factor) or changed
+                detail = _decision_factor_detail_from_text(factor, text_blob)
+                if detail:
+                    changed = _append_decision_factor(decision_factors, detail) or changed
     if decision_factors:
         deal_factors["decision_factors"] = _filter_overlapping_decision_factors(
             decision_factors,
@@ -10079,6 +10819,96 @@ def _compute_inference_note(raw: dict) -> str | None:
     return None
 
 
+def _analysis_evidence_looks_like_case_or_third_party(evidence: Any) -> bool:
+    text = _clean_text(evidence)
+    if not text:
+        return False
+    if _looks_like_third_party_narrative_statement(text):
+        return True
+    compact = re.sub(r"\s+", "", text)
+    return any(
+        cue in compact
+        for cue in (
+            "我那顾客",
+            "我有个顾客",
+            "有个顾客",
+            "其他顾客",
+            "别的顾客",
+            "别人",
+            "人家",
+            "案例",
+            "给你看",
+            "我朋友",
+            "我同事",
+            "我们员工",
+            "我自己做",
+        )
+    )
+
+
+def _update_analysis_quality_flags(result_dict: dict[str, Any], *, raw: dict[str, Any]) -> bool:
+    issues: list[str] = []
+    segments = _consultation_segments(raw)
+    transcript_text = "\n".join(_clean_text(segment.get("text")) for segment in segments)
+    has_medical_scene_hint = _text_contains_any_keyword(transcript_text, _sparse_medical_business_keywords())
+
+    primary_items = [
+        item
+        for item in _as_list(_as_dict(result_dict.get("customer_primary_demands")).get("items"))
+        if isinstance(item, dict)
+    ]
+    indication_items = [
+        item
+        for item in _as_list(_as_dict(result_dict.get("standardized_indications")).get("items"))
+        if isinstance(item, dict)
+    ]
+    if has_medical_scene_hint and not primary_items:
+        issues.append("未提取到可支撑 SAP 回写的顾客主诉")
+    if has_medical_scene_hint and not indication_items:
+        issues.append("未提取到可支撑 SAP 回写的适应症")
+
+    for item in primary_items[:5]:
+        evidence = _clean_text(item.get("evidence"))
+        if evidence and _analysis_evidence_looks_like_case_or_third_party(evidence):
+            issues.append("顾客主诉证据疑似来自案例/第三方叙述")
+            break
+
+    for item in indication_items[:5]:
+        evidence = _clean_text(item.get("evidence"))
+        if evidence and _analysis_evidence_looks_like_case_or_third_party(evidence):
+            issues.append("适应症证据疑似来自案例/第三方叙述")
+            break
+
+    consultation_result = _as_dict(result_dict.get("consultation_result"))
+    deal_outcome = _as_dict(consultation_result.get("deal_outcome"))
+    status = _clean_text(deal_outcome.get("status"))
+    summary = _clean_text(deal_outcome.get("summary"))
+    if status == "已成交" and any(
+        keyword in summary
+        for keyword in ("未形成明确", "未明确成交", "未成交", "未付款", "未下单", "未落地", "未确认")
+    ):
+        issues.append("成交状态与成交摘要矛盾")
+
+    role_correction_count = sum(1 for segment in segments if _clean_text(segment.get("role_corrected_from")))
+    if role_correction_count >= 2:
+        issues.append(f"检测到{role_correction_count}句疑似说话人错标并已自动修正，建议复核主诉和方案证据")
+
+    ambiguous_terms = [term for term in ("抑制read", "瑞的一", "每天一支到一支半", "芭比针", "全突") if term in transcript_text]
+    if ambiguous_terms:
+        issues.append("ASR 存在疑似医美热词/用量误识别：" + "、".join(ambiguous_terms[:5]))
+
+    quality = {
+        "requires_review": bool(issues),
+        "issues": issues[:8],
+    }
+    if not issues and "analysis_quality" not in result_dict:
+        return False
+    if result_dict.get("analysis_quality") == quality:
+        return False
+    result_dict["analysis_quality"] = quality
+    return True
+
+
 def analyze_transcript(path: str | Path, *, system_prompt: str | None = None) -> AnalysisResult:
     """对一个转写 JSON 文件执行完整的四项分析。
 
@@ -10128,8 +10958,10 @@ def analyze_transcript(path: str | Path, *, system_prompt: str | None = None) ->
     _sanitize_staff_recommendations(result_dict, raw=raw)
     _backfill_staff_recommendations(result_dict, raw=raw)
     _sanitize_staff_recommendations(result_dict, raw=raw)
+    _split_seed_recommendations_from_staff_recommendations(result_dict)
     _backfill_consultation_result_outcome(result_dict, raw=raw)
     _sync_consultation_result_recommended_plan(result_dict)
+    _sync_consultation_result_seed_plan(result_dict)
 
     standardized_indications = result_dict.get("standardized_indications")
     if isinstance(standardized_indications, dict):
@@ -10173,8 +11005,11 @@ def analyze_transcript(path: str | Path, *, system_prompt: str | None = None) ->
     _sanitize_staff_recommendations(result_dict, raw=raw)
     _backfill_staff_recommendations(result_dict, raw=raw)
     _sanitize_staff_recommendations(result_dict, raw=raw)
+    _split_seed_recommendations_from_staff_recommendations(result_dict)
     _sync_consultation_result_recommended_plan(result_dict)
+    _sync_consultation_result_seed_plan(result_dict)
     _sync_consultation_result_customer_profile_summary(result_dict)
+    _update_analysis_quality_flags(result_dict, raw=raw)
 
     result = AnalysisResult.model_validate(result_dict)
 
