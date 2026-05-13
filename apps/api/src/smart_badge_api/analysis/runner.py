@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 
 from smart_badge_api.analysis.customer_profile_score_sync import refresh_recording_profile_scores_for_current_context
-from smart_badge_api.analysis.pipeline import analyze_transcript
+from smart_badge_api.analysis.production import analyze_transcript_for_production
 from smart_badge_api.analysis.prompt_builder import build_system_prompt
 from smart_badge_api.analysis.transcript import load_transcript
 from smart_badge_api.api.ws_hub import task_hub
@@ -26,9 +26,16 @@ logger = logging.getLogger(__name__)
 _VISIT_SCOPED_ANALYSIS_STEM_PATTERN = re.compile(r"^recording_(?P<recording_id>[^_]+)_visit_(?P<visit_id>[^_]+)$")
 
 
-def _run_analysis_sync(file_path: str, system_prompt: str | None = None) -> dict:
-    result = analyze_transcript(file_path, system_prompt=system_prompt)
-    return result.model_dump()
+def _run_analysis_sync(
+    file_path: str,
+    system_prompt: str | None = None,
+    staff_context: dict[str, str] | None = None,
+) -> dict:
+    return analyze_transcript_for_production(
+        file_path,
+        system_prompt=system_prompt,
+        staff_context=staff_context,
+    )
 
 
 def _result_path(file_path: str) -> Path:
@@ -48,6 +55,37 @@ async def _resolve_recording_hospital_code(db, recording_id: str | None) -> str 
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def _resolve_recording_staff_context(db, recording_id: str | None, file_path: str) -> dict[str, str]:
+    context = {
+        "file_name": Path(file_path).name,
+        "staff_name": "",
+        "staff_role": "",
+        "hospital_code": "",
+    }
+    if not recording_id:
+        return context
+    row = (
+        await db.execute(
+            select(Recording.file_name, Staff.name, Staff.role, Staff.hospital_code)
+            .join(Staff, Recording.staff_id == Staff.id, isouter=True)
+            .where(Recording.id == recording_id)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return context
+    file_name, staff_name, staff_role, hospital_code = row
+    context.update(
+        {
+            "file_name": file_name or context["file_name"],
+            "staff_name": staff_name or "",
+            "staff_role": staff_role or "",
+            "hospital_code": hospital_code or "",
+        }
+    )
+    return context
 
 
 async def _broadcast_task_progress(task_id: str, **fields) -> None:
@@ -167,6 +205,7 @@ async def execute_analysis(task_id: str) -> None:
         async with _session_factory() as db:
             hospital_code = await _resolve_recording_hospital_code(db, recording_id)
             system_prompt = await build_system_prompt(db, hospital_code=hospital_code)
+            staff_context = await _resolve_recording_staff_context(db, recording_id, resolved_path)
 
         source_path = Path(resolved_path)
         if not source_path.exists():
@@ -184,7 +223,7 @@ async def execute_analysis(task_id: str) -> None:
         await _update_task(task_id, progress=20, segment_count=segment_count, duration_ms=duration_ms)
 
         loop = asyncio.get_running_loop()
-        result_dict = await loop.run_in_executor(None, _run_analysis_sync, resolved_path, system_prompt)
+        result_dict = await loop.run_in_executor(None, _run_analysis_sync, resolved_path, system_prompt, staff_context)
         if visit_id is None and recording_id:
             try:
                 async with _session_factory() as db:

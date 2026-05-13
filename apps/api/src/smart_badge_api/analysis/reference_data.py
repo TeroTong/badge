@@ -126,6 +126,42 @@ _STATIC_INDICATION_ROWS: tuple[tuple[str, str, str, str, str, str], ...] = (
     ("Y5", "中医", "SYS5001", "身体调理", "BW5001", "身体"),
 )
 
+_STATIC_INDICATION_NOTES: dict[tuple[str, str, str], str] = {
+    ('Y1', 'SYZ1016', 'BW1004'): '仅脂肪填充',
+    ('Y1', 'SYZ1019', 'BW1005'): '仅脂肪填充',
+    ('Y2', 'SYZ2001', 'BW2001'): '除脂肪填充以外的材料注射，部位包括：头皮、颅顶、侧颅、后颅、枕骨',
+    ('Y2', 'SYZ2001', 'BW2002'): '除脂肪填充以外的材料注射，部位包括：额头',
+    ('Y2', 'SYZ2001', 'BW2003'): '除脂肪填充以外的材料注射，部位包括：太阳穴、眼尾外侧、眼眶外侧',
+    ('Y2', 'SYZ2001', 'BW2004'): '除脂肪填充以外的材料注射，部位包括：耳基底、耳垂、耳轮等',
+    ('Y2', 'SYZ2001', 'BW2005'): '除脂肪填充以外的材料注射，部位包括：中面部、苹果肌、面中部、中面部容量、鼻翼旁、面颊、鼻唇沟、法令纹',
+    ('Y2', 'SYZ2001', 'BW2006'): '除脂肪填充以外的材料注射，部位包括：面颊外侧、颊脂垫、颧弓下方、耳朵前方、印第安纹',
+    ('Y2', 'SYZ2001', 'BW2007'): '除脂肪填充以外的材料注射，部位包括：眼袋、泪沟、黑眼圈、上睑松弛、上睑凹陷、卧蚕',
+    ('Y2', 'SYZ2001', 'BW2008'): '除脂肪填充以外的材料注射，部位包括：嘴唇、嘴巴、唇珠、丘比特弓、口周、薄唇、唇峰、唇纹、人中、木偶纹',
+    ('Y2', 'SYZ2001', 'BW2012'): '除脂肪填充以外的材料注射',
+    ('Y2', 'SYZ2001', 'BW2013'): '除脂肪填充以外的材料注射，部位包括：会阴、阴道、外阴、阴阜、阴蒂、小阴唇、大阴唇、会阴体、阴道口',
+    ('Y2', 'SYZ2001', 'BW2014'): '除脂肪填充以外的材料注射，部位包括：眉弓、眉骨、眉脊、眉锋、眉心、眉头',
+    ('Y2', 'SYZ2001', 'BW2015'): '除脂肪填充以外的材料注射，部位包括：双C线、鼻额角、三角区、鼻根',
+    ('Y2', 'SYZ2001', 'BW2016'): '除脂肪填充以外的材料注射，部位包括：鼻背、鼻尖、鼻小柱、鼻翼、鼻基底、鼻小柱基底',
+    ('Y2', 'SYZ2001', 'BW2017'): '除脂肪填充以外的材料注射，部位包括：发际线、高颅顶',
+    ('Y2', 'SYZ2001', 'BW2018'): '除脂肪填充以外的材料注射，部位包括：下颌缘、双下巴、下颌线',
+    ('Y2', 'SYZ2001', 'BW2019'): '除脂肪填充以外的材料注射，部位包括：眼尾、颧骨突出、眼外侧',
+    ('Y2', 'SYZ2001', 'BW2020'): '除脂肪填充以外的材料注射，部位包括：中面颊区、口角下区',
+    ('Y2', 'SYZ2002', 'BW2009'): '除脂肪填充以外的材料注射',
+    ('Y2', 'SYZ2002', 'BW2010'): '除脂肪填充以外的材料注射',
+    ('Y2', 'SYZ2002', 'BW2011'): '除脂肪填充以外的材料注射',
+    ('Y2', 'SYZ2002', 'BW2012'): '除脂肪填充以外的材料注射',
+    ('Y2', 'SYZ2002', 'BW2013'): '除脂肪填充以外的材料注射',
+    ('Y3', 'SYZ3001', 'BW3001'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3001', 'BW3002'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3001', 'BW3003'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3001', 'BW3004'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3001', 'BW3006'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3002', 'BW3001'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3002', 'BW3002'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3002', 'BW3003'): '提及仪器、中胚层治疗、水光治疗等',
+    ('Y3', 'SYZ3002', 'BW3004'): '提及仪器、中胚层治疗、水光治疗等',
+}
+
 
 @dataclass(frozen=True)
 class IndicationReferenceItem:
@@ -135,12 +171,15 @@ class IndicationReferenceItem:
     indication_name: str
     body_part_code: str
     body_part_name: str
+    indication_note: str = ""
 
 
 @dataclass(frozen=True)
 class AnalysisReferenceData:
     feature_objectives: str
     indication_reference: str
+    indication_guidance_reference: str
+    indication_prompt_reference: str
     indication_catalog_by_code_triplet: dict[tuple[str, str, str], IndicationReferenceItem]
     indication_catalog_by_name_triplet: dict[tuple[str, str, str], IndicationReferenceItem]
     indication_catalog_by_code_pair: dict[tuple[str, str], IndicationReferenceItem]
@@ -162,6 +201,7 @@ def _load_static_analysis_reference_data() -> AnalysisReferenceData:
     catalog_by_name_pair: dict[tuple[str, str], IndicationReferenceItem] = {}
     code_pair_candidates: dict[tuple[str, str], list[IndicationReferenceItem]] = {}
     name_pair_candidates: dict[tuple[str, str], list[IndicationReferenceItem]] = {}
+    guidance_lines: list[str] = []
 
     for department_code, department_name, indication_code, indication_name, body_part_code, body_part_name in _STATIC_INDICATION_ROWS:
         item = IndicationReferenceItem(
@@ -171,6 +211,7 @@ def _load_static_analysis_reference_data() -> AnalysisReferenceData:
             indication_name=indication_name,
             body_part_code=body_part_code,
             body_part_name=body_part_name,
+            indication_note=_STATIC_INDICATION_NOTES.get((department_code, indication_code, body_part_code), ""),
         )
         code_triplet = (item.department_code, item.indication_code, item.body_part_code)
         name_triplet = (item.department_name, item.indication_name, item.body_part_name)
@@ -188,15 +229,30 @@ def _load_static_analysis_reference_data() -> AnalysisReferenceData:
         if dedupe_key in seen_keys:
             continue
         seen_keys.add(dedupe_key)
-        lines.append(
+        line = (
             f"- {item.department_code}|{item.department_name}|"
             f"{item.indication_code}|{item.indication_name}|"
             f"{item.body_part_code}|{item.body_part_name}"
+        )
+        lines.append(line)
+        if item.indication_note:
+            guidance_lines.append(f"{line}；选择说明：{item.indication_note}")
+
+    guidance_reference = "\n".join(guidance_lines)
+    prompt_reference = "\n".join(lines)
+    if guidance_reference:
+        prompt_reference = (
+            f"{prompt_reference}\n\n"
+            "【适应症选择说明】以下说明只用于帮助判断主诉/方案应对应哪条适应症，"
+            "不属于 SAP 编码字段，输出 standardized_indications 时仍只填写上方 6 个字段。\n"
+            f"{guidance_reference}"
         )
 
     return AnalysisReferenceData(
         feature_objectives=_STATIC_FEATURE_OBJECTIVES,
         indication_reference="\n".join(lines),
+        indication_guidance_reference=guidance_reference,
+        indication_prompt_reference=prompt_reference,
         indication_catalog_by_code_triplet=catalog_by_code_triplet,
         indication_catalog_by_name_triplet=catalog_by_name_triplet,
         indication_catalog_by_code_pair=catalog_by_code_pair,

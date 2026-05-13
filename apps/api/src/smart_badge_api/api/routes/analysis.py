@@ -12,15 +12,19 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from smart_badge_api.api.analysis_access import build_analysis_artifact_access, task_is_visible
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
+from smart_badge_api.analysis.prompt_builder import build_system_prompt
+from smart_badge_api.analysis.staged_pipeline import analyze_transcript_staged
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.models import Recording, Transcript, User
 from smart_badge_api.db.session import get_db
+from smart_badge_api.sap_consultation import attach_unlinked_sap_preview_to_result
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,12 @@ _analysis_result_list_lock = asyncio.Lock()
 
 def _results_dir() -> Path:
     return get_settings().results_path
+
+
+def _experimental_results_dir() -> Path:
+    path = _results_dir() / "experimental_staged"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _raw_dir() -> Path:
@@ -82,6 +92,14 @@ def _extract_recording_id(file_id: str) -> str | None:
 
 
 def _load_raw_data(file_id: str) -> dict | None:
+    raw_path = _resolve_raw_data_path(file_id)
+    if raw_path is not None:
+        with open(raw_path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def _resolve_raw_data_path(file_id: str) -> Path | None:
     raw_dir = _raw_dir()
     candidates = (
         raw_dir / f"{file_id}.json",
@@ -89,10 +107,8 @@ def _load_raw_data(file_id: str) -> dict | None:
         raw_dir / "dingtalk_staging" / "analysis_input" / f"{file_id}.json",
     )
     for raw_path in candidates:
-        if not raw_path.exists():
-            continue
-        with open(raw_path, encoding="utf-8") as f:
-            return json.load(f)
+        if raw_path.exists():
+            return raw_path
     return None
 
 
@@ -135,6 +151,92 @@ async def _load_transcript_context(recording_id: str | None, db: AsyncSession) -
         "created_at": transcript.created_at.isoformat() if transcript.created_at else None,
         "completed_at": transcript.completed_at.isoformat() if transcript.completed_at else None,
     }
+
+
+def _experimental_result_path(file_id: str) -> Path:
+    return _experimental_results_dir() / f"{file_id}.staged.json"
+
+
+def _load_result_payload(file_id: str) -> tuple[dict, dict | None]:
+    result_path = _results_dir() / f"{file_id}.result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="分析结果未找到")
+
+    with open(result_path, encoding="utf-8") as f:
+        result_data = json.load(f)
+
+    raw_data = _load_raw_data(file_id)
+    if raw_data:
+        sanitize_analysis_result_with_raw(result_data, raw=raw_data)
+    result_data = normalize_analysis_result(result_data) or {}
+    return result_data, raw_data
+
+
+def _compact_texts(items: object, *keys: str, limit: int = 5) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    values: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in keys:
+            text = str(item.get(key) or "").strip()
+            if text:
+                values.append(text)
+                break
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _analysis_compare_summary(current: dict, staged: dict) -> dict:
+    current_result = normalize_analysis_result(current) or {}
+    staged_result = normalize_analysis_result(staged) or {}
+
+    def items(section: str) -> list:
+        payload = staged_result.get(section)
+        return payload.get("items", []) if isinstance(payload, dict) else []
+
+    def current_items(section: str) -> list:
+        payload = current_result.get(section)
+        return payload.get("items", []) if isinstance(payload, dict) else []
+
+    staged_consultation = staged_result.get("consultation_result") if isinstance(staged_result.get("consultation_result"), dict) else {}
+    current_consultation = current_result.get("consultation_result") if isinstance(current_result.get("consultation_result"), dict) else {}
+    return {
+        "current": {
+            "primary_demands": _compact_texts(current_items("customer_primary_demands"), "demand"),
+            "standardized_indications": _compact_texts(current_items("standardized_indications"), "indication_name", "body_part_name"),
+            "recommendations": _compact_texts(current_items("staff_recommendations"), "recommendation"),
+            "seed_recommendations": _compact_texts(current_items("staff_seed_recommendations"), "recommendation"),
+            "concerns": _compact_texts(current_items("customer_concerns"), "content"),
+            "deal_status": (
+                current_consultation.get("deal_outcome", {}).get("status")
+                if isinstance(current_consultation.get("deal_outcome"), dict)
+                else None
+            ),
+        },
+        "staged": {
+            "primary_demands": _compact_texts(items("customer_primary_demands"), "demand"),
+            "standardized_indications": _compact_texts(items("standardized_indications"), "indication_name", "body_part_name"),
+            "recommendations": _compact_texts(items("staff_recommendations"), "recommendation"),
+            "seed_recommendations": _compact_texts(items("staff_seed_recommendations"), "recommendation"),
+            "concerns": _compact_texts(items("customer_concerns"), "content"),
+            "deal_status": (
+                staged_consultation.get("deal_outcome", {}).get("status")
+                if isinstance(staged_consultation.get("deal_outcome"), dict)
+                else None
+            ),
+        },
+    }
+
+
+async def _ensure_result_access(file_id: str, db: AsyncSession, current_user: User) -> None:
+    if not all(c.isalnum() or c in ("_", "T", "Z") for c in file_id):
+        raise HTTPException(status_code=400, detail="无效的文件 ID")
+    access = await build_analysis_artifact_access(db, current_user)
+    if not task_is_visible(f"{file_id}.json", access):
+        raise HTTPException(status_code=404, detail="分析结果未找到")
 
 
 def _build_summary(
@@ -499,3 +601,101 @@ async def get_result(
         "consultation_process_evaluation": result_data.get("consultation_process_evaluation"),
         _SAP_CONSULTATION_PREVIEW_RESULT_KEY: result_data.get(_SAP_CONSULTATION_PREVIEW_RESULT_KEY),
     }
+
+
+@router.get("/results/{file_id}/staged-analysis")
+async def get_staged_analysis_result(
+    file_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the cached experimental staged analysis artifact."""
+    await _ensure_result_access(file_id, db, current_user)
+    artifact_path = _experimental_result_path(file_id)
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="实验分析结果未生成")
+    with open(artifact_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@router.post("/results/{file_id}/staged-analysis")
+async def run_staged_analysis_result(
+    file_id: str,
+    refresh: bool = Query(False, description="Force rerun even when cached staged result exists"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run the experimental staged LLM pipeline for side-by-side comparison.
+
+    This endpoint does not update AnalysisTask and does not trigger SAP push.
+    """
+    await _ensure_result_access(file_id, db, current_user)
+
+    artifact_path = _experimental_result_path(file_id)
+    if artifact_path.exists() and not refresh:
+        with open(artifact_path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if isinstance(cached, dict):
+            cached["cached"] = True
+        return cached
+
+    raw_path = _resolve_raw_data_path(file_id)
+    if raw_path is None:
+        raise HTTPException(status_code=404, detail="未找到实验分析所需的转写输入")
+
+    current_result, raw_data = _load_result_payload(file_id)
+    recording_id = _extract_recording_id(file_id)
+    recording: Recording | None = None
+    if recording_id:
+        recording = (
+            await db.execute(
+                select(Recording)
+                .where(Recording.id == recording_id)
+                .options(selectinload(Recording.staff))
+            )
+        ).scalar_one_or_none()
+
+    hospital_code = recording.staff.hospital_code if recording and recording.staff else None
+    system_prompt = await build_system_prompt(db, hospital_code=hospital_code)
+    staff_context = {
+        "file_name": recording.file_name if recording else file_id,
+        "staff_name": recording.staff.name if recording and recording.staff else "",
+        "staff_role": recording.staff.role if recording and recording.staff else "",
+        "hospital_code": hospital_code or "",
+    }
+
+    try:
+        staged = await asyncio.to_thread(
+            analyze_transcript_staged,
+            raw_path,
+            system_prompt=system_prompt,
+            staff_context=staff_context,
+        )
+        if recording_id and isinstance(staged.get("analysis_result"), dict):
+            enriched = await attach_unlinked_sap_preview_to_result(
+                db,
+                recording_id,
+                staged["analysis_result"],
+            )
+            if isinstance(enriched, dict):
+                staged["analysis_result"] = enriched
+    except Exception as exc:
+        logger.exception("experimental staged analysis failed file_id=%s: %s", file_id, exc)
+        raise HTTPException(status_code=500, detail=f"实验分析失败：{exc}") from exc
+
+    staged_result = staged.get("analysis_result") if isinstance(staged.get("analysis_result"), dict) else {}
+    artifact = {
+        "file_id": file_id,
+        "recording_id": recording_id,
+        "recording_file_name": recording.file_name if recording else None,
+        "current_result": current_result,
+        "staged_analysis": staged,
+        "comparison": _analysis_compare_summary(current_result, staged_result),
+        "raw_input_present": raw_data is not None,
+        "cached": False,
+    }
+    artifact_path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return artifact

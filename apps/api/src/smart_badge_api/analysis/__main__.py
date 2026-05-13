@@ -12,7 +12,7 @@ import json
 import logging
 from pathlib import Path
 
-from .pipeline import analyze_transcript
+from .production import analyze_transcript_for_production
 from ..core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,7 @@ def main() -> None:
     failed = 0
     for source_path in files:
         try:
-            result = analyze_transcript(source_path)
-            result_dict = result.model_dump()
+            result_dict = analyze_transcript_for_production(source_path)
             target = _result_path(output_dir, source_path)
             target.write_text(json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8")
             if not args.quiet:

@@ -172,7 +172,7 @@ async def build_system_prompt(db: AsyncSession, hospital_code: str | None = None
 
     base_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         feature_objectives=reference_data.feature_objectives,
-        indication_reference=reference_data.indication_reference,
+        indication_reference=reference_data.indication_prompt_reference,
         tag_categories=tag_section,
         hotword_reference=hotword_section,
     )

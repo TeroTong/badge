@@ -21,8 +21,9 @@ from smart_badge_api.analysis.consultation_evaluation import (
     rebuild_consultation_evaluation,
     rebuild_consultation_process_evaluation,
 )
-from smart_badge_api.analysis.pipeline import analyze_transcript, sanitize_analysis_result_with_raw
+from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.analysis.prompt_builder import build_system_prompt
+from smart_badge_api.analysis.production import analyze_transcript_for_production
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.api.audit import append_audit_log
 from smart_badge_api.asr.audio_preprocessing import diagnose_audio_quality
@@ -964,6 +965,48 @@ def _post_analysis_business_signal_reasons(
     return deduped
 
 
+def _analysis_declares_non_current_customer_context(result_dict: dict[str, Any]) -> bool:
+    """Whether analysis already judged the recording as non-current-customer business.
+
+    This is intentionally evaluated after LLM analysis instead of during ASR
+    keyword filtering, because genuine consultations may mention payment/order
+    workflow. If the analysis result itself says the content is idle chat,
+    internal collaboration, or another customer's order, isolated medical
+    keywords should not keep the recording.
+    """
+    if _standardized_indication_count(result_dict) > 0:
+        return False
+    if _result_has_non_empty_items(result_dict.get("customer_primary_demands")):
+        return False
+    if _result_has_non_empty_items(result_dict.get("staff_recommendations")):
+        return False
+    if _result_has_non_empty_items(result_dict.get("recommended_solutions")):
+        return False
+
+    text = json.dumps(result_dict, ensure_ascii=False, default=str)
+    compact = re.sub(r"\s+", "", text)
+    non_current_cues = (
+        "日常闲聊",
+        "闲聊",
+        "内部沟通",
+        "内部协作",
+        "内部工作沟通",
+        "其他顾客",
+        "他人顾客",
+        "别人顾客",
+        "不属于当前主客户",
+        "不属于本客户",
+        "不涉及当前主客户",
+        "未发生针对主客户",
+        "未进行针对主客户",
+        "未形成有效医美咨询",
+        "主客户未表达",
+        "非当前主客户",
+        "不是当前客户",
+    )
+    return any(cue in compact for cue in non_current_cues)
+
+
 async def _manifest_has_visit_link(manifest: dict[str, Any]) -> bool:
     async with _session_factory() as db:
         recording = await _ensure_recording_stub_from_manifest(db, manifest)
@@ -987,6 +1030,12 @@ def _post_analysis_quality_decision(
     has_visit_link: bool = False,
 ) -> _QualityDecision:
     if _standardized_indication_count(result_dict) <= 0:
+        if _analysis_declares_non_current_customer_context(result_dict):
+            return _QualityDecision(
+                False,
+                "分析结果判断为闲聊、内部协作或其他顾客订单，且未提取到当前主客户主诉/适应症/推荐方案，已过滤",
+                "post_analysis",
+            )
         signal_reasons = _post_analysis_business_signal_reasons(
             result_dict,
             full_text=full_text,
@@ -1057,8 +1106,16 @@ def _load_transcript_document(path: Path) -> tuple[list[dict[str, Any]], str, in
     return utterances, full_text, duration_ms, provider
 
 
-def _run_analysis_sync(file_path: str, system_prompt: str) -> dict[str, Any]:
-    return analyze_transcript(file_path, system_prompt=system_prompt).model_dump()
+def _run_analysis_sync(
+    file_path: str,
+    system_prompt: str,
+    staff_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return analyze_transcript_for_production(
+        file_path,
+        system_prompt=system_prompt,
+        staff_context=staff_context,
+    )
 
 
 async def _download_file(url: str, dest: Path) -> int:
@@ -1301,6 +1358,12 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
         async with _session_factory() as db:
             hospital_code = await _resolve_staff_hospital_code(db, _clean_text(manifest.get("staffId")))
             system_prompt = await build_system_prompt(db, hospital_code=hospital_code)
+        staff_context = {
+            "file_name": _clean_text(manifest.get("remoteFileName")) or _clean_text(manifest.get("fileId")) or stage_key,
+            "staff_name": _clean_text(manifest.get("staffName")),
+            "staff_role": _clean_text(manifest.get("staffRole")),
+            "hospital_code": hospital_code or "",
+        }
 
         loop = asyncio.get_running_loop()
         result_dict = await loop.run_in_executor(
@@ -1308,6 +1371,7 @@ async def execute_dingtalk_recording_pipeline(stage_key: str) -> None:
             _run_analysis_sync,
             str(analysis_input_path),
             system_prompt,
+            staff_context,
         )
         sanitize_analysis_result_with_raw(result_dict, raw=payload)
 

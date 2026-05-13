@@ -1,5 +1,7 @@
 """Analysis prompts for transcript extraction."""
 
+from smart_badge_api.analysis.reference_data import load_analysis_reference_data
+
 SYSTEM_PROMPT_TEMPLATE = """\
 你是资深医美咨询分析师。你将收到一段带时间戳的录音转写，请输出可落库、可 SAP 回写的严格 JSON。
 
@@ -128,9 +130,11 @@ SYSTEM_PROMPT_TEMPLATE = """\
 """
 
 
+_DEFAULT_REFERENCE_DATA = load_analysis_reference_data()
+
 SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(
-    feature_objectives="- 当前未加载业务目标文档。",
-    indication_reference="- 当前未加载适应症字典。",
+    feature_objectives=_DEFAULT_REFERENCE_DATA.feature_objectives,
+    indication_reference=_DEFAULT_REFERENCE_DATA.indication_prompt_reference,
     tag_categories="- 当前未配置标签体系。",
     hotword_reference="- 当前未配置热词参考。",
 )

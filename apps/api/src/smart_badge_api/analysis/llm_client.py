@@ -46,9 +46,12 @@ def chat_completion(
     *,
     temperature: float = 0.3,
     max_tokens: int = 12000,
+    model_override: str | None = None,
 ) -> str:
     """调用 LLM Chat Completions API，返回 assistant 消息文本。"""
     base_url, api_key, model, timeout = _get_config()
+    if model_override:
+        model = model_override
     payload = {
         "model": model,
         "messages": [
@@ -65,6 +68,13 @@ def chat_completion(
         payload["reasoning_effort"] = "minimal"
         payload["max_tokens"] = max(max_tokens, 12_000)
         timeout = max(timeout, 300.0)
+    elif model == "deepseek-v4-pro":
+        # The current OpenAI-compatible gateway accepts deepseek-v4-pro but is
+        # not consistently compatible with reasoning_effort. Let it use the
+        # provider default and rely on response_format/no-response_format
+        # fallbacks below.
+        payload["max_tokens"] = max(max_tokens, 12_000)
+        timeout = max(timeout, 360.0)
 
     logger.info("Calling LLM: model=%s, prompt_len=%d", model, len(user_prompt))
 
@@ -74,6 +84,10 @@ def chat_completion(
         if "reasoning_effort" in payload:
             fallback_payload = dict(payload)
             fallback_payload.pop("reasoning_effort", None)
+            payload_variants.append(fallback_payload)
+        elif model_override and "response_format" in payload:
+            fallback_payload = dict(payload)
+            fallback_payload.pop("response_format", None)
             payload_variants.append(fallback_payload)
 
         for payload_variant in payload_variants:
