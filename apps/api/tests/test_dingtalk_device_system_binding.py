@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
@@ -97,7 +97,7 @@ def test_list_devices_syncs_remote_device_cache_and_preserves_system_binding() -
                         }
                     ),
                 ):
-                    payload = await list_devices(db=db, current_user=current_user)
+                    payload = await list_devices(db=db, current_user=current_user, sync_status=True)
 
                 assert payload["totalCount"] == 1
                 row = payload["result"][0]
@@ -113,6 +113,79 @@ def test_list_devices_syncs_remote_device_cache_and_preserves_system_binding() -
                 assert device.staff_id == staff.id
                 assert device.dingtalk_team_code == "team-001"
                 assert device.dingtalk_user_id == "dt_user_001"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_list_devices_shows_scheduled_system_binding_without_current_pointer() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                staff = Staff(
+                    name="李珍玉",
+                    external_account="LiZhenYu",
+                    hospital_code="6501",
+                    hospital_short_name="长沙雅美",
+                    permission_role="staff",
+                    is_active=True,
+                )
+                db.add(staff)
+                await db.commit()
+                await db.refresh(staff)
+                current_user = await _make_user(db, role="hospital_admin", hospital_code="6501")
+                device = Device(
+                    name="SSYX51049779",
+                    device_code="SSYX51049779",
+                    staff_id=None,
+                    hospital_code="6501",
+                    hospital_short_name="长沙雅美",
+                    status="offline",
+                    is_active=True,
+                )
+                db.add(device)
+                await db.commit()
+                await db.refresh(device)
+                start_at = datetime.now(timezone.utc) + timedelta(days=1)
+                db.add(DeviceStaffBinding(device_id=device.id, staff_id=staff.id, effective_from=start_at))
+                await db.commit()
+
+                with patch(
+                    "smart_badge_api.api.routes.dingtalk.iot_list_devices",
+                    AsyncMock(
+                        return_value=[
+                            {
+                                "sn": "SSYX51049779",
+                                "name": "SSYX51049779",
+                                "status": {"value": "offline", "timestamp": 1_775_500_000_000},
+                                "remoteProvider": "iot",
+                                "iotAvailable": True,
+                                "dviAvailable": False,
+                            }
+                        ]
+                    ),
+                ):
+                    payload = await list_devices(db=db, current_user=current_user, hospital_code="6501")
+
+                assert payload["totalCount"] == 1
+                row = payload["result"][0]
+                assert row["sn"] == "SSYX51049779"
+                assert row["systemBinding"]["staffId"] == staff.id
+                assert row["systemBinding"]["staffName"] == "李珍玉"
+                assert row["systemBinding"]["bindingStatus"] == "scheduled"
+                assert row["systemBinding"]["effectiveStart"] is not None
+
+                refreshed_device = (
+                    await db.execute(select(Device).where(Device.device_code == "SSYX51049779"))
+                ).scalar_one()
+                assert refreshed_device.staff_id is None
         finally:
             await engine.dispose()
 
@@ -150,7 +223,7 @@ def test_list_devices_uses_iot_for_changsha_yamei() -> None:
                         ),
                     ) as iot_list,
                 ):
-                    payload = await list_devices(db=db, current_user=current_user)
+                    payload = await list_devices(db=db, current_user=current_user, sync_status=True)
 
                 dvi_list.assert_not_awaited()
                 iot_list.assert_awaited_once()

@@ -114,6 +114,9 @@ export type DviSystemBinding = {
   accountOpened: boolean
   accountUsername?: string | null
   accountIsActive?: boolean | null
+  bindingStatus?: 'active' | 'scheduled'
+  effectiveStart?: string | null
+  effectiveEnd?: string | null
 }
 
 export type DviDeviceListResult = {

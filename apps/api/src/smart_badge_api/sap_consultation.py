@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timezone
 from zoneinfo import ZoneInfo
@@ -2620,7 +2621,7 @@ def _resolve_rfc_field_overrides(visit_order: VisitOrder) -> dict[str, str]:
 
 
 def _strip_embedded_sap_preview(result: dict | None) -> dict:
-    payload = dict(result or {})
+    payload = deepcopy(result or {})
     payload.pop(SAP_CONSULTATION_PREVIEW_RESULT_KEY, None)
     return payload
 
@@ -2983,6 +2984,16 @@ def _normalize_result_payload(result: dict | None) -> dict:
             payload["standardized_indications"]
         )
     return payload
+
+
+def _is_staged_analysis_result(result: dict | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    debug = result.get("staged_pipeline_debug")
+    if not isinstance(debug, dict):
+        return False
+    chain = str(debug.get("production_chain") or "")
+    return chain.startswith("staged")
 
 
 def _load_recording_analysis_raw(recording: Recording) -> dict | None:
@@ -3520,7 +3531,7 @@ async def build_unlinked_sap_preview_for_recording(
 ) -> dict:
     raw_payload = _load_recording_analysis_raw(recording)
     result_payload = _strip_embedded_sap_preview(result)
-    if raw_payload:
+    if raw_payload and not _is_staged_analysis_result(result_payload):
         sanitize_analysis_result_with_raw(result_payload, raw=raw_payload)
     result_payload = _normalize_result_payload(result_payload)
     summary_config = await _load_unlinked_preview_summary_config(db, recording)
@@ -3615,7 +3626,7 @@ async def _load_visit_recording_contexts(db: AsyncSession, visit_id: str) -> tup
                 }
             result_payload = dict(task.result)
             raw_payload = _load_recording_analysis_raw(linked_recording)
-            if raw_payload:
+            if raw_payload and not _is_staged_analysis_result(result_payload):
                 sanitize_analysis_result_with_raw(result_payload, raw=raw_payload)
 
         contexts.append(

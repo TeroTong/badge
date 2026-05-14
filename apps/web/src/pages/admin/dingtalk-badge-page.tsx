@@ -54,7 +54,7 @@ type MergedDevice = dingtalkApi.DviDevice & {
   batteryLevel?: number
 }
 
-type BindingState = 'none' | 'remote_only' | 'system_only' | 'both'
+type BindingState = 'none' | 'remote_only' | 'system_only' | 'both' | 'scheduled'
 
 function readNestedPrimitive(value: unknown): string | number | undefined {
   if (typeof value === 'string' || typeof value === 'number') {
@@ -96,6 +96,7 @@ function getBindingState(device: MergedDevice): BindingState {
   const remoteUserId = typeof device.userId === 'string' ? device.userId.trim() : ''
   const remoteReady = remoteUserId || device.remoteProvider === 'iot'
   const systemBinding = device.systemBinding ?? null
+  if (systemBinding?.bindingStatus === 'scheduled') return 'scheduled'
   if (!remoteReady && !systemBinding) return 'none'
   if (remoteReady && systemBinding) return 'both'
   if (remoteReady && !systemBinding) return 'remote_only'
@@ -104,6 +105,7 @@ function getBindingState(device: MergedDevice): BindingState {
 
 function getSystemAccountStatusColor(device: MergedDevice): string | undefined {
   const systemBinding = device.systemBinding
+  if (systemBinding?.bindingStatus === 'scheduled') return 'gold'
   if (!systemBinding?.accountOpened) return undefined
   return systemBinding.accountIsActive === false ? 'default' : 'success'
 }
@@ -111,6 +113,7 @@ function getSystemAccountStatusColor(device: MergedDevice): string | undefined {
 function getSystemAccountStatusLabel(device: MergedDevice): string {
   const systemBinding = device.systemBinding
   if (!systemBinding) return '未绑定系统人员'
+  if (systemBinding.bindingStatus === 'scheduled') return '预约生效'
   if (!systemBinding.accountOpened) return '未开通账号'
   return systemBinding.accountIsActive === false ? '账号已停用' : '账号正常'
 }
@@ -857,6 +860,11 @@ export default function DingtalkBadgePage() {
             <Text type="secondary" className="badge-device-page__subline">
               {row.systemBinding.externalAccount ? `员工编号 ${row.systemBinding.externalAccount}` : '未维护员工编号'}
             </Text>
+            {row.systemBinding.bindingStatus === 'scheduled' ? (
+              <Text type="secondary" className="badge-device-page__subline">
+                生效时间 {formatBindingRangeLabel(row.systemBinding.effectiveStart, row.systemBinding.effectiveEnd)}
+              </Text>
+            ) : null}
             <Space size={[6, 4]} wrap>
               {row.systemBinding.accountOpened ? (
                 <Text
@@ -887,6 +895,8 @@ export default function DingtalkBadgePage() {
         switch (getBindingState(row)) {
           case 'both':
             return <Tag color="success">完整绑定</Tag>
+          case 'scheduled':
+            return <Tag color="gold">待生效</Tag>
           case 'remote_only':
             return <Tag color="warning">待绑人员</Tag>
           case 'system_only':
@@ -996,6 +1006,7 @@ export default function DingtalkBadgePage() {
         <div className="module-page__actions badge-device-page__hero-actions">
           <div className="badge-device-page__legend">
             <Tag color="success">完整绑定</Tag>
+            <Tag color="gold">待生效</Tag>
             <Tag color="warning">待绑人员</Tag>
             <Tag color="orange">待绑钉钉</Tag>
           </div>

@@ -366,6 +366,31 @@ Evidence extraction rules:
 13. For contour/filling consultations that involve multiple regions, preserve
     each concrete region separately in evidence: e.g. 眶外C线/眉尾, 颞区/额颞,
     外颊/颧弓, 下颌轮廓线/下颌角, 下巴/颏部, 鼻基底/面中.
+14. For body-contouring consultations, preserve explicit body concerns such as
+    副乳/腋前胸外侧鼓出, 富贵包/颈后上背凸起, 手臂粗, 后背厚, 腰腹赘肉.
+    When the customer says "给你看一下/帮我看一下" about their own body, treat
+    it as current customer-demand evidence, not as a third-party case.
+15. If the customer explicitly raises a project/demand but the transcript says
+    it is not handled in this consultation, belongs to another department, or
+    will be discussed later (for example "美白去皮肤科，不在我这里", "回来再说",
+    "下次再说"), still keep it in customer_demand_evidence because it is a real
+    customer demand. Mark handling_status as "referral_or_deferred" and quote
+    the referral/deferred wording. Do not turn it into a current recommendation.
+16. Concern evidence must come from customer/companion wording or explicit
+    customer confirmation. Staff statements such as "效果自然", "别人看不出来",
+    "很安全", or "恢复快" are selling points unless the customer expresses worry.
+17. Recommendation evidence should represent a treatment/project plan. Do not
+    extract standalone pre-op checks, postoperative medication, wound cleaning,
+    scar gel, dressing change, stitches removal, or consumables as treatment
+    recommendation items. Put them in implementation_notes of the related main
+    plan or quality_notes.
+18. If staff describes an option only for comparison, says it is not suitable,
+    not recommended, not the priority, or only answers the customer's price
+    question, mark relation_to_current_demand as "alternative_not_recommended".
+19. For skin anti-aging consultations, preserve skin laxity/tightening evidence
+    separately from pores/acne/dullness. If the main discussion is 热玛吉/超声炮/
+    黄金微针/黑曜双波/射频/光电 for tightening, capture the tightening/laxity
+    plan even when 毛孔、痘印、暗沉 are also mentioned.
 
 Return JSON only:
 {
@@ -376,6 +401,7 @@ Return JSON only:
         "content": "",
         "body_part": "",
         "speaker": "customer|companion|staff_restated_confirmed",
+        "handling_status": "current_handled|referral_or_deferred|unclear",
         "evidence_turn_ids": [],
         "quote": "",
         "confidence": 0.0
@@ -397,7 +423,7 @@ Return JSON only:
         "treatment_steps": [],
         "implementation_notes": "",
         "customer_response": "",
-        "relation_to_current_demand": "current_main_plan|possible_current_plan|planting_or_later|unclear",
+        "relation_to_current_demand": "current_main_plan|possible_current_plan|planting_or_later|alternative_not_recommended|auxiliary_or_care|not_current_or_referral|unclear",
         "evidence_turn_ids": [],
         "quote": "",
         "confidence": 0.0
@@ -457,14 +483,18 @@ Judgment rules:
 5. Concerns: naturalness, risk, side effects, price hesitation, recovery time,
    and "need to think" are concerns or decision factors, not demands.
 6. Preliminary indications: propose candidates conservatively. The next stage
-   will adjudicate the final SAP indications. Prefer the most specific candidate
-   supported by evidence, but do not include a candidate unless you can point to
-   a current demand, current-customer diagnosis, current recommendation, or
-   concrete seed recommendation that supports the exact body area and project.
-   If no candidate is supported, leave indications empty.
-   When a real plan spans multiple distinct treated regions, include each
-   supported specific candidate instead of collapsing everything to the first
-   recalled item.
+    will adjudicate the final SAP indications. Prefer the most specific candidate
+    supported by evidence, but do not include a candidate unless you can point to
+    a current demand, current-customer diagnosis, current recommendation, or
+    concrete seed recommendation that supports the exact body area and project.
+    If no candidate is supported, leave indications empty.
+    When a real plan spans multiple distinct treated regions, include each
+    supported specific candidate instead of collapsing everything to the first
+    recalled item.
+    For 副乳/腋前胸外侧鼓出, prefer the specific candidate "副乳整形" over generic
+    "身体吸脂" when the current issue or plan is about 副乳. For 富贵包, keep it
+    as a demand/diagnosis unless there is a clear吸脂/抽脂/超脂/减脂 treatment
+    plan; do not force it into an SAP indication from "看一下/评估" alone.
 7. Do not invent brands, dosage, prices, body parts, or deal outcomes. If the
    evidence is ambiguous, keep customer_response as "未明确回应" and confidence
    moderate/low.
@@ -488,6 +518,28 @@ Judgment rules:
 10. Deal outcome must require direct customer payment/order/deposit evidence or
    an explicit staff statement that this customer completed payment/order. Staff
    discussing historical/internal orders is not enough.
+11. A customer-explicit project sent to another department or deferred to later
+   is still a demand and should stay in demands/SAP consultation remarks. Mark
+   it clearly as referral/deferred when the evidence supports that. However, do
+   not create recommendations or indication candidates solely from referral or
+   deferred demand evidence.
+12. Recommendations must be treatment/project plans solving current demands.
+   Exclude standalone pre-op checks, postoperative medication, wound cleaning,
+   scar gel, dressing changes, and other nursing/consumable instructions from
+   recommendations and seed_recommendations. Keep them as implementation notes
+   only when they are attached to a main treatment plan.
+13. If an option is explicitly "not suitable", "not recommended", "only for
+   price comparison", or "backup/alternative", do not put it in current
+   recommendations. It may appear as a decision factor, but not as the final
+   recommended plan.
+14. For skin anti-aging, when the evidence shows the customer's core issue is
+   skin laxity, sagging, tightening, or anti-aging and the plan is 热玛吉/超声炮/
+   黄金微针/黑曜双波/射频/光电, prioritize 松弛下垂/紧致淡纹 indication candidates
+   over incidental 毛孔、痘印、暗黄. Do not select 痤疮 from 痘印/痘坑 alone unless
+   active acne/粉刺/炎症痘 is clearly present.
+15. Every recommendation, seed_recommendation, concern, budget fact, and
+   indication candidate must carry evidence text or quote. Do not return only
+   evidence ids without the evidence text.
 
 Return JSON only:
 {
@@ -578,9 +630,29 @@ Hard selection rules:
     the candidate does not match the described complaint/plan, reject it even if
     the body part name overlaps.
 11. Reject a candidate when the only support is a low-confidence ASR fragment,
-    broken body-term string, or text without a clear problem/plan predicate.
+     broken body-term string, or text without a clear problem/plan predicate.
+12. For body-contouring evidence:
+    - 副乳/腋前胸外侧鼓出 with a current customer complaint or staff-restated
+      current issue should select "副乳整形" when that candidate exists.
+    - Do not replace 副乳整形 with generic 身体吸脂 merely because the method may
+      include抽脂/吸脂.
+    - 富贵包 has no dedicated SAP indication in this dictionary; select 身体吸脂
+      only when there is a clear current plan or accepted option involving
+      吸脂/抽脂/超脂/局部减脂 for the富贵包/颈后上背 area. Mere "看一下/评估富贵包"
+      is a demand but not enough for a final SAP indication.
 12. If the transcript is internal chat/order/payment discussion and has no valid
    main-customer demand/diagnosis/recommendation, return an empty final list.
+13. Reject not-current/referral projects as final SAP indications, such as
+    "美白去皮肤科，不在我这里", unless there is a real current recommendation or
+    plan for that same project. They may still remain in chief complaint text.
+14. For skin tightening/anti-aging consultations, if the current demand or plan
+    is skin laxity/tightening and the candidate list contains 松弛下垂 or 紧致淡纹,
+    select the supported anti-aging indication before incidental 毛孔、暗黄.
+15. Do not select 痤疮 from 痘印/痘坑 alone. 痤疮 requires active acne, acne
+    lesions, 粉刺, 炎症痘, or current acne treatment evidence.
+16. Do not select or keep an indication supported only by standalone pre-op
+    checks, postoperative care, scar gel, medication, or a rejected/comparison
+    option.
 
 Return JSON only:
 {
@@ -694,6 +766,30 @@ def _format_timestamp(value: object) -> str:
         seconds = seconds / 1000.0
     total = max(int(seconds), 0)
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _raw_transcribe_segments(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = _as_dict(raw.get("payload"))
+    candidates = (
+        _as_list(payload.get("transcribeResult"))
+        or _as_list(payload.get("segments"))
+        or _as_list(raw.get("transcribeResult"))
+        or _as_list(raw.get("segments"))
+    )
+    return [item for item in candidates if isinstance(item, dict)]
+
+
+def _segment_evidence(seg: dict[str, Any]) -> str:
+    text = _clean_text(seg.get("text") or seg.get("content"))
+    if not text:
+        return ""
+    return f"[{_format_timestamp(seg.get('begin') or seg.get('start') or seg.get('start_ms'))}] {text}"
+
+
+def _segment_is_customer_side(seg: dict[str, Any]) -> bool:
+    role = _clean_text(seg.get("role") or seg.get("speaker") or seg.get("speaker_role")).lower()
+    label = _clean_text(seg.get("speaker_label"))
+    return role in {"primary_customer", "customer", "client", "companion"} or "客户" in label or "顾客" in label
 
 
 def _format_turn_line(turn: dict[str, Any], *, part_num: int, index: int) -> str | None:
@@ -984,7 +1080,7 @@ def _item_has_low_confidence_fragment(item: dict[str, Any]) -> bool:
 
 
 def _has_acne_context(text: str) -> bool:
-    if _has_any_text(text, ("痤疮", "痘痘", "粉刺", "炎症痘", "痘印", "痘坑")):
+    if _has_any_text(text, ("痤疮", "痘痘", "粉刺", "炎症痘", "丘疹", "脓包", "爆痘", "长痘", "祛痘")):
         return True
     if "闭口" not in text:
         return False
@@ -997,8 +1093,66 @@ def _has_pore_context(text: str) -> bool:
     return _has_any_text(text, ("毛孔", "黑头", "出油", "皮肤粗糙", "肤质", "肤感", "点阵", "光子", "水光"))
 
 
+def _has_skin_laxity_context(text: str) -> bool:
+    has_problem = _has_any_text(
+        text,
+        (
+            "松弛",
+            "下垂",
+            "松垮",
+            "皮松",
+            "脸垮",
+            "提升",
+            "提拉",
+            "紧致",
+            "收紧",
+            "抗衰",
+            "苹果肌下垂",
+            "轮廓线不清晰",
+        ),
+    )
+    has_project_or_area = _has_any_text(
+        text,
+        (
+            "热玛吉",
+            "超声炮",
+            "超声刀",
+            "黄金微针",
+            "黄金射频",
+            "黑曜",
+            "黑耀",
+            "双波",
+            "射频",
+            "光电",
+            "拉皮",
+            "中面部",
+            "苹果肌",
+            "面部",
+            "皮肤",
+        ),
+    )
+    return has_problem and has_project_or_area
+
+
+def _has_skin_tightening_plan_context(text: str) -> bool:
+    has_energy_project = _has_any_text(
+        text,
+        ("热玛吉", "超声炮", "超声刀", "黄金微针", "黄金射频", "黑曜", "黑耀", "双波", "射频", "光电", "热拉提", "热提拉"),
+    )
+    has_tightening_goal = _has_any_text(text, ("紧致", "收紧", "淡纹", "抗衰", "松弛", "下垂", "皮松", "提拉", "提升"))
+    has_area = _has_any_text(text, ("面部", "皮肤", "苹果肌", "中面部", "轮廓线", "脸"))
+    return has_energy_project and (has_tightening_goal or has_area)
+
+
 def _has_wrinkle_context(text: str) -> bool:
     return _has_any_text(text, ("除皱针", "皱纹", "动态纹", "鱼尾纹", "抬头纹", "川字纹", "法令纹", "核桃纹", "颈纹"))
+
+
+def _has_injectable_wrinkle_context(text: str) -> bool:
+    return _has_any_text(text, ("肉毒", "除皱针", "思奥美", "保妥适", "衡力", "动态纹", "鱼尾纹", "抬头纹", "川字纹")) and _has_any_text(
+        text,
+        ("打", "注射", "一瓶", "除皱", "放松肌肉", "肉毒素"),
+    )
 
 
 def _has_non_wrinkle_botox_context(text: str) -> bool:
@@ -1074,6 +1228,85 @@ def _is_seed_like_text(text: str) -> bool:
     if _text_has_any(text, strong_seed_terms):
         return True
     return False
+
+
+def _is_non_current_or_referral_text(text: str) -> bool:
+    compact = _normalize_key(text)
+    if not compact:
+        return False
+    return _has_any_text(
+        compact,
+        (
+            "不在我这里",
+            "去皮肤科",
+            "不是我这里",
+            "不属于我们这里",
+            "回来再说",
+            "下次再说",
+            "以后再说",
+            "今天先不",
+            "这次先不",
+            "不是本次",
+            "非本次",
+        ),
+    )
+
+
+def _is_auxiliary_or_care_recommendation_text(text: str) -> bool:
+    compact = _normalize_key(text)
+    if not compact:
+        return False
+    return _has_any_text(
+        compact,
+        (
+            "术前血液检查",
+            "血常规",
+            "凝血功能",
+            "输血前四项",
+            "体检",
+            "检查费",
+            "术后口服",
+            "消炎药",
+            "头孢",
+            "阿莫西林",
+            "生理盐水清洗",
+            "清洗伤口",
+            "伤口清洗",
+            "拆线",
+            "换药",
+            "祛疤膏",
+            "疤痕膏",
+            "巴克",
+            "抗瘢痕",
+            "护理",
+        ),
+    )
+
+
+def _is_alternative_or_not_recommended_text(text: str) -> bool:
+    compact = _normalize_key(text)
+    if not compact:
+        return False
+    if _has_any_text(
+        compact,
+        (
+            "备选方案对比",
+            "作为备选",
+            "只作对比",
+            "只是对比",
+            "价格对比",
+            "客户询价",
+            "仅供对比",
+            "不是优先",
+            "非优先",
+        ),
+    ):
+        return True
+    return bool(
+        re.search(r"(?:这个|该|此|本)?(?:方案|项目|方式).{0,8}(?:不适合|不建议|不推荐)", compact)
+        or re.search(r"(?:不适合|不建议|不推荐).{0,8}(?:做|选择|采用|作为方案)", compact)
+        or re.search(r"(?:先不要|暂缓|以后再).{0,8}(?:做|选择|考虑)", compact)
+    )
 
 
 def _is_staff_only_demand(item: dict[str, Any]) -> bool:
@@ -1177,6 +1410,10 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
         add("毛孔", "面部")
     if _has_acne_context(text):
         add("痤疮", "面部")
+    if _has_skin_laxity_context(text):
+        add("松弛下垂", "面部")
+    if _has_skin_tightening_plan_context(text):
+        add("紧致淡纹", "面部")
     if "眼袋" in text:
         add("眼袋", "眼部")
     if _has_wrinkle_context(text):
@@ -1199,6 +1436,10 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
         add("塑美", "下颌轮廓线")
     if any(term in text for term in ("额区", "上庭窄", "上庭偏窄")):
         add("塑美", "额区")
+    if any(term in text for term in ("副乳", "腋前", "胸外侧", "穿内衣勒出来", "穿内衣夹出来")):
+        add("副乳整形", "胸部")
+    if "富贵包" in text and any(term in text for term in ("吸脂", "抽脂", "超脂", "减脂", "局部减脂", "做掉", "去掉")):
+        add("身体吸脂", "身体")
     return mapped
 
 
@@ -1221,6 +1462,10 @@ def _should_drop_indication(row: dict[str, str], context: str) -> bool:
         return True
     if indication_name == "毛孔" and not _has_pore_context(context):
         return True
+    if indication_name == "松弛下垂" and not _has_skin_laxity_context(context):
+        return True
+    if indication_name == "紧致淡纹" and not _has_skin_tightening_plan_context(context):
+        return True
     if indication_name == "面部除皱" and not _has_wrinkle_context(context):
         return True
     if indication_name == "面部除皱" and _has_non_wrinkle_botox_context(context) and not _has_wrinkle_context(context):
@@ -1241,6 +1486,10 @@ def _indication_supported_by_context(row: dict[str, str], context: str) -> bool:
         return _has_acne_context(context)
     if name == "毛孔":
         return _has_pore_context(context)
+    if name == "松弛下垂":
+        return _has_skin_laxity_context(context)
+    if name == "紧致淡纹":
+        return _has_skin_tightening_plan_context(context)
     if name == "面部除皱":
         return _has_wrinkle_context(context)
     if name == "面部填充":
@@ -1423,10 +1672,32 @@ def _resolve_indications(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
             continue
         append(row, item_evidence, item_context)
 
+    fallback_rows = _map_common_indication_from_text(current_context)
     if not adjudicated:
-        for fallback in _map_common_indication_from_text(current_context):
+        for fallback in fallback_rows:
             if not _should_drop_indication(fallback, current_context):
                 append(fallback, support_context=current_context)
+    elif _has_skin_laxity_context(current_context) or _has_skin_tightening_plan_context(current_context):
+        selected_names = {_clean_text(item.get("indication_name")) for item in selected}
+        skin_surface_only = selected and selected_names.issubset({"毛孔", "痤疮", "暗黄", "色斑", "疤痕"})
+        if not selected or skin_surface_only:
+            for fallback in fallback_rows:
+                if _clean_text(fallback.get("indication_name")) not in {"松弛下垂", "紧致淡纹"}:
+                    continue
+                if not _should_drop_indication(fallback, current_context):
+                    append(fallback, support_context=current_context)
+    if _has_injectable_wrinkle_context(current_context):
+        selected = [
+            item
+            for item in selected
+            if not (
+                _clean_text(item.get("indication_name")) == "纹路"
+                and _clean_text(item.get("department_code")) == "Y3"
+            )
+        ]
+        injectable_row = _catalog_match_by_name("面部除皱", "面部")
+        if injectable_row:
+            append(injectable_row, support_context=current_context)
     return selected
 
 
@@ -1527,11 +1798,205 @@ def _build_standardized_indications(fact_graph: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _result_has_term(result: dict[str, Any], term: str) -> bool:
+    for section in ("customer_primary_demands", "standardized_indications", "customer_demands"):
+        if term in json.dumps(result.get(section, {}), ensure_ascii=False):
+            return True
+    return False
+
+
+def _section_has_term(result: dict[str, Any], section: str, term: str) -> bool:
+    return term in json.dumps(result.get(section, {}), ensure_ascii=False)
+
+
+def _append_primary_demand(
+    result: dict[str, Any],
+    *,
+    demand: str,
+    body_part: str,
+    evidence: str,
+) -> None:
+    primary = _as_dict(result.setdefault("customer_primary_demands", {}))
+    items = [dict(item) for item in _as_list(primary.get("items")) if isinstance(item, dict)]
+    if any(_normalize_key(body_part) in _normalize_key(json.dumps(item, ensure_ascii=False)) for item in items):
+        return
+    items.append(
+        {
+            "priority": len(items) + 1,
+            "demand": demand,
+            "body_part": body_part,
+            "evidence": evidence,
+        }
+    )
+    for index, item in enumerate(items, start=1):
+        item["priority"] = index
+    primary["items"] = items
+    primary["summary"] = "；".join(_clean_text(item.get("demand")) for item in items if _clean_text(item.get("demand")))
+    primary.setdefault("inference_note", None)
+    result["customer_primary_demands"] = primary
+
+    demands = _as_dict(result.setdefault("customer_demands", {}))
+    focus_areas = [dict(item) for item in _as_list(demands.get("focus_areas")) if isinstance(item, dict)]
+    if not any(_normalize_key(body_part) in _normalize_key(json.dumps(item, ensure_ascii=False)) for item in focus_areas):
+        focus_areas.append(
+            {
+                "area": body_part,
+                "surface_need": demand,
+                "deep_need": None,
+                "discovery_process": evidence,
+            }
+        )
+    demands["focus_areas"] = focus_areas
+    demands.setdefault("inference_note", None)
+    demands.setdefault("expectation", {"entry_state": None, "exit_state": None, "turning_points": [], "specific_standards": None})
+    demands.setdefault("product_preference", {"preferred_products": [], "information_sources": [], "comparison_factors": [], "consultant_influence": None})
+    result["customer_demands"] = demands
+
+
+def _append_standardized_indication(
+    result: dict[str, Any],
+    *,
+    name: str,
+    body: str,
+    evidence: str,
+) -> None:
+    row = _catalog_match_by_name(name, body)
+    if not row:
+        return
+    standardized = _as_dict(result.setdefault("standardized_indications", {}))
+    items = [dict(item) for item in _as_list(standardized.get("items")) if isinstance(item, dict)]
+    key = (row["department_code"], row["indication_code"], row["body_part_code"])
+    for item in items:
+        existing = (
+            _clean_text(item.get("department_code")),
+            _clean_text(item.get("indication_code")),
+            _clean_text(item.get("body_part_code")),
+        )
+        if existing == key:
+            return
+    items.append(
+        {
+            "department_code": row["department_code"],
+            "department_name": row["department_name"],
+            "indication_code": row["indication_code"],
+            "indication_name": row["indication_name"],
+            "body_part_code": row["body_part_code"],
+            "body_part_name": row["body_part_name"],
+            "evidence": evidence,
+        }
+    )
+    standardized["items"] = items
+    standardized["summary"] = "；".join(f"{item['indication_name']}（{item['body_part_name']}）" for item in items)
+    standardized.setdefault("inference_note", None)
+    result["standardized_indications"] = standardized
+
+
+def _raw_full_text(raw: dict[str, Any]) -> str:
+    segments = _raw_transcribe_segments(raw)
+    if not segments:
+        return ""
+    return "\n".join(_clean_text(seg.get("text") or seg.get("content")) for seg in segments if _clean_text(seg.get("text") or seg.get("content")))
+
+
+def _is_non_current_demand_item(item: dict[str, Any], raw_text: str) -> bool:
+    item_text = json.dumps(item, ensure_ascii=False)
+    if _is_non_current_or_referral_text(item_text):
+        return True
+    if "美白" in item_text and re.search(r"美白.{0,40}(?:皮肤科|不在我这里|回来再说|再说)", raw_text):
+        return True
+    return False
+
+
+def _remove_non_current_demands_from_result(result: dict[str, Any], raw: dict[str, Any]) -> None:
+    raw_text = _raw_full_text(raw)
+    if not raw_text:
+        return
+    primary = _as_dict(result.get("customer_primary_demands"))
+    items = [dict(item) for item in _as_list(primary.get("items")) if isinstance(item, dict)]
+    removed_demands: set[str] = set()
+    kept: list[dict[str, Any]] = []
+    for item in items:
+        if _is_non_current_demand_item(item, raw_text):
+            demand = _clean_text(item.get("demand"))
+            if demand:
+                removed_demands.add(demand)
+            continue
+        kept.append(item)
+    if len(kept) == len(items):
+        return
+    for index, item in enumerate(kept, start=1):
+        item["priority"] = index
+    primary["items"] = kept
+    primary["summary"] = "；".join(_clean_text(item.get("demand")) for item in kept if _clean_text(item.get("demand")))
+    result["customer_primary_demands"] = primary
+
+    demands = _as_dict(result.get("customer_demands"))
+    focus_areas = []
+    for item in _as_list(demands.get("focus_areas")):
+        if not isinstance(item, dict):
+            continue
+        if _clean_text(item.get("surface_need")) in removed_demands:
+            continue
+        focus_areas.append(item)
+    demands["focus_areas"] = focus_areas
+    result["customer_demands"] = demands
+
+
+def _augment_body_contouring_demands_from_raw(result: dict[str, Any], raw: dict[str, Any]) -> None:
+    segments = _raw_transcribe_segments(raw)
+    if not segments:
+        return
+    full_text = "\n".join(_clean_text(seg.get("text") or seg.get("content")) for seg in segments)
+
+    if "副乳" in full_text:
+        breast_evidence_parts = [
+            _segment_evidence(seg)
+            for seg in segments
+            if "副乳" in _clean_text(seg.get("text") or seg.get("content"))
+            or any(term in _clean_text(seg.get("text") or seg.get("content")) for term in ("夹出来", "勒出来"))
+        ]
+        breast_evidence = "\n".join(part for part in breast_evidence_parts[:4] if part)
+    else:
+        breast_evidence = ""
+
+    if not _section_has_term(result, "customer_primary_demands", "副乳") and breast_evidence:
+        _append_primary_demand(
+            result,
+            demand="存在副乳，穿内衣时会被勒出或夹出，希望评估是否需要处理",
+            body_part="副乳/胸部外侧",
+            evidence=breast_evidence,
+        )
+    if not _section_has_term(result, "standardized_indications", "副乳整形") and breast_evidence:
+        _append_standardized_indication(result, name="副乳整形", body="胸部", evidence=breast_evidence)
+
+    if not _section_has_term(result, "customer_primary_demands", "富贵包"):
+        for seg in segments:
+            text = _clean_text(seg.get("text") or seg.get("content"))
+            if "富贵包" not in text:
+                continue
+            if not (_segment_is_customer_side(seg) or any(term in text for term in ("看一下", "看下", "评估", "想给你看", "帮我看"))):
+                continue
+            if not any(term in text for term in ("看一下", "看下", "评估", "想给你看", "帮我看")):
+                continue
+            _append_primary_demand(
+                result,
+                demand="希望查看并评估富贵包情况",
+                body_part="富贵包/颈后上背",
+                evidence=_segment_evidence(seg),
+            )
+            break
+
+
 def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int]) -> dict[str, Any] | None:
     recommendation = _first_text(item, "content", "recommendation", "plan", "text")
     if not recommendation:
         return None
     if _item_has_low_confidence_fragment(item) or _looks_like_low_confidence_fragment(recommendation):
+        return None
+    item_text = json.dumps(item, ensure_ascii=False)
+    if _is_auxiliary_or_care_recommendation_text(recommendation):
+        return None
+    if _is_alternative_or_not_recommended_text(item_text):
         return None
     details = _as_dict(item.get("details"))
     steps = _as_list(item.get("treatment_steps")) or _as_list(details.get("treatment_steps"))
@@ -1546,6 +2011,11 @@ def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int])
     priorities = _linked_priorities(item, demand_map)
     if not priorities and len(demand_map) == 1:
         priorities = list(demand_map.values())
+    evidence = (
+        _evidence_text(item.get("evidence"))
+        or _evidence_text(item.get("supporting_evidence"))
+        or _first_text(item, "quote", "source_quote", "evidence_quote")
+    )
     return {
         "recommendation": recommendation,
         "product_or_solution": _first_text(item, "product_or_solution", "product", "solution", "brand_or_product") or None,
@@ -1558,7 +2028,7 @@ def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int])
         "treatment_steps": [_clean_text(value) for value in steps if _clean_text(value)],
         "implementation_notes": notes or None,
         "demand_priority": priorities,
-        "evidence": _evidence_text(item.get("evidence")),
+        "evidence": evidence,
         "customer_response": _first_text(item, "customer_response", "response", "acceptance") or "未明确回应",
     }
 
@@ -1580,6 +2050,10 @@ def _build_recommendations(fact_graph: dict[str, Any], demand_map: dict[str, int
             continue
         item_text = json.dumps(item, ensure_ascii=False)
         if not seed and _is_seed_like_text(item_text) and not _linked_priorities(item, demand_map):
+            continue
+        if _is_auxiliary_or_care_recommendation_text(_first_text(item, "content", "recommendation", "plan", "text")):
+            continue
+        if _is_alternative_or_not_recommended_text(item_text):
             continue
         mapped = _build_recommendation_item(item, demand_map)
         if mapped:
@@ -1634,6 +2108,7 @@ def _build_customer_profile(fact_graph: dict[str, Any]) -> dict[str, Any]:
 def _build_consumption_intent(fact_graph: dict[str, Any]) -> dict[str, Any]:
     decision_factors: list[str] = []
     evidence: list[str] = []
+    budget: str | None = None
     for key in ("deal_factors", "budget_facts"):
         for item in _as_list(fact_graph.get(key)):
             if not isinstance(item, dict):
@@ -1641,10 +2116,15 @@ def _build_consumption_intent(fact_graph: dict[str, Any]) -> dict[str, Any]:
             content = _first_text(item, "content", "factor", "text")
             if content:
                 decision_factors.append(content)
+                if key == "budget_facts" and budget is None and _has_any_text(
+                    content,
+                    ("预算", "价格", "贵", "便宜", "承受", "少一点", "优惠", "不够", "没那么多"),
+                ):
+                    budget = content
             ev = _evidence_text(item.get("evidence"))
             if ev:
                 evidence.append(ev)
-    return {"budget": None, "decision_factors": decision_factors, "evidence": evidence}
+    return {"budget": budget, "decision_factors": decision_factors, "evidence": evidence}
 
 
 def _build_consultation_result(
@@ -1877,6 +2357,9 @@ def _build_analysis_result_from_fact_graph(fact_graph: dict[str, Any], raw: dict
     finalized["customer_concerns"] = concerns
     finalized["consumption_intent"] = consumption_intent
     finalized["customer_profile"] = profile
+    _augment_body_contouring_demands_from_raw(finalized, raw)
+    primary_demands = _as_dict(finalized.get("customer_primary_demands"))
+    indications = _as_dict(finalized.get("standardized_indications"))
     finalized["consultation_result"] = _build_consultation_result(
         primary_demands,
         indications,
@@ -2235,6 +2718,10 @@ def _build_preprocess_context(dialogue: str, staff_context: dict[str, Any] | Non
         "肉毒",
         "除皱针",
         "溶解酶",
+        "副乳",
+        "富贵包",
+        "身体吸脂",
+        "超脂",
     ):
         if term in dialogue:
             term_hints.append(term)

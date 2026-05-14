@@ -8212,6 +8212,10 @@ def sanitize_analysis_result_with_raw(result_dict: dict[str, Any], *, raw: dict[
     apply the same evidence guardrails as a fresh analysis run without calling
     ASR or the LLM again.
     """
+    debug = result_dict.get("staged_pipeline_debug")
+    if isinstance(debug, dict) and str(debug.get("production_chain") or "").startswith("staged"):
+        return False
+
     changed = False
     changed = _sanitize_customer_primary_demands(result_dict, raw=raw) or changed
     changed = _backfill_primary_demands_from_plan_context(result_dict, raw=raw) or changed
@@ -10823,9 +10827,31 @@ def _analysis_evidence_looks_like_case_or_third_party(evidence: Any) -> bool:
     text = _clean_text(evidence)
     if not text:
         return False
+    compact = re.sub(r"\s+", "", text)
+    if (
+        any(term in compact for term in ("副乳", "富贵包", "腋前", "胸外侧", "颈后", "上背"))
+        and any(term in compact for term in ("看一下", "帮我看", "夹出来", "勒出来", "鼓出", "抽掉", "吸脂", "做掉"))
+        and not any(term in compact for term in ("案例", "照片", "图片", "视频", "别人", "其他顾客", "别的顾客"))
+    ):
+        return False
     if _looks_like_third_party_narrative_statement(text):
         return True
-    compact = re.sub(r"\s+", "", text)
+    if "给你看" in compact and any(
+        cue in compact
+        for cue in (
+            "案例给你看",
+            "给你看案例",
+            "照片给你看",
+            "给你看照片",
+            "图片给你看",
+            "给你看图片",
+            "视频给你看",
+            "给你看视频",
+            "别人的给你看",
+            "其他顾客给你看",
+        )
+    ):
+        return True
     return any(
         cue in compact
         for cue in (
@@ -10837,7 +10863,6 @@ def _analysis_evidence_looks_like_case_or_third_party(evidence: Any) -> bool:
             "别人",
             "人家",
             "案例",
-            "给你看",
             "我朋友",
             "我同事",
             "我们员工",

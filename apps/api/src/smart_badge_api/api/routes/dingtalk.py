@@ -84,6 +84,7 @@ from smart_badge_api.dingtalk_iot import (
 from smart_badge_api.db.models import (
     AnalysisTask,
     Device,
+    DeviceStaffBinding,
     PositionProfile,
     Recording,
     RecordingVisitLink,
@@ -2035,6 +2036,39 @@ async def _load_system_binding_map(
     if not device_codes:
         return {}
 
+    now = datetime.now(timezone.utc)
+
+    def normalize_dt(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def iso_dt(value: datetime | None) -> str | None:
+        normalized = normalize_dt(value)
+        return normalized.isoformat() if normalized is not None else None
+
+    def serialize_row(row: Any, *, binding_status: str) -> dict[str, object]:
+        return {
+            "deviceId": row.device_id,
+            "staffId": row.staff_id,
+            "staffName": row.staff_name,
+            "externalAccount": row.external_account,
+            "hospitalCode": row.staff_hospital_code,
+            "hospitalShortName": row.hospital_short_name,
+            "deviceHospitalCode": row.device_hospital_code,
+            "deviceHospitalShortName": row.device_hospital_short_name,
+            "positionName": row.position_name,
+            "isActive": bool(row.is_active),
+            "accountOpened": row.account_username is not None,
+            "accountUsername": row.account_username,
+            "accountIsActive": row.account_is_active,
+            "bindingStatus": binding_status,
+            "effectiveStart": iso_dt(getattr(row, "effective_start", None)),
+            "effectiveEnd": iso_dt(getattr(row, "effective_end", None)),
+        }
+
     linked_user_sq = (
         select(
             User.staff_id.label("staff_id"),
@@ -2050,6 +2084,87 @@ async def _load_system_binding_map(
         .where(User.staff_id.is_not(None))
         .subquery()
     )
+
+    binding_rows = (
+        await db.execute(
+            select(
+                Device.device_code.label("device_code"),
+                Device.id.label("device_id"),
+                Device.hospital_code.label("device_hospital_code"),
+                Device.hospital_short_name.label("device_hospital_short_name"),
+                Staff.id.label("staff_id"),
+                Staff.name.label("staff_name"),
+                Staff.external_account.label("external_account"),
+                Staff.hospital_code.label("staff_hospital_code"),
+                Staff.hospital_short_name.label("hospital_short_name"),
+                Staff.is_active.label("is_active"),
+                PositionProfile.name.label("position_name"),
+                DeviceStaffBinding.effective_from.label("effective_start"),
+                DeviceStaffBinding.effective_to.label("effective_end"),
+                DeviceStaffBinding.created_at.label("binding_created_at"),
+                linked_user_sq.c.account_username,
+                linked_user_sq.c.account_is_active,
+            )
+            .select_from(Device)
+            .join(DeviceStaffBinding, DeviceStaffBinding.device_id == Device.id)
+            .join(Staff, Staff.id == DeviceStaffBinding.staff_id)
+            .outerjoin(PositionProfile, PositionProfile.id == Staff.position_id)
+            .outerjoin(
+                linked_user_sq,
+                and_(linked_user_sq.c.staff_id == Staff.id, linked_user_sq.c.row_num == 1),
+            )
+            .where(
+                Device.device_code.in_(device_codes),
+                or_(
+                    DeviceStaffBinding.effective_to.is_(None),
+                    DeviceStaffBinding.effective_to > now,
+                ),
+            )
+            .order_by(
+                Device.device_code.asc(),
+                DeviceStaffBinding.effective_from.asc(),
+                DeviceStaffBinding.created_at.asc(),
+                DeviceStaffBinding.id.asc(),
+            )
+        )
+    ).all()
+
+    result: dict[str, dict[str, object]] = {}
+    binding_rows_by_code: dict[str, list[tuple[Any, datetime | None, datetime | None, bool]]] = {}
+    for row in binding_rows:
+        if not row.staff_id:
+            continue
+        start_at = normalize_dt(row.effective_start)
+        end_at = normalize_dt(row.effective_end)
+        is_active_now = (start_at is None or start_at <= now) and (end_at is None or end_at > now)
+        is_future = start_at is not None and start_at > now
+        if not is_active_now and not is_future:
+            continue
+        binding_rows_by_code.setdefault(row.device_code, []).append((row, start_at, end_at, is_active_now))
+
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    far_future = datetime(9999, 12, 31, tzinfo=timezone.utc)
+    for device_code, candidates in binding_rows_by_code.items():
+        active_candidates = [item for item in candidates if item[3]]
+        if active_candidates:
+            selected = max(
+                active_candidates,
+                key=lambda item: (
+                    item[1] or epoch,
+                    normalize_dt(getattr(item[0], "binding_created_at", None)) or epoch,
+                ),
+            )
+            result[device_code] = serialize_row(selected[0], binding_status="active")
+            continue
+
+        selected = min(
+            candidates,
+            key=lambda item: (
+                item[1] or far_future,
+                normalize_dt(getattr(item[0], "binding_created_at", None)) or far_future,
+            ),
+        )
+        result[device_code] = serialize_row(selected[0], binding_status="scheduled")
 
     rows = (
         await db.execute(
@@ -2078,25 +2193,10 @@ async def _load_system_binding_map(
         )
     ).all()
 
-    result: dict[str, dict[str, object]] = {}
     for row in rows:
-        if not row.staff_id:
+        if not row.staff_id or row.device_code in result:
             continue
-        result[row.device_code] = {
-            "deviceId": row.device_id,
-            "staffId": row.staff_id,
-            "staffName": row.staff_name,
-            "externalAccount": row.external_account,
-            "hospitalCode": row.staff_hospital_code,
-            "hospitalShortName": row.hospital_short_name,
-            "deviceHospitalCode": row.device_hospital_code,
-            "deviceHospitalShortName": row.device_hospital_short_name,
-            "positionName": row.position_name,
-            "isActive": bool(row.is_active),
-            "accountOpened": row.account_username is not None,
-            "accountUsername": row.account_username,
-            "accountIsActive": row.account_is_active,
-        }
+        result[row.device_code] = serialize_row(row, binding_status="active")
     return result
 
 
