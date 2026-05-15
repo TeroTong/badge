@@ -2610,13 +2610,20 @@ def _resolve_consultation_date_time(
 
 def _resolve_rfc_field_overrides(visit_order: VisitOrder) -> dict[str, str]:
     settings = get_settings()
+    zxdh = settings.sap_rfc_override_zxdh.strip()
+    mode = (settings.sap_rfc_mode.strip() or "C").upper()
+    if mode == "U" and not zxdh:
+        # ZXDH is learned from SAP when an initial create attempt reports an
+        # existing consultation order. Without it, start with create mode so the
+        # push service can extract the real ZXDH and retry in update mode.
+        mode = "C"
     return {
         "user": settings.sap_rfc_override_user.strip() or visit_order.advxc or visit_order.fzuer or "",
         "advxc": settings.sap_rfc_override_advxc.strip() or visit_order.advxc or visit_order.fzuer or "",
         "jgbm": visit_order.jgbm or "",
         "kunr": settings.sap_rfc_override_kunr.strip() or visit_order.kunr or "",
-        "mode": settings.sap_rfc_mode.strip() or "C",
-        "zxdh": settings.sap_rfc_override_zxdh.strip(),
+        "mode": mode,
+        "zxdh": zxdh,
     }
 
 
@@ -3597,6 +3604,7 @@ async def _load_visit_recording_contexts(db: AsyncSession, visit_id: str) -> tup
             for link in linked_recording.visit_links
             if str(link.visit_id or "").strip()
         }
+        result_payload: dict | None = None
         if len(linked_visit_ids) > 1:
             scoped = (
                 await db.execute(
@@ -3606,18 +3614,15 @@ async def _load_visit_recording_contexts(db: AsyncSession, visit_id: str) -> tup
                     )
                 )
             ).scalar_one_or_none()
-            if scoped is None or scoped.mapping_status != "confirmed":
-                return [], {
-                    "error": "multi_customer_review_required",
-                    "message": "该到诊单关联的录音中存在多客户录音，需要先完成多客户对应确认",
-                }
-            if scoped.analysis_status != "done" or not scoped.analysis_result:
-                return [], {
-                    "error": "multi_customer_analysis_pending",
-                    "message": "该到诊单关联的多客户录音尚未全部完成到诊单级分析",
-                }
-            result_payload = dict(scoped.analysis_result)
-        else:
+            if scoped is not None and scoped.mapping_status == "confirmed":
+                if scoped.analysis_status != "done" or not scoped.analysis_result:
+                    return [], {
+                        "error": "multi_customer_analysis_pending",
+                        "message": "该到诊单关联的多客户录音尚未全部完成到诊单级分析",
+                    }
+                result_payload = dict(scoped.analysis_result)
+
+        if result_payload is None:
             task = await _load_latest_base_analysis_task(db, linked_recording.id)
             if task is None or not task.result:
                 return [], {

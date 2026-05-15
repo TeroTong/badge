@@ -37,6 +37,14 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc_aware(value: datetime | None, *, default: datetime | None = None) -> datetime:
+    if value is None:
+        return default or datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _push_log_activity_at():
     return func.coalesce(SapPushLog.updated_at, SapPushLog.sent_at, SapPushLog.created_at)
 
@@ -44,6 +52,20 @@ def _push_log_activity_at():
 def _stale_before(settings) -> datetime:
     stale_seconds = max(int(settings.sap_rfc_auto_push_stale_seconds or 0), 0)
     return _utcnow() - timedelta(seconds=stale_seconds)
+
+
+def _auto_push_ignore_before(settings) -> datetime | None:
+    raw_value = str(getattr(settings, "sap_rfc_auto_push_ignore_before", "") or "").strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("invalid SAP_RFC_AUTO_PUSH_IGNORE_BEFORE=%s; ignoring cutoff", raw_value)
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _blocking_push_log_condition(*, changed_at, retry_after: datetime, stale_before: datetime):
@@ -70,7 +92,7 @@ def _is_push_log_blocking(log: SapPushLog | None, *, retry_after: datetime, stal
         return False
 
     status = log.status or ""
-    activity_at = log.updated_at or log.sent_at or log.created_at or datetime.min.replace(tzinfo=timezone.utc)
+    activity_at = _as_utc_aware(log.updated_at or log.sent_at or log.created_at)
     if status in _AUTO_PUSH_FINAL_BLOCKING_STATUSES:
         return True
     if status in _AUTO_PUSH_IN_PROGRESS_STATUSES:
@@ -233,7 +255,7 @@ async def _has_current_auto_push_log(
     if effective_visit_id:
         link_change_stmt = link_change_stmt.where(RecordingVisitLink.visit_id == effective_visit_id)
     link_changed_at = (await db.execute(link_change_stmt)).scalar_one_or_none()
-    changed_at = link_changed_at or recording.created_at or datetime.min.replace(tzinfo=timezone.utc)
+    changed_at = _as_utc_aware(link_changed_at or recording.created_at)
     if effective_visit_id:
         review_changed_at = (
             await db.execute(
@@ -243,8 +265,10 @@ async def _has_current_auto_push_log(
                 )
             )
         ).scalar_one_or_none()
-        if review_changed_at and review_changed_at > changed_at:
-            changed_at = review_changed_at
+        if review_changed_at:
+            review_changed_at = _as_utc_aware(review_changed_at)
+            if review_changed_at > changed_at:
+                changed_at = review_changed_at
 
     conditions = [
         SapPushLog.recording_id == recording_id,
@@ -264,6 +288,34 @@ async def _has_current_auto_push_log(
         )
     ).scalar_one_or_none()
     return _is_push_log_blocking(latest_log, retry_after=retry_after, stale_before=stale_before)
+
+
+async def _record_auto_push_preparation_error(
+    db,
+    recording_id: str,
+    target_visit_id: str | None,
+    exc: SapPushPreparationError,
+) -> None:
+    settings = get_settings()
+    recording = await db.get(Recording, recording_id)
+    visit_id = target_visit_id or (recording.visit_id if recording else None)
+    db.add(
+        SapPushLog(
+            recording_id=recording_id,
+            visit_id=visit_id,
+            trigger_mode="auto_bind",
+            status="skipped",
+            send_enabled=bool(settings.sap_rfc_send_enabled),
+            initiated_by="system:auto_stable_bind",
+            request_url=settings.sap_rfc_gateway_url,
+            request_payloads=[],
+            gateway_requests=[],
+            response_items=[],
+            error_message=f"{exc.error_code}: {exc.message}",
+            updated_at=_utcnow(),
+        )
+    )
+    await db.commit()
 
 
 def _first_review_recording_id(review: SapConsultationReview) -> str | None:
@@ -290,6 +342,7 @@ async def _find_pending_review_candidate_refs(
     stable_before: datetime,
     retry_after: datetime,
     stale_before: datetime,
+    ignore_before: datetime | None,
     excluded_visit_ids: set[str],
 ) -> list[tuple[str, str | None]]:
     if limit <= 0:
@@ -329,6 +382,8 @@ async def _find_pending_review_candidate_refs(
             )
         ).scalar_one_or_none()
         if recording is None:
+            continue
+        if ignore_before and recording.created_at and _as_utc_aware(recording.created_at) < ignore_before:
             continue
 
         latest_any_review_push = (
@@ -375,6 +430,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
     stable_before = _utcnow() - timedelta(seconds=max(settings.sap_rfc_auto_push_stable_seconds, 0))
     retry_after = _utcnow() - timedelta(seconds=max(settings.sap_rfc_auto_push_retry_delay_seconds, 0))
     stale_before = _stale_before(settings)
+    ignore_before = _auto_push_ignore_before(settings)
 
     link_count_subquery = (
         select(func.count(RecordingVisitLink.id))
@@ -464,10 +520,11 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             select(Recording.id, Recording.visit_id)
             .where(
                 Recording.status == "analyzed",
-            Recording.visit_id.is_not(None),
-            link_count_subquery <= 1,
-            has_completed_analysis,
-            ~has_blocking_push_log,
+                Recording.visit_id.is_not(None),
+                *([Recording.created_at >= ignore_before] if ignore_before else []),
+                link_count_subquery <= 1,
+                has_completed_analysis,
+                ~has_blocking_push_log,
                 or_(
                     latest_link_change_subquery.is_(None),
                     latest_link_change_subquery <= stable_before,
@@ -526,6 +583,55 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
         if remaining_limit <= 0:
             return single_refs
 
+        multi_fallback_stmt = (
+            select(Recording.id, RecordingVisitLink.visit_id)
+            .join(RecordingVisitLink, RecordingVisitLink.recording_id == Recording.id)
+            .where(
+                Recording.status == "analyzed",
+                RecordingVisitLink.visit_id.is_not(None),
+                *([Recording.created_at >= ignore_before] if ignore_before else []),
+                link_count_subquery > 1,
+                has_completed_analysis,
+                or_(
+                    latest_link_change_subquery.is_(None),
+                    latest_link_change_subquery <= stable_before,
+                ),
+            )
+            .order_by(Recording.created_at.asc(), Recording.id.asc(), RecordingVisitLink.visit_id.asc())
+            .limit(max(remaining_limit * 4, remaining_limit))
+        )
+        multi_fallback_refs: list[tuple[str, str | None]] = []
+        seen_multi_fallback_keys: set[tuple[str, str]] = set()
+        for recording_id, visit_id in (await db.execute(multi_fallback_stmt)).all():
+            recording_id = str(recording_id)
+            visit_id = str(visit_id)
+            key = (recording_id, visit_id)
+            if key in seen_multi_fallback_keys:
+                continue
+            scoped_mapping_status = (
+                await db.execute(
+                    select(RecordingVisitAnalysis.mapping_status).where(
+                        RecordingVisitAnalysis.recording_id == recording_id,
+                        RecordingVisitAnalysis.visit_id == visit_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if scoped_mapping_status == "confirmed":
+                continue
+            if not await _all_visit_recordings_ready(visit_id):
+                continue
+            if await _has_current_auto_push_log(db, recording_id, visit_id, retry_after, stale_before):
+                continue
+            multi_fallback_refs.append((recording_id, visit_id))
+            seen_multi_fallback_keys.add(key)
+            if len(multi_fallback_refs) >= remaining_limit:
+                break
+
+        refs = [*single_refs, *multi_fallback_refs]
+        remaining_limit = max(limit, 1) - len(refs)
+        if remaining_limit <= 0:
+            return refs
+
         multi_latest_link_change = (
             select(func.max(func.coalesce(RecordingVisitLink.updated_at, RecordingVisitLink.created_at)))
             .where(RecordingVisitLink.recording_id == RecordingVisitAnalysis.recording_id)
@@ -560,6 +666,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             .join(Recording, Recording.id == RecordingVisitAnalysis.recording_id)
             .where(
                 Recording.status == "analyzed",
+                *([Recording.created_at >= ignore_before] if ignore_before else []),
                 link_count_subquery > 1,
                 RecordingVisitAnalysis.mapping_status == "confirmed",
                 RecordingVisitAnalysis.analysis_status == "done",
@@ -573,7 +680,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             .limit(remaining_limit)
         )
         multi_refs = [(str(recording_id), str(visit_id)) for recording_id, visit_id in (await db.execute(multi_stmt)).all()]
-        refs = [*single_refs, *multi_refs]
+        refs = [*refs, *multi_refs]
         remaining_review_limit = max(limit, 1) - len(refs)
         if remaining_review_limit <= 0:
             return refs
@@ -585,6 +692,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             stable_before=stable_before,
             retry_after=retry_after,
             stale_before=stale_before,
+            ignore_before=ignore_before,
             excluded_visit_ids=excluded_visit_ids,
         )
         return [*refs, *review_refs]
@@ -656,6 +764,27 @@ async def run_sap_auto_push_scan(limit: int | None = None) -> dict[str, int]:
                             recording_id,
                             exc.message,
                         )
+                        try:
+                            async with _session_factory() as db:
+                                if not await _has_current_auto_push_log(
+                                    db,
+                                    recording_id,
+                                    target_visit_id,
+                                    retry_after,
+                                    stale_before,
+                                ):
+                                    await _record_auto_push_preparation_error(
+                                        db,
+                                        recording_id,
+                                        target_visit_id,
+                                        exc,
+                                    )
+                        except Exception:
+                            logger.warning(
+                                "failed to record sap auto push preparation error recording_id=%s",
+                                recording_id,
+                                exc_info=True,
+                            )
                         skipped += 1
                     except Exception:
                         logger.exception("sap auto push scan failed recording_id=%s", recording_id)

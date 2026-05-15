@@ -10,6 +10,7 @@ from smart_badge_api.db.models import (
     AnalysisTask,
     Customer,
     Recording,
+    RecordingVisitAnalysis,
     RecordingVisitLink,
     SapConsultationReview,
     SapPushLog,
@@ -222,6 +223,94 @@ def test_auto_push_groups_multiple_recordings_for_same_visit(monkeypatch) -> Non
 
                 assert await _find_auto_push_candidate_refs(10) == [("rec001", "visit001")]
                 assert await _find_auto_push_candidate_ids(10) == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_auto_push_includes_multi_visit_recording_before_customer_mapping(monkeypatch) -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        monkeypatch.setattr("smart_badge_api.sap_push_scheduler._session_factory", session_factory)
+
+        try:
+            stable_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+            async with session_factory() as db:
+                customer_one = Customer(id="cust001", name="Customer One")
+                customer_two = Customer(id="cust002", name="Customer Two")
+                visit_one = Visit(
+                    id="visit001",
+                    customer_id=customer_one.id,
+                    external_visit_order_no="DZ001",
+                    external_visit_order_seg="110",
+                )
+                visit_two = Visit(
+                    id="visit002",
+                    customer_id=customer_two.id,
+                    external_visit_order_no="DZ002",
+                    external_visit_order_seg="110",
+                )
+                recording = Recording(
+                    id="rec001",
+                    visit_id=visit_one.id,
+                    file_name="multi_customer.mp3",
+                    file_path="/tmp/multi_customer.mp3",
+                    status="analyzed",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                link_one = RecordingVisitLink(
+                    recording_id=recording.id,
+                    visit_id=visit_one.id,
+                    is_primary=True,
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                link_two = RecordingVisitLink(
+                    recording_id=recording.id,
+                    visit_id=visit_two.id,
+                    is_primary=False,
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                task = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="/tmp/recording_rec001.json",
+                    status="done",
+                    result={"consultation_result": {}},
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                    completed_at=stable_at,
+                )
+                db.add_all([customer_one, customer_two, visit_one, visit_two, recording, link_one, link_two, task])
+                await db.commit()
+
+                assert await _find_auto_push_candidate_refs(10) == [
+                    ("rec001", "visit001"),
+                    ("rec001", "visit002"),
+                ]
+
+                db.add(
+                    RecordingVisitAnalysis(
+                        id="rva001",
+                        recording_id=recording.id,
+                        visit_id=visit_one.id,
+                        mapping_status="confirmed",
+                        analysis_status="running",
+                        created_at=stable_at,
+                        updated_at=stable_at,
+                    )
+                )
+                await db.commit()
+
+                assert await _find_auto_push_candidate_refs(10) == [("rec001", "visit002")]
         finally:
             await engine.dispose()
 

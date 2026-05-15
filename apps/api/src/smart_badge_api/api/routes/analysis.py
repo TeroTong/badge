@@ -18,11 +18,12 @@ from smart_badge_api.api.analysis_access import build_analysis_artifact_access, 
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
+from smart_badge_api.analysis.agent_pipeline import analyze_transcript_agent
 from smart_badge_api.analysis.prompt_builder import build_system_prompt
 from smart_badge_api.analysis.staged_pipeline import analyze_transcript_staged
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import Recording, Transcript, User
+from smart_badge_api.db.models import AnalysisTask, Recording, Transcript, User
 from smart_badge_api.db.session import get_db
 from smart_badge_api.sap_consultation import attach_unlinked_sap_preview_to_result
 
@@ -50,6 +51,12 @@ def _results_dir() -> Path:
 
 def _experimental_results_dir() -> Path:
     path = _results_dir() / "experimental_staged"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _agent_results_dir() -> Path:
+    path = _results_dir() / "experimental_agent"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -155,6 +162,10 @@ async def _load_transcript_context(recording_id: str | None, db: AsyncSession) -
 
 def _experimental_result_path(file_id: str) -> Path:
     return _experimental_results_dir() / f"{file_id}.staged.json"
+
+
+def _agent_result_path(file_id: str) -> Path:
+    return _agent_results_dir() / f"{file_id}.agent.json"
 
 
 def _load_result_payload(file_id: str) -> tuple[dict, dict | None]:
@@ -403,9 +414,8 @@ def _clone_analysis_summaries(items: list[dict]) -> list[dict]:
 
 async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]:
     now = time.monotonic()
-    results_dir = _results_dir()
-    raw_dir = _raw_dir()
-    source_key = (str(results_dir.resolve()), str(raw_dir.resolve()))
+    bind = db.get_bind()
+    source_key = ("analysis_tasks_db_v2", id(bind), str(_results_dir().resolve()))
     cached_items = _analysis_result_list_cache.get("items")
     cached_expires_at = float(_analysis_result_list_cache.get("expires_at") or 0.0)
     if (
@@ -428,61 +438,83 @@ async def _load_cached_analysis_result_summaries(db: AsyncSession) -> list[dict]
         ):
             return _clone_analysis_summaries(cached_items)  # type: ignore[arg-type]
 
-        if not results_dir.exists():
-            _analysis_result_list_cache["items"] = []
+        tasks = (
+            await db.execute(
+                select(AnalysisTask).where(
+                    AnalysisTask.status == "done",
+                    AnalysisTask.result.is_not(None),
+                )
+            )
+        ).scalars().all()
+        latest_by_file_id: dict[str, AnalysisTask] = {}
+        for task in tasks:
+            file_name = str(task.file_name or "").strip()
+            if not file_name.endswith(".json"):
+                continue
+            file_id = file_name[:-5]
+            if not file_id:
+                continue
+            previous = latest_by_file_id.get(file_id)
+            if previous is None:
+                latest_by_file_id[file_id] = task
+                continue
+            previous_at = previous.completed_at or previous.updated_at or previous.created_at
+            current_at = task.completed_at or task.updated_at or task.created_at
+            if current_at and (previous_at is None or current_at > previous_at):
+                latest_by_file_id[file_id] = task
+
+        if not latest_by_file_id:
+            results_dir = _results_dir()
+            if not results_dir.exists():
+                _analysis_result_list_cache["items"] = []
+                _analysis_result_list_cache["source_key"] = source_key
+                _analysis_result_list_cache["expires_at"] = now + _ANALYSIS_RESULT_LIST_CACHE_TTL_SECONDS
+                return []
+            result_files = sorted(results_dir.glob("*.result.json"))
+            file_ids = [_get_file_id(fp.name) for fp in result_files]
+            recording_meta_map = await _load_recording_meta(file_ids, db)
+            items: list[dict] = []
+            for idx, fp in enumerate(result_files):
+                if idx and idx % 20 == 0:
+                    await asyncio.sleep(0)
+                try:
+                    file_id = _get_file_id(fp.name)
+                    recording_id = _extract_recording_id(file_id)
+                    meta = recording_meta_map.get(recording_id) if recording_id else None
+                    with open(fp, encoding="utf-8") as f:
+                        result_data = json.load(f)
+                    result_data = normalize_analysis_result(result_data) or {}
+                    items.append(_build_summary(file_id, result_data, None, meta))
+                except Exception as e:
+                    logger.warning("Failed to load legacy analysis summary %s: %s", fp.name, e)
+            _analysis_result_list_cache["items"] = _clone_analysis_summaries(items)
             _analysis_result_list_cache["source_key"] = source_key
             _analysis_result_list_cache["expires_at"] = now + _ANALYSIS_RESULT_LIST_CACHE_TTL_SECONDS
-            return []
+            return items
 
-        result_files = sorted(results_dir.glob("*.result.json"))
-        file_ids = [_get_file_id(fp.name) for fp in result_files]
+        file_ids = list(latest_by_file_id)
         recording_meta_map = await _load_recording_meta(file_ids, db)
 
         items: list[dict] = []
-        seen_keys: set[tuple[object, ...]] = set()
-        for idx, fp in enumerate(result_files):
-            # Yield to the event loop periodically so other requests / warm-ups
-            # are not starved during the (CPU-heavy) sanitize loop.
+        for idx, (file_id, task) in enumerate(latest_by_file_id.items()):
             if idx and idx % 20 == 0:
                 await asyncio.sleep(0)
             try:
-                stat = fp.stat()
-                memo_key = (str(fp), stat.st_mtime_ns, stat.st_size, source_key)
-                seen_keys.add(memo_key)
-                file_id = _get_file_id(fp.name)
                 recording_id = _extract_recording_id(file_id)
                 meta = recording_meta_map.get(recording_id) if recording_id else None
-                # Include meta identity in the key so cache invalidates if the
-                # underlying recording metadata gets refreshed.
-                full_key = memo_key + ((meta or {}).get("_cache_token"),)
-                cached = _analysis_summary_memo.get(full_key)  # type: ignore[arg-type]
-                if cached is not None:
-                    items.append(cached)
-                    continue
-
-                with open(fp, encoding="utf-8") as f:
-                    result_data = json.load(f)
-                # Match detail-page semantics: load raw_data and sanitize so
-                # tag counts / segment counts / duration fallbacks are
-                # consistent between list and detail views.
-                raw_data = _load_raw_data(file_id)
-                if raw_data:
-                    sanitize_analysis_result_with_raw(result_data, raw=raw_data)
+                result_data = dict(task.result or {})
                 result_data = normalize_analysis_result(result_data) or {}
-                summary = _build_summary(file_id, result_data, raw_data, meta)
-                _analysis_summary_memo[full_key] = summary  # type: ignore[index]
+                summary = _build_summary(file_id, result_data, None, meta)
+                if task.duration_ms is not None:
+                    summary["duration_ms"] = int(task.duration_ms or 0)
+                    summary["duration_display"] = _format_duration(summary["duration_ms"])
+                if task.segment_count is not None:
+                    summary["segment_count"] = int(task.segment_count or 0)
+                if task.overall_score is not None:
+                    summary["overall_score"] = float(task.overall_score)
                 items.append(summary)
             except Exception as e:
-                logger.warning("Failed to load %s: %s", fp.name, e)
-
-        # Evict memo entries for files that no longer exist (best-effort).
-        if len(_analysis_summary_memo) > len(seen_keys) * 2 + 50:
-            stale = [
-                k for k in _analysis_summary_memo
-                if (k[0], k[1], k[2]) not in seen_keys
-            ]
-            for k in stale:
-                _analysis_summary_memo.pop(k, None)
+                logger.warning("Failed to build analysis summary for %s: %s", file_id, e)
 
         _analysis_result_list_cache["items"] = _clone_analysis_summaries(items)
         _analysis_result_list_cache["source_key"] = source_key
@@ -691,6 +723,104 @@ async def run_staged_analysis_result(
         "current_result": current_result,
         "staged_analysis": staged,
         "comparison": _analysis_compare_summary(current_result, staged_result),
+        "raw_input_present": raw_data is not None,
+        "cached": False,
+    }
+    artifact_path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return artifact
+
+
+@router.get("/results/{file_id}/agent-analysis")
+async def get_agent_analysis_result(
+    file_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the cached agent-pipeline backup analysis artifact."""
+    await _ensure_result_access(file_id, db, current_user)
+    artifact_path = _agent_result_path(file_id)
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Agent 备用分析结果未生成")
+    with open(artifact_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@router.post("/results/{file_id}/agent-analysis")
+async def run_agent_analysis_result(
+    file_id: str,
+    refresh: bool = Query(False, description="Force rerun even when cached agent result exists"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run the agent backup LLM pipeline for side-by-side comparison.
+
+    This endpoint does not update AnalysisTask and does not trigger SAP push.
+    """
+    await _ensure_result_access(file_id, db, current_user)
+
+    artifact_path = _agent_result_path(file_id)
+    if artifact_path.exists() and not refresh:
+        with open(artifact_path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if isinstance(cached, dict):
+            cached["cached"] = True
+        return cached
+
+    raw_path = _resolve_raw_data_path(file_id)
+    if raw_path is None:
+        raise HTTPException(status_code=404, detail="未找到 Agent 备用分析所需的转写输入")
+
+    current_result, raw_data = _load_result_payload(file_id)
+    recording_id = _extract_recording_id(file_id)
+    recording: Recording | None = None
+    if recording_id:
+        recording = (
+            await db.execute(
+                select(Recording)
+                .where(Recording.id == recording_id)
+                .options(selectinload(Recording.staff))
+            )
+        ).scalar_one_or_none()
+
+    hospital_code = recording.staff.hospital_code if recording and recording.staff else None
+    system_prompt = await build_system_prompt(db, hospital_code=hospital_code)
+    staff_context = {
+        "file_name": recording.file_name if recording else file_id,
+        "staff_name": recording.staff.name if recording and recording.staff else "",
+        "staff_role": recording.staff.role if recording and recording.staff else "",
+        "hospital_code": hospital_code or "",
+    }
+
+    try:
+        agent = await asyncio.to_thread(
+            analyze_transcript_agent,
+            raw_path,
+            system_prompt=system_prompt,
+            staff_context=staff_context,
+        )
+        if recording_id and isinstance(agent.get("analysis_result"), dict):
+            enriched = await attach_unlinked_sap_preview_to_result(
+                db,
+                recording_id,
+                agent["analysis_result"],
+            )
+            if isinstance(enriched, dict):
+                agent["analysis_result"] = enriched
+    except Exception as exc:
+        logger.exception("agent backup analysis failed file_id=%s: %s", file_id, exc)
+        raise HTTPException(status_code=500, detail=f"Agent 备用分析失败：{exc}") from exc
+
+    agent_result = agent.get("analysis_result") if isinstance(agent.get("analysis_result"), dict) else {}
+    artifact = {
+        "file_id": file_id,
+        "recording_id": recording_id,
+        "recording_file_name": recording.file_name if recording else None,
+        "current_result": current_result,
+        "agent_analysis": agent,
+        "comparison": _analysis_compare_summary(current_result, agent_result),
         "raw_input_present": raw_data is not None,
         "cached": False,
     }

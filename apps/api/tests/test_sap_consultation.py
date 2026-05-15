@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from smart_badge_api.core.config import get_settings
+from smart_badge_api.core.config import Settings, get_settings
 from smart_badge_api.db.base import Base
 from smart_badge_api.db.models import (
     AnalysisTask,
@@ -26,9 +26,106 @@ from smart_badge_api.sap_consultation import (
     _extract_sap_preview_text,
     _merge_analysis_results,
     _synthesize_visit_analysis_results,
+    build_sap_payload,
     build_consultation_text,
     generate_sap_consultation_payloads,
 )
+
+
+def test_sap_rfc_override_defaults_are_empty(monkeypatch) -> None:
+    for key in (
+        "SAP_RFC_OVERRIDE_KUNR",
+        "SAP_RFC_OVERRIDE_ZXDH",
+        "SAP_RFC_OVERRIDE_USER",
+        "SAP_RFC_OVERRIDE_ADVXC",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.sap_rfc_override_kunr == ""
+    assert settings.sap_rfc_override_zxdh == ""
+    assert settings.sap_rfc_override_user == ""
+    assert settings.sap_rfc_override_advxc == ""
+    assert settings.sap_rfc_mode == "C"
+
+
+def test_build_sap_payload_uses_visit_order_fields_when_rfc_overrides_empty(monkeypatch) -> None:
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_KUNR", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ZXDH", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_USER", "")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ADVXC", "")
+    get_settings.cache_clear()
+
+    try:
+        visit_order = VisitOrder(
+            dzdh="DZ123",
+            dzseg="110",
+            jgbm="6501",
+            kunr="KH_REAL",
+            advxc="ADV_REAL",
+            fzuer="FZU_FALLBACK",
+            fzdh="FZDH_REAL",
+        )
+
+        payload = build_sap_payload(
+            visit_order,
+            advisor_name="Advisor",
+            result={},
+            consultation_date="20260515",
+            consultation_time="101500",
+            consultation_text_override="memo",
+        )
+
+        assert payload["user"] == "ADV_REAL"
+        assert payload["zxxx"]["advxc"] == "ADV_REAL"
+        assert payload["zxxx"]["kunr"] == "KH_REAL"
+        assert payload["zxxx"]["zxdh"] == ""
+        assert payload["zxxx"]["fzdh"] == "FZDH_REAL"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_build_sap_payload_falls_back_to_create_mode_without_zxdh(monkeypatch) -> None:
+    monkeypatch.setenv("SAP_RFC_MODE", "U")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ZXDH", "")
+    get_settings.cache_clear()
+
+    try:
+        payload = build_sap_payload(
+            VisitOrder(dzdh="DZ123", dzseg="110", kunr="KH_REAL", advxc="ADV_REAL"),
+            advisor_name="Advisor",
+            result={},
+            consultation_date="20260515",
+            consultation_time="101500",
+            consultation_text_override="memo",
+        )
+
+        assert payload["zxxx"]["mode"] == "C"
+        assert payload["zxxx"]["zxdh"] == ""
+    finally:
+        get_settings.cache_clear()
+
+
+def test_build_sap_payload_allows_update_mode_when_zxdh_is_explicit(monkeypatch) -> None:
+    monkeypatch.setenv("SAP_RFC_MODE", "U")
+    monkeypatch.setenv("SAP_RFC_OVERRIDE_ZXDH", "ZXDH_REAL")
+    get_settings.cache_clear()
+
+    try:
+        payload = build_sap_payload(
+            VisitOrder(dzdh="DZ123", dzseg="110", kunr="KH_REAL", advxc="ADV_REAL"),
+            advisor_name="Advisor",
+            result={},
+            consultation_date="20260515",
+            consultation_time="101500",
+            consultation_text_override="memo",
+        )
+
+        assert payload["zxxx"]["mode"] == "U"
+        assert payload["zxxx"]["zxdh"] == "ZXDH_REAL"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_sap_review_status_ignores_system_refresh_after_success() -> None:
@@ -940,24 +1037,6 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
                         },
                     },
                 )
-                scoped_primary = RecordingVisitAnalysis(
-                    id="rva001",
-                    recording_id=recording.id,
-                    visit_id=visit_primary.id,
-                    mapping_status="confirmed",
-                    analysis_status="done",
-                    analysis_result=task.result,
-                    sap_ready_at=datetime(2026, 4, 16, 10, 0, 0, tzinfo=timezone.utc),
-                )
-                scoped_companion = RecordingVisitAnalysis(
-                    id="rva002",
-                    recording_id=recording.id,
-                    visit_id=visit_companion.id,
-                    mapping_status="confirmed",
-                    analysis_status="done",
-                    analysis_result=task.result,
-                    sap_ready_at=datetime(2026, 4, 16, 10, 0, 0, tzinfo=timezone.utc),
-                )
                 db.add_all(
                     [
                         customer_primary,
@@ -971,8 +1050,6 @@ def test_generate_sap_consultation_payloads_creates_payload_for_each_linked_visi
                         order_primary,
                         order_companion,
                         task,
-                        scoped_primary,
-                        scoped_companion,
                     ]
                 )
                 await db.commit()

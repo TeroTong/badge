@@ -10,6 +10,7 @@ from dramatiq.brokers.redis import RedisBroker
 from dramatiq.brokers.stub import StubBroker
 
 from smart_badge_api.analysis.runner import execute_analysis
+from smart_badge_api.asr.service import execute_transcription
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.session import _session_factory
 from smart_badge_api.sap_push_service import execute_sap_push_log
@@ -22,7 +23,7 @@ def _configure_broker() -> None:
     settings = get_settings()
     broker = dramatiq.get_broker()
 
-    if "dramatiq" in {settings.task_dispatch_mode, settings.sap_rfc_dispatch_mode}:
+    if "dramatiq" in {settings.task_dispatch_mode, settings.sap_rfc_dispatch_mode, settings.asr_dispatch_mode}:
         dramatiq.set_broker(RedisBroker(url=settings.redis_url))
         return
 
@@ -36,6 +37,11 @@ _configure_broker()
 @dramatiq.actor(queue_name="analysis", max_retries=0)
 def run_analysis_actor(task_id: str) -> None:
     asyncio.run(execute_analysis(task_id))
+
+
+@dramatiq.actor(queue_name="asr", max_retries=0)
+def run_transcription_actor(recording_id: str) -> None:
+    asyncio.run(execute_transcription(recording_id))
 
 
 @dramatiq.actor(queue_name="sap_push", max_retries=0)

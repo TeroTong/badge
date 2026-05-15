@@ -6,7 +6,12 @@ from sqlalchemy.sql.elements import ColumnElement
 from smart_badge_api.db.models import Customer, Recording, RecordingVisitLink, Staff, Visit, VisitOrder
 
 
-def normalize_hospital_code(value: str | None) -> str | None:
+def normalize_hospital_code(value: object) -> str | None:
+    default_value = getattr(value, "default", None)
+    if default_value is not None and not isinstance(value, (str, bytes)):
+        value = default_value
+    elif default_value is None and value is not None and value.__class__.__module__.startswith("fastapi."):
+        value = None
     text = str(value or "").strip()
     return text or None
 

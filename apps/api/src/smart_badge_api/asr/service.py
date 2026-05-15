@@ -414,7 +414,15 @@ async def dispatch_transcription(recording_id: str) -> None:
     settings = get_settings()
     if settings.asr_dispatch_mode == "eager":
         await execute_transcription(recording_id)
-    else:
+        return
+    if settings.asr_dispatch_mode == "dramatiq":
+        from smart_badge_api.task_queue import run_transcription_actor
+
+        run_transcription_actor.send(recording_id)
+        return
+    if settings.asr_dispatch_mode == "background":
         task = asyncio.create_task(execute_transcription(recording_id))
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+        return
+    raise RuntimeError(f"Unsupported ASR dispatch mode: {settings.asr_dispatch_mode}")

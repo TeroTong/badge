@@ -118,13 +118,14 @@ class Settings(BaseSettings):
     sap_rfc_auto_push_retry_delay_seconds: int = 1800
     sap_rfc_auto_push_stale_seconds: int = 1800
     sap_rfc_auto_push_limit_per_run: int = 20
+    sap_rfc_auto_push_ignore_before: str = ""
     sap_rfc_summary_disabled_hospital_codes: str = ""
     sap_rfc_use_yybm_as_jgbm: bool = True
-    sap_rfc_mode: str = "U"
-    sap_rfc_override_kunr: str = "70000088"
-    sap_rfc_override_zxdh: str = "3123565192"
-    sap_rfc_override_user: str = "81034062"
-    sap_rfc_override_advxc: str = "81034062"
+    sap_rfc_mode: str = "C"
+    sap_rfc_override_kunr: str = ""
+    sap_rfc_override_zxdh: str = ""
+    sap_rfc_override_user: str = ""
+    sap_rfc_override_advxc: str = ""
 
     asr_provider: Literal[
         "mock",
@@ -134,7 +135,7 @@ class Settings(BaseSettings):
         "tencent_asr",
         "xfyun_asr",
     ] = "mock"
-    asr_dispatch_mode: Literal["background", "eager"] = "background"
+    asr_dispatch_mode: Literal["dramatiq", "background", "eager"] = "dramatiq"
     asr_runtime_dir: str = "asr_runtime"
     asr_audio_quality_diagnostics_enabled: bool = True
     asr_audio_quality_log_path: str = ""

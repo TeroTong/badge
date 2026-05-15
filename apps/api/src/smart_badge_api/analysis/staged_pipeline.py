@@ -25,6 +25,12 @@ from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.analysis.reference_data import load_analysis_reference_data
 from smart_badge_api.analysis.transcript import prepare_transcript
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
+from smart_badge_api.tag_catalog_reference import (
+    canonicalize_profile_tag_category,
+    canonicalize_profile_tag_value,
+    is_valid_profile_tag_value,
+    load_tag_catalog_definitions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +70,10 @@ Hard rules:
     such as a question/answer boundary, address term, or self-identification.
 11. Correct medical-aesthetic brand/product ASR errors only when strongly supported by
     context. Common terms include 瑞德喜, 艾维岚, 艾拉斯提, 贝丽菲尔, 双美胶原蛋白,
-    玻尿酸, 胶原蛋白, 肉毒, 除皱针, 溶解酶.
+    玻尿酸, 胶原蛋白, 肉毒, 除皱针, 溶解酶, 妈生鼻, 黑曜双波, 黄金微针.
+12. In a nose/rhinoplasty context, correct obvious ASR confusions such as
+    "妈生皮" to "妈生鼻". Do not make this correction in an unrelated skin-only
+    context.
 
 Return JSON only:
 {
@@ -116,6 +125,11 @@ Fact graph rules:
    explicitly confirmed by the main customer, or restated by staff and then
    confirmed by the customer. Staff/doctor observations without customer
    confirmation belong in doctor_diagnoses or seed_recommendations, not demands.
+   If the main customer explicitly raises a later, cross-department, or deferred
+   project/demand such as 美白、毛孔、痘印、暗沉、水光、光电, keep it as a demand
+   because it is useful for SAP remarks and future follow-up. Mark it as
+   referral/deferred in evidence; do not create a current recommendation or final
+   SAP indication from that demand unless a real current plan is discussed.
 3. An indication candidate must be supported by at least one demand, recommendation,
    or doctor diagnosis. Copy exact indication codes from the dictionary whenever
    you choose a standardized indication.
@@ -260,28 +274,65 @@ Hard rules:
 2. Do not add facts that are not in the transcript.
 3. Do not correct normal filler words or everyday chat.
 4. If unsure, put the item in uncertain_notes instead of correcting it.
-5. A professional explanation about anatomy, treatment steps, dosage, risks,
+5. First infer a stable role for each ASR speaker id in speaker_role_map.
+   The same asr_speaker should normally keep one business role across the
+   transcript. Use line-level speaker_corrections only for true exceptions
+   such as diarization errors, mixed speakers, or a different person taking
+   over the same ASR speaker id.
+6. Also infer a stable participant label and customer_scope for each ASR
+   speaker id. This is critical when two or more customers/companions are
+   present. Use:
+   - participant_label="主咨询客户" for the person whose visit/order is being
+     handled in this recording;
+   - "同行客户A"/"同行客户B" for other people who ask about their own treatment;
+   - "陪同人员" for family/friends who speak for or ask about the main customer;
+   - staff labels such as "医生", "咨询师", "专家助理", "前台".
+   customer_scope must be one of primary_customer, other_customer,
+   companion_or_family, staff, unknown.
+7. Do not label two different customer speakers simply as "客户" when the
+   transcript gives enough evidence to distinguish main customer vs同行客户.
+   If unsure which customer is primary, choose the best-supported primary and
+   add an uncertain_notes item.
+8. A professional explanation about anatomy, treatment steps, dosage, risks,
    case photos, or recommended plans is usually consultant/doctor/staff, not
    customer, unless surrounding turns clearly show the customer is speaking.
-6. A person self-identifying as expert assistant / doctor assistant / dean
+9. A person self-identifying as expert assistant / doctor assistant / dean
    assistant should not be labeled doctor.
-7. Customer speech usually contains personal goals, feelings, hesitation,
+10. Customer speech usually contains personal goals, feelings, hesitation,
    budget/price questions, consent/refusal, or follow-up questions.
-8. Term corrections must be local string replacements within one line. Correct
+11. Term corrections must be local string replacements within one line. Correct
    only when the replacement is strongly supported by nearby context.
 
 Common high-value terms:
 眶外C线, 眉弓线, 颞区, 额颞, 外轮廓线, 内轮廓线, 鼻基底, 泪沟,
 瑞德喜, 艾维岚, 艾拉斯提, 贝丽菲尔, 双美胶原蛋白, 玻尿酸, 胶原蛋白,
-肉毒, 除皱针, 溶解酶, 热玛吉, 超声炮.
+肉毒, 除皱针, 溶解酶, 热玛吉, 超声炮, 妈生鼻, 黑曜双波, 黄金微针.
+
+Contextual ASR correction examples:
+- If surrounding turns are about 鼻子/鼻综合/鼻背/鼻尖/鼻翼 and the line says
+  "妈生皮", correct it to "妈生鼻".
+- Correct "黑耀双波/黑药双波/黑曜双播" to "黑曜双波" when discussing 光电/射频/
+  黄金微针类皮肤项目.
 
 Return JSON only:
 {
   "correction_patch": {
+    "speaker_role_map": [
+      {
+        "asr_speaker": "speaker_0",
+        "role": "customer|companion|consultant|doctor|expert_assistant|frontdesk|staff_peer|other",
+        "participant_label": "主咨询客户|同行客户A|同行客户B|陪同人员|咨询师|医生|专家助理|前台|员工|其他",
+        "customer_scope": "primary_customer|other_customer|companion_or_family|staff|unknown",
+        "confidence": 0.0,
+        "reason": ""
+      }
+    ],
     "speaker_corrections": [
       {
         "line_id": "L0001",
         "corrected_speaker": "customer|companion|consultant|doctor|expert_assistant|frontdesk|staff_peer|other",
+        "participant_label": "",
+        "customer_scope": "primary_customer|other_customer|companion_or_family|staff|unknown",
         "confidence": 0.0,
         "reason": ""
       }
@@ -329,6 +380,19 @@ Evidence extraction rules:
    by the customer, or restated by staff and accepted by the customer.
 3. Staff/doctor observations are evidence, but they are not customer demands
    unless customer confirmation is present.
+Participant rules:
+- When the corrected transcript distinguishes participants such as 主咨询客户,
+  同行客户A/同行客户B, or 陪同人员, preserve that participant label in every evidence
+  item. Add participant_scope: primary_customer, other_customer,
+  companion_or_family, staff, or unknown.
+- Extract evidence for every consulting customer. Independent demands from
+  同行客户A/同行客户B must be marked other_customer and kept separate from 主咨询客户,
+  because the same recording may later be linked to multiple SAP visit orders.
+- Do not merge one customer's demand, concern, budget, recommendation, medical
+  history, deal status, or indication support into another customer's facts.
+- 陪同人员 can provide supporting information for 主咨询客户, but if the wording is
+  about the companion's own treatment need, mark it other_customer instead of
+  primary_customer.
 4. Preserve exact medical-aesthetic terms, body areas, brand names, material,
    dosage, price, course, sequence, risks, and customer response.
 5. For every evidence item, include turn ids/timestamps if available and quote
@@ -391,6 +455,14 @@ Evidence extraction rules:
     separately from pores/acne/dullness. If the main discussion is 热玛吉/超声炮/
     黄金微针/黑曜双波/射频/光电 for tightening, capture the tightening/laxity
     plan even when 毛孔、痘印、暗沉 are also mentioned.
+20. Extract profile_evidence whenever the transcript contains customer label
+    signals, even if they are not SAP indications: prior treatments/materials
+    or devices, current budget, price sensitivity, pain tolerance, children or
+    family situation, industry/special identity, comparison institution,
+    decision maker, treatment preference, recovery/time constraint, and product
+    or project preference. Keep participant/participant_scope and quote the
+    exact evidence. Do not drop these facts just because they are not part of
+    the current treatment plan.
 
 Return JSON only:
 {
@@ -401,6 +473,8 @@ Return JSON only:
         "content": "",
         "body_part": "",
         "speaker": "customer|companion|staff_restated_confirmed",
+        "participant": "主咨询客户|同行客户A|同行客户B|陪同人员|unknown",
+        "participant_scope": "primary_customer|other_customer|companion_or_family|unknown",
         "handling_status": "current_handled|referral_or_deferred|unclear",
         "evidence_turn_ids": [],
         "quote": "",
@@ -415,6 +489,8 @@ Return JSON only:
         "id": "E_R1",
         "content": "",
         "body_part": "",
+        "participant": "主咨询客户|同行客户A|同行客户B|unknown",
+        "participant_scope": "primary_customer|other_customer|unknown",
         "brand": "",
         "material": "",
         "dosage": "",
@@ -432,6 +508,18 @@ Return JSON only:
     "concern_evidence": [],
     "budget_evidence": [],
     "medical_history_evidence": [],
+    "profile_evidence": [
+      {
+        "id": "E_P1",
+        "category": "",
+        "value": "",
+        "participant": "主咨询客户|同行客户A|同行客户B|陪同人员|unknown",
+        "participant_scope": "primary_customer|other_customer|companion_or_family|unknown",
+        "evidence_turn_ids": [],
+        "quote": "",
+        "confidence": 0.0
+      }
+    ],
     "deal_evidence": [],
     "speaker_corrections": [],
     "quality_notes": []
@@ -466,10 +554,20 @@ deterministically from fact_graph.
 Judgment rules:
 1. Demands: include only current problems/goals with customer-side evidence or
    customer confirmation. Do not use staff/doctor observations alone as demands.
+   When participant_scope is present, build facts for every consulting customer
+   and keep participant/participant_scope on each item. Do not convert
+   同行客户A/同行客户B independent needs into 主咨询客户 facts. Companion/family speech
+   may support the main customer's demand only when it clearly describes the
+   main customer rather than the companion's own treatment need.
    If the customer's explicit wording is sparse but the evidence_graph contains
    high-confidence diagnosis of the current customer, a current_main_plan
    recommendation, and customer confirmation/acceptance/price inquiry, create a
    conservative staff_restated_confirmed demand instead of returning empty.
+   Also include explicit secondary/future/cross-department demands raised by the
+   main customer, even when they are not solved in this consultation. Examples:
+   美白、毛孔、痘印、暗沉、水光、光电、皮肤科项目. Keep them in demands for SAP
+   remarks/follow-up, but do not generate current recommendations or final SAP
+   indications from them without a current plan.
 2. Diagnoses: keep staff/doctor observations in doctor_diagnoses when they help
    explain the plan or indication, but do not rewrite them as customer demands.
 3. Recommendations: include plans that solve current demands. Every current
@@ -533,13 +631,23 @@ Judgment rules:
    recommendations. It may appear as a decision factor, but not as the final
    recommended plan.
 14. For skin anti-aging, when the evidence shows the customer's core issue is
-   skin laxity, sagging, tightening, or anti-aging and the plan is 热玛吉/超声炮/
-   黄金微针/黑曜双波/射频/光电, prioritize 松弛下垂/紧致淡纹 indication candidates
-   over incidental 毛孔、痘印、暗黄. Do not select 痤疮 from 痘印/痘坑 alone unless
-   active acne/粉刺/炎症痘 is clearly present.
+    skin laxity, sagging, tightening, or anti-aging and the plan is 热玛吉/超声炮/
+    黄金微针/黑曜双波/射频/光电, prioritize 松弛下垂/紧致淡纹 indication candidates
+    over incidental 毛孔、痘印、暗黄. Do not select 痤疮 from 痘印/痘坑 alone unless
+    active acne/粉刺/炎症痘 is clearly present.
+    This priority rule is only for SAP indication selection. Do not delete the
+    customer's explicit 毛孔、痘印、暗黄、美白、水光/光电需求 from demands.
 15. Every recommendation, seed_recommendation, concern, budget fact, and
    indication candidate must carry evidence text or quote. Do not return only
    evidence ids without the evidence text.
+16. Convert evidence_graph.profile_evidence into profile_facts. Also preserve
+   customer profile signals from medical_history_evidence, budget_evidence,
+   concern_evidence, and deal_evidence when they describe labels such as prior
+   treatment, material/device, budget, price sensitivity, pain tolerance,
+   children/family situation, industry/special identity, comparison institution,
+   decision maker, treatment preference, recovery/time constraint, or product
+   preference. These facts are used for customer tags and must not be dropped
+   just because they are not SAP indications.
 
 Return JSON only:
 {
@@ -550,6 +658,8 @@ Return JSON only:
         "content": "",
         "body_part": "",
         "source": "customer_direct|customer_confirmed|staff_restated_confirmed",
+        "participant": "主咨询客户|同行客户A|同行客户B|unknown",
+        "participant_scope": "primary_customer|other_customer|unknown",
         "evidence_ids": [],
         "evidence": [],
         "confidence": 0.0
@@ -562,6 +672,7 @@ Return JSON only:
     "concerns": [],
     "budget_facts": [],
     "medical_history": [],
+    "profile_facts": [],
     "deal_factors": [],
     "deal_outcome": {},
     "uncertainties": []
@@ -604,6 +715,10 @@ Hard selection rules:
    - current recommendation that solves the current demand;
    - concrete seed recommendation only when it is a real suggested project, not
      merely a deferred or explicitly not-recommended item.
+   If fact/evidence carries participant_scope, adjudicate indications separately
+   for each participant. Preserve participant and participant_scope on every
+   selected indication. Do not use 同行客户A/同行客户B evidence to support 主咨询客户
+   indications, and do not use 主咨询客户 evidence to support 同行客户 indications.
 2. Body area must match the evidence. Do not select a body-area indication
    because that body part was only mentioned in passing.
 3. A brand/material/product does not by itself determine an indication. Connect
@@ -659,6 +774,8 @@ Return JSON only:
   "final_indications": [
     {
       "standardized_indication": "Y2|微创|SYZ2001|塑美|BW2019|眶外C线（小O）",
+      "participant": "主咨询客户|同行客户A|同行客户B|unknown",
+      "participant_scope": "primary_customer|other_customer|unknown",
       "reason": "",
       "supporting_evidence": [],
       "confidence": 0.0
@@ -1707,21 +1824,155 @@ def _dedupe_demands(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         content = _first_text(item, "content", "demand", "text")
         if not content:
             continue
-        key = _normalize_key(content)
+        key = _demand_semantic_key(content, item)
         if not key:
             continue
         replaced = False
         for existing_key, existing in list(by_key.items()):
             existing_content = _first_text(existing, "content", "demand", "text")
             if key in existing_key or existing_key in key:
-                if len(content) > len(existing_content):
-                    by_key.pop(existing_key)
-                    by_key[key] = item
+                if _demand_item_score(item) > _demand_item_score(existing):
+                    by_key[existing_key] = item
                 replaced = True
                 break
         if not replaced:
             by_key[key] = item
     return list(by_key.values())
+
+
+def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
+    compact = _normalize_key(text)
+    if not compact:
+        return ""
+    body = _normalize_key(_first_text(item or {}, "body_part", "body_part_name", "area"))
+    groups = (
+        (("眼袋",), "眼袋"),
+        (("泪沟", "眶下凹陷"), "泪沟凹陷"),
+        (("隆胸", "丰胸", "胸部假体"), "隆胸"),
+        (("卧蚕",), "卧蚕"),
+        (("唇", "嘴唇", "嘴巴形状", "唇形"), "唇形"),
+        (("鼻小柱",), "鼻小柱"),
+        (("毛孔", "痘印", "痘坑", "肤质", "皮肤炎症", "泛红"), "肤质问题"),
+        (("美白", "暗沉", "暗黄", "提亮"), "肤色提亮"),
+        (("脱毛",), "脱毛"),
+        (("瘦肩", "斜方肌"), "瘦肩"),
+        (("颈纹",), "颈纹"),
+        (("色斑", "斑"), "色斑"),
+        (("富贵包",), "富贵包"),
+        (("副乳",), "副乳"),
+        (("下颌线", "收紧", "紧致", "松弛", "提升", "超声炮"), "面部紧致提升"),
+        (("鱼尾纹", "眼部纹", "眼纹", "除皱"), "眼部除皱"),
+    )
+    for terms, group in groups:
+        if body and any(term in body for term in terms):
+            return group
+    for terms, group in groups:
+        if any(term in compact for term in terms):
+            return group
+    return compact
+
+
+def _demand_item_score(item: dict[str, Any]) -> int:
+    content = _first_text(item, "content", "demand", "text")
+    compact = _normalize_key(content)
+    score = 0
+    if _has_any_text(compact, ("希望", "想", "改善", "调整", "解决", "去除", "收紧", "提升", "脱毛", "隆胸", "丰胸", "填充", "注射")):
+        score += 8
+    if compact.startswith(("改善", "希望改善", "想改善", "想做")):
+        score += 3
+    if _first_text(item, "body_part", "body_part_name", "area"):
+        score += 4
+    if _has_any_text(compact, ("眼袋", "泪沟", "隆胸", "丰胸", "卧蚕", "唇", "鼻小柱", "脱毛", "瘦肩", "皱", "纹", "松弛", "下垂", "富贵包", "副乳")):
+        score += 3
+    if _has_any_text(compact, ("咨询", "关注", "确认", "询问", "要求确认")):
+        score -= 5
+    if _is_process_or_meta_demand(content):
+        score -= 8
+    length = len(compact)
+    if 8 <= length <= 40:
+        score += 3
+    elif length > 80:
+        score -= 4
+    elif length > 55:
+        score -= 2
+    return score
+
+
+def _is_process_or_meta_demand(text: str) -> bool:
+    compact = _normalize_key(text)
+    if not compact:
+        return True
+    if _has_any_text(
+        compact,
+        (
+            "仪器版本",
+            "确认仪器",
+            "代际",
+            "几代",
+            "发数",
+            "可调整分配",
+            "白钻",
+            "黑钻",
+            "验证",
+            "医生是谁",
+            "是否包含",
+            "是否做",
+            "恢复时间",
+            "出院时间",
+            "开车",
+            "切口位置",
+            "安排最早时间",
+            "推迟到",
+            "咨询光子项目",
+            "咨询玻尿酸注射项目",
+        ),
+    ):
+        return True
+    if compact.startswith("咨询") and _has_any_text(compact, ("光子", "玻尿酸")) and not _has_any_text(
+        compact,
+        ("改善", "解决", "希望", "想", "纹", "斑", "痘", "凹", "凸", "松", "垮", "填充", "塑形"),
+    ):
+        return True
+    preference_only = (
+        "一次性到位",
+        "不想频繁",
+        "频繁注射",
+        "效果要明显",
+        "不要像没做一样",
+        "自然效果",
+        "不要过大",
+    )
+    has_problem_or_project = _has_any_text(
+        compact,
+        (
+            "眼袋",
+            "泪沟",
+            "隆胸",
+            "丰胸",
+            "卧蚕",
+            "唇",
+            "鼻小柱",
+            "毛孔",
+            "痘",
+            "斑",
+            "水光",
+            "光子",
+            "脱毛",
+            "瘦肩",
+            "瘦脸",
+            "皱",
+            "纹",
+            "松弛",
+            "下垂",
+            "收紧",
+            "提升",
+            "富贵包",
+            "副乳",
+        ),
+    )
+    if _has_any_text(compact, preference_only) and not has_problem_or_project:
+        return True
+    return False
 
 
 def _demand_priority_map(demands: list[dict[str, Any]]) -> dict[str, int]:
@@ -1759,6 +2010,8 @@ def _build_demands(fact_graph: dict[str, Any]) -> tuple[dict[str, Any], list[dic
         if _is_staff_only_demand(item):
             continue
         if _is_concern_like_text(content):
+            continue
+        if _is_process_or_meta_demand(content):
             continue
         raw_demands.append(item)
     demands = _dedupe_demands(raw_demands)
@@ -1818,7 +2071,8 @@ def _append_primary_demand(
 ) -> None:
     primary = _as_dict(result.setdefault("customer_primary_demands", {}))
     items = [dict(item) for item in _as_list(primary.get("items")) if isinstance(item, dict)]
-    if any(_normalize_key(body_part) in _normalize_key(json.dumps(item, ensure_ascii=False)) for item in items):
+    demand_key = _normalize_key(demand)
+    if any(demand_key and demand_key in _normalize_key(_clean_text(item.get("demand"))) for item in items):
         return
     items.append(
         {
@@ -1987,16 +2241,156 @@ def _augment_body_contouring_demands_from_raw(result: dict[str, Any], raw: dict[
             break
 
 
+_SKIN_EXPLICIT_DEMAND_TERMS = (
+    "毛孔",
+    "痘印",
+    "痘坑",
+    "暗沉",
+    "暗黄",
+    "美白",
+    "提亮",
+    "水光",
+    "光电",
+    "热玛吉",
+    "超声炮",
+    "黄金微针",
+    "黑曜双波",
+    "射频",
+)
+
+_SKIN_DEMAND_INTENT_TERMS = (
+    "想",
+    "希望",
+    "改善",
+    "做",
+    "先做",
+    "考虑",
+    "了解",
+    "问",
+    "咨询",
+    "收紧",
+    "提亮",
+)
+
+
+def _augment_explicit_skin_followup_demands_from_raw(result: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Keep explicit skin/follow-up demands even when they are not SAP indications.
+
+    The indication stage intentionally prioritizes the current treatment category,
+    but SAP consultation remarks still need customer-raised secondary or deferred
+    demands such as pores/acne marks/dullness/whitening/light-device care.
+    """
+    segments = _raw_transcribe_segments(raw)
+    if not segments:
+        return
+
+    customer_segments = [
+        seg
+        for seg in segments
+        if _segment_is_customer_side(seg)
+        and _has_any_text(_clean_text(seg.get("text") or seg.get("content")), _SKIN_EXPLICIT_DEMAND_TERMS)
+    ]
+    if not customer_segments:
+        return
+
+    has_customer_skin_context = any(
+        _has_any_text(
+            _clean_text(seg.get("text") or seg.get("content")),
+            ("皮肤", "光电", "水光", "热玛吉", "射频", "紧致", "暗沉", "暗黄", "美白", "毛孔", "痘印", "痘坑"),
+        )
+        for seg in customer_segments
+    )
+    evidence_segments = list(customer_segments)
+    if has_customer_skin_context:
+        for seg in segments:
+            if _segment_is_customer_side(seg):
+                continue
+            text = _clean_text(seg.get("text") or seg.get("content"))
+            if not _has_any_text(text, ("毛孔", "痘印", "痘坑", "暗沉", "暗黄", "美白", "水光", "光电")):
+                continue
+            if not _has_any_text(text, _SKIN_DEMAND_INTENT_TERMS + ("收紧", "解决", "针对")):
+                continue
+            evidence_segments.append(seg)
+
+    def evidence_for(*terms: str) -> str:
+        parts: list[str] = []
+        for seg in evidence_segments:
+            text = _clean_text(seg.get("text") or seg.get("content"))
+            if terms and not any(term in text for term in terms):
+                continue
+            if not _segment_is_customer_side(seg) and not has_customer_skin_context:
+                continue
+            if not _has_any_text(text, _SKIN_DEMAND_INTENT_TERMS) and not _has_any_text(text, ("有点", "不清晰", "不太好", "收紧", "针对")):
+                continue
+            ev = _segment_evidence(seg)
+            if ev:
+                parts.append(ev)
+            if len(parts) >= 3:
+                break
+        return "\n".join(parts)
+
+    if not _section_has_term(result, "customer_primary_demands", "毛孔") and not _section_has_term(result, "customer_primary_demands", "痘印"):
+        evidence = evidence_for("毛孔", "痘印", "痘坑")
+        if evidence:
+            _append_primary_demand(
+                result,
+                demand="希望改善毛孔、痘印/痘坑等皮肤质地问题",
+                body_part="面部皮肤",
+                evidence=evidence,
+            )
+
+    if not _section_has_term(result, "customer_primary_demands", "暗沉") and not _section_has_term(result, "customer_primary_demands", "美白"):
+        evidence = evidence_for("暗沉", "暗黄", "美白", "提亮")
+        if evidence:
+            _append_primary_demand(
+                result,
+                demand="希望改善皮肤暗沉/暗黄并提亮肤色",
+                body_part="面部皮肤",
+                evidence=evidence,
+            )
+
+    if not _section_has_term(result, "customer_primary_demands", "光电") and not _section_has_term(result, "customer_primary_demands", "水光"):
+        evidence = evidence_for("水光", "光电", "热玛吉", "超声炮", "黄金微针", "黑曜双波", "射频")
+        if evidence:
+            _append_primary_demand(
+                result,
+                demand="希望通过光电/水光等皮肤管理项目改善皮肤状态",
+                body_part="面部皮肤",
+                evidence=evidence,
+            )
+
+
+def _mark_low_business_value_if_empty(result: dict[str, Any], raw: dict[str, Any]) -> None:
+    has_demands = bool(_as_list(_as_dict(result.get("customer_primary_demands")).get("items")))
+    has_indications = bool(_as_list(_as_dict(result.get("standardized_indications")).get("items")))
+    has_recommendations = bool(_as_list(_as_dict(result.get("staff_recommendations")).get("items")))
+    if has_demands or has_indications or has_recommendations:
+        return
+    text = _raw_full_text(raw)
+    if not text:
+        return
+    quality = _as_dict(result.get("analysis_quality"))
+    issues = [_clean_text(item) for item in _as_list(quality.get("issues")) if _clean_text(item)]
+    issue = "疑似低业务价值录音：未发现主客户有效主诉、适应症或推荐方案，可能为闲聊/内部协作/订单沟通"
+    if issue not in issues:
+        issues.append(issue)
+    quality["issues"] = issues
+    quality["requires_review"] = True
+    result["analysis_quality"] = quality
+
+
 def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int]) -> dict[str, Any] | None:
     recommendation = _first_text(item, "content", "recommendation", "plan", "text")
     if not recommendation:
         return None
     if _item_has_low_confidence_fragment(item) or _looks_like_low_confidence_fragment(recommendation):
         return None
-    item_text = json.dumps(item, ensure_ascii=False)
+    relation = _clean_text(item.get("relation_to_current_demand"))
+    if relation in {"alternative_not_recommended", "auxiliary_or_care", "not_current_or_referral"}:
+        return None
     if _is_auxiliary_or_care_recommendation_text(recommendation):
         return None
-    if _is_alternative_or_not_recommended_text(item_text):
+    if _is_alternative_or_not_recommended_text(recommendation):
         return None
     details = _as_dict(item.get("details"))
     steps = _as_list(item.get("treatment_steps")) or _as_list(details.get("treatment_steps"))
@@ -2048,12 +2442,16 @@ def _build_recommendations(fact_graph: dict[str, Any], demand_map: dict[str, int
     for item in source_items:
         if not isinstance(item, dict):
             continue
+        recommendation_text = _first_text(item, "content", "recommendation", "plan", "text")
+        relation = _clean_text(item.get("relation_to_current_demand"))
         item_text = json.dumps(item, ensure_ascii=False)
-        if not seed and _is_seed_like_text(item_text) and not _linked_priorities(item, demand_map):
+        if relation in {"alternative_not_recommended", "auxiliary_or_care", "not_current_or_referral"}:
+            continue
+        if not seed and _is_seed_like_text(recommendation_text) and not _linked_priorities(item, demand_map):
             continue
         if _is_auxiliary_or_care_recommendation_text(_first_text(item, "content", "recommendation", "plan", "text")):
             continue
-        if _is_alternative_or_not_recommended_text(item_text):
+        if _is_alternative_or_not_recommended_text(recommendation_text):
             continue
         mapped = _build_recommendation_item(item, demand_map)
         if mapped:
@@ -2066,6 +2464,40 @@ def _build_recommendations(fact_graph: dict[str, Any], demand_map: dict[str, int
         "summary": "；".join(item["recommendation"] for item in result_items),
         "items": result_items,
     }
+
+
+def _ensure_recommendation_coverage(
+    recommendations: dict[str, Any],
+    fact_graph: dict[str, Any],
+    demand_map: dict[str, int],
+) -> dict[str, Any]:
+    """Keep mapped output consistent with fact_graph recommendations.
+
+    Filtering should remove only truly auxiliary/alternative items. It must not
+    drop a current main plan just because implementation_notes mention a backup
+    option or comparison product.
+    """
+    items = [dict(item) for item in _as_list(recommendations.get("items")) if isinstance(item, dict)]
+    seen = {_normalize_key(item.get("recommendation")) for item in items if _normalize_key(item.get("recommendation"))}
+    for source in _as_list(fact_graph.get("recommendations")):
+        if not isinstance(source, dict):
+            continue
+        mapped = _build_recommendation_item(source, demand_map)
+        if not mapped:
+            continue
+        key = _normalize_key(mapped.get("recommendation"))
+        if not key or key in seen:
+            continue
+        relation = _clean_text(source.get("relation_to_current_demand"))
+        if relation in {"planting_or_later", "seed", "later"}:
+            continue
+        if _is_seed_like_text(_first_text(source, "content", "recommendation", "plan", "text")) and not _linked_priorities(source, demand_map):
+            continue
+        seen.add(key)
+        items.append(mapped)
+    recommendations["items"] = items
+    recommendations["summary"] = "；".join(_clean_text(item.get("recommendation")) for item in items if _clean_text(item.get("recommendation")))
+    return recommendations
 
 
 def _build_concerns(fact_graph: dict[str, Any]) -> dict[str, Any]:
@@ -2086,22 +2518,214 @@ def _build_concerns(fact_graph: dict[str, Any]) -> dict[str, Any]:
     return {"inference_note": None, "summary": "；".join(item["content"] for item in items), "items": items}
 
 
-def _build_customer_profile(fact_graph: dict[str, Any]) -> dict[str, Any]:
-    tags: list[dict[str, Any]] = []
+@lru_cache(maxsize=1)
+def _profile_weight_by_category() -> dict[str, int]:
+    weights: dict[str, int] = {}
+    for item in load_tag_catalog_definitions():
+        category = canonicalize_profile_tag_category(item.name) or _clean_text(item.name)
+        if category:
+            weights[category] = int(item.weight_level)
+    return weights
+
+
+def _append_profile_tag(tags: list[dict[str, Any]], category: str, value: str, evidence: str = "") -> None:
+    canonical_category = canonicalize_profile_tag_category(category)
+    if not canonical_category:
+        return
+    canonical_value = canonicalize_profile_tag_value(canonical_category, value)
+    if not canonical_value or not is_valid_profile_tag_value(canonical_category, canonical_value):
+        return
+    key = (_normalize_key(canonical_category), _normalize_key(canonical_value))
+    for existing in tags:
+        if canonical_category in {"本次消费预算"} and _normalize_key(existing.get("category")) == _normalize_key(canonical_category):
+            if evidence and "[" in evidence and "[" not in _clean_text(existing.get("evidence")):
+                existing["value"] = canonical_value
+                existing["evidence"] = evidence
+            return
+        if (_normalize_key(existing.get("category")), _normalize_key(existing.get("value"))) == key:
+            if evidence and not existing.get("evidence"):
+                existing["evidence"] = evidence
+            return
+    tags.append(
+        {
+            "category": canonical_category,
+            "value": canonical_value,
+            "weight_level": _profile_weight_by_category().get(canonical_category),
+            "evidence": evidence,
+        }
+    )
+
+
+def _profile_item_evidence(item: dict[str, Any]) -> str:
+    evidence = _evidence_text(item.get("evidence"))
+    if evidence:
+        return evidence
+    values = _as_list(item.get("evidence"))
+    if values:
+        return "；".join(_clean_text(value) for value in values if _clean_text(value))
+    return _first_text(item, "quote", "content", "text", "summary")
+
+
+def _profile_item_text(item: dict[str, Any]) -> str:
+    parts = [
+        _first_text(item, "category", "type"),
+        _first_text(item, "value", "content", "project", "material", "device", "text", "factor", "concern"),
+        _evidence_text(item.get("evidence")),
+        _first_text(item, "quote"),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _append_profile_tag_from_item(tags: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    category = _first_text(item, "category", "tag_category", "type")
+    value = _first_text(item, "value", "tag_value", "content", "project", "material", "device", "text", "factor", "concern")
+    if not category or not value:
+        return
+    _append_profile_tag(tags, category, value, _profile_item_evidence(item))
+
+
+def _classify_history_treatment_project(text: str) -> str:
+    if _has_any_text(text, ("手术", "双眼皮", "眼袋", "鼻综合", "隆鼻", "吸脂", "抽脂", "拉皮", "丰胸", "线雕")):
+        return "手术类"
+    if _has_any_text(text, ("水光", "玻尿酸", "胶原", "肉毒", "除皱针", "瘦脸针", "注射", "填充", "童颜", "贝丽菲尔")):
+        return "注射类"
+    if _has_any_text(text, ("热玛吉", "超声炮", "光电", "黄金微针", "光子", "射频", "激光", "黑曜双波")):
+        return "光电类"
+    return ""
+
+
+def _extract_history_material_name(text: str) -> str:
+    known_terms = (
+        "水光",
+        "水光针",
+        "热玛吉",
+        "超声炮",
+        "黄金微针",
+        "玻尿酸",
+        "胶原蛋白",
+        "双美胶原蛋白",
+        "肉毒",
+        "除皱针",
+        "贝丽菲尔",
+        "艾拉斯提",
+        "瑞德喜",
+        "黑曜双波",
+    )
+    for term in known_terms:
+        if term in text:
+            return term
+    return ""
+
+
+def _append_profile_tags_from_fact_graph(tags: list[dict[str, Any]], fact_graph: dict[str, Any]) -> None:
+    for key in ("profile_facts",):
+        for item in _as_list(fact_graph.get(key)):
+            if isinstance(item, dict):
+                _append_profile_tag_from_item(tags, item)
+
     for item in _as_list(fact_graph.get("medical_history")):
         if not isinstance(item, dict):
             continue
-        content = _first_text(item, "content", "project", "material", "text")
-        if not content:
+        text = _profile_item_text(item)
+        if not text:
             continue
-        tags.append(
-            {
-                "category": _first_text(item, "category") or "历史治疗项目",
-                "value": content,
-                "weight_level": None,
-                "evidence": _evidence_text(item.get("evidence")),
-            }
-        )
+        evidence = _profile_item_evidence(item)
+        _append_profile_tag_from_item(tags, item)
+        project_type = _classify_history_treatment_project(text)
+        if project_type:
+            _append_profile_tag(tags, "治疗项目", project_type, evidence)
+        material = _extract_history_material_name(text)
+        if material:
+            _append_profile_tag(tags, "历史用的设备/原材料名称", material, evidence)
+
+    budget_texts: list[tuple[str, str]] = []
+    for key in ("budget_facts", "deal_factors"):
+        for item in _as_list(fact_graph.get(key)):
+            if not isinstance(item, dict):
+                continue
+            text = _profile_item_text(item)
+            evidence = _profile_item_evidence(item)
+            if _has_any_text(text, ("预算", "价格", "报价", "费用", "贵", "便宜", "承受", "优惠", "元", "万", "千")):
+                budget_texts.append((text, evidence))
+    for text, evidence in budget_texts[:1]:
+        if _has_any_text(text, ("预算", "元", "万", "千", "七", "八", "7000", "8000", "6800", "9800", "11800")):
+            _append_profile_tag(tags, "本次消费预算", text, evidence)
+    all_business_text = json.dumps(fact_graph, ensure_ascii=False)
+    all_budget_text = " ".join(text for text, _ in budget_texts) or all_business_text
+    if _has_any_text(all_budget_text, ("价格偏高", "预算有限", "贵", "顶死", "承受", "便宜吗", "申请", "优惠", "差别有点大")):
+        _append_profile_tag(tags, "价格敏感度", "高", budget_texts[0][1] if budget_texts else "")
+    elif _has_any_text(all_budget_text, ("价格", "预算", "费用", "报价")):
+        _append_profile_tag(tags, "价格敏感度", "中", budget_texts[0][1] if budget_texts else "")
+
+    if _has_any_text(all_business_text, ("疼痛", "痛感", "疼", "痛不痛")):
+        pain_level = "低" if _has_any_text(all_business_text, ("怕痛", "很怕疼", "不能痛", "受不了痛")) else "中"
+        _append_profile_tag(tags, "疼痛耐受度", pain_level, "")
+    if _has_any_text(all_business_text, ("热玛吉", "超声炮", "黄金微针", "水光", "光电", "射频", "皮肤", "毛孔", "痘印", "暗沉", "抗衰")):
+        _append_profile_tag(tags, "创伤倾向", "皮肤", "")
+
+
+def _first_raw_evidence_matching(raw: dict[str, Any], patterns: tuple[str, ...], *, customer_only: bool = False) -> str:
+    regexes = [re.compile(pattern) for pattern in patterns]
+    for seg in _raw_transcribe_segments(raw):
+        if customer_only and not _segment_is_customer_side(seg):
+            continue
+        text = _clean_text(seg.get("text") or seg.get("content"))
+        if not text:
+            continue
+        if any(regex.search(text) for regex in regexes):
+            return _segment_evidence(seg) or text
+    return ""
+
+
+def _append_profile_tags_from_raw(tags: list[dict[str, Any]], raw: dict[str, Any]) -> None:
+    if not raw:
+        return
+    budget_evidence = _first_raw_evidence_matching(raw, (r"预算.{0,12}[七八九一二三四五六十百千万0-9]", r"[七八九一二三四五六十百千万0-9]{1,8}.{0,6}(顶死|预算|承受|块|元|万)"))
+    if budget_evidence:
+        _append_profile_tag(tags, "本次消费预算", budget_evidence, budget_evidence)
+        _append_profile_tag(tags, "价格敏感度", "高", budget_evidence)
+
+    price_evidence = _first_raw_evidence_matching(raw, (r"价格.{0,12}(贵|高|差别|便宜|申请|优惠)", r"(贵|便宜吗|差别有点大|预算有限|顶死)"))
+    if price_evidence:
+        _append_profile_tag(tags, "价格敏感度", "高", price_evidence)
+
+    pain_evidence = _first_raw_evidence_matching(raw, (r"(痛感|疼痛|痛不痛|疼不疼|怕痛|怕疼)",))
+    if pain_evidence:
+        pain_level = "低" if _has_any_text(pain_evidence, ("怕痛", "怕疼", "受不了")) else "中"
+        _append_profile_tag(tags, "疼痛耐受度", pain_level, pain_evidence)
+
+    child_evidence = _first_raw_evidence_matching(raw, (r"(两个|2个).{0,6}(宝宝|孩子|小孩|娃)", r"(宝宝|孩子|小孩|娃).{0,6}(两个|2个)"))
+    if child_evidence:
+        _append_profile_tag(tags, "亲属/子女情况", "2孩及以上", child_evidence)
+
+    industry_evidence = _first_raw_evidence_matching(raw, (r"(部队|军人|军队|军官|士官)",))
+    if industry_evidence:
+        _append_profile_tag(tags, "行业", "政府/公共事业", industry_evidence)
+
+    comparison_evidence = _first_raw_evidence_matching(raw, (r"(艺星|长沙艺星|米兰柏羽|雅美|华美|美莱)",))
+    if comparison_evidence:
+        value = "长沙艺星" if "艺星" in comparison_evidence else comparison_evidence
+        _append_profile_tag(tags, "对比机构", value, comparison_evidence)
+
+    history_evidence = _first_raw_evidence_matching(raw, (r"(做过|打过|填过|治疗过|维养).{0,20}(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电)", r"(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电).{0,20}(做过|打过|填过|治疗过|维养)"))
+    if history_evidence:
+        project_type = _classify_history_treatment_project(history_evidence)
+        material = _extract_history_material_name(history_evidence)
+        if project_type:
+            _append_profile_tag(tags, "治疗项目", project_type, history_evidence)
+        if material:
+            _append_profile_tag(tags, "历史用的设备/原材料名称", material, history_evidence)
+
+    decision_evidence = _first_raw_evidence_matching(raw, (r"(我自己|我就|我可以|我考虑|我回去|给我回复|我再决定)",))
+    if decision_evidence and not _has_any_text(decision_evidence, ("老公", "老婆", "妈妈", "爸爸", "家人")):
+        _append_profile_tag(tags, "决策主体", "自主", decision_evidence)
+
+
+def _build_customer_profile(fact_graph: dict[str, Any], raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    tags: list[dict[str, Any]] = []
+    _append_profile_tags_from_fact_graph(tags, fact_graph)
+    if raw:
+        _append_profile_tags_from_raw(tags, raw)
     return {"inference_note": None, "age": None, "age_evidence": None, "tags": tags}
 
 
@@ -2283,14 +2907,25 @@ def _stabilize_fact_graph(fact_graph: dict[str, Any]) -> dict[str, Any]:
     return stabilized
 
 
-def _build_analysis_result_from_fact_graph(fact_graph: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+def _build_analysis_result_from_fact_graph(
+    fact_graph: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    include_participant_results: bool = True,
+    allow_raw_augmentation: bool = True,
+) -> dict[str, Any]:
+    source_fact_graph = dict(fact_graph)
+    customer_participants = _collect_customer_participants(source_fact_graph)
+    fact_graph = _default_fact_graph_for_single_result(source_fact_graph)
     fact_graph = _stabilize_fact_graph(fact_graph)
     primary_demands, demand_source_items, demand_map = _build_demands(fact_graph)
     indications = _build_standardized_indications(fact_graph)
     recommendations = _build_recommendations(fact_graph, demand_map, seed=False)
+    recommendations = _ensure_recommendation_coverage(recommendations, fact_graph, demand_map)
     seed_recommendations = _build_recommendations(fact_graph, demand_map, seed=True)
     concerns = _build_concerns(fact_graph)
-    profile = _build_customer_profile(fact_graph)
+    profile_raw = raw if allow_raw_augmentation and len(customer_participants) <= 1 else None
+    profile = _build_customer_profile(fact_graph, profile_raw)
     consumption_intent = _build_consumption_intent(fact_graph)
 
     # Safety: if the LLM extracted recommendation facts, the mapped result must
@@ -2357,7 +2992,13 @@ def _build_analysis_result_from_fact_graph(fact_graph: dict[str, Any], raw: dict
     finalized["customer_concerns"] = concerns
     finalized["consumption_intent"] = consumption_intent
     finalized["customer_profile"] = profile
-    _augment_body_contouring_demands_from_raw(finalized, raw)
+    # Raw-text fallback scans the whole recording. In multi-customer recordings
+    # it can accidentally add another customer's demand to the default result,
+    # so only use it when there is not more than one consulting customer.
+    if allow_raw_augmentation and len(customer_participants) <= 1:
+        _augment_body_contouring_demands_from_raw(finalized, raw)
+        _augment_explicit_skin_followup_demands_from_raw(finalized, raw)
+        _mark_low_business_value_if_empty(finalized, raw)
     primary_demands = _as_dict(finalized.get("customer_primary_demands"))
     indications = _as_dict(finalized.get("standardized_indications"))
     finalized["consultation_result"] = _build_consultation_result(
@@ -2375,6 +3016,18 @@ def _build_analysis_result_from_fact_graph(fact_graph: dict[str, Any], raw: dict
     _clear_stale_analysis_quality_flags(finalized)
     finalized["consultation_evaluation"] = rebuild_consultation_evaluation(finalized)
     finalized["consultation_process_evaluation"] = rebuild_consultation_process_evaluation(finalized)
+    if include_participant_results:
+        participant_results = _build_participant_analysis_results(source_fact_graph, raw)
+        if participant_results:
+            finalized["participant_analysis_results"] = participant_results
+            debug = _as_dict(finalized.get("staged_pipeline_debug"))
+            debug["participant_analysis_count"] = len(participant_results)
+            debug["participant_labels"] = [
+                _clean_text(item.get("participant"))
+                for item in participant_results
+                if _clean_text(item.get("participant"))
+            ]
+            finalized["staged_pipeline_debug"] = debug
     return finalized
 
 
@@ -2418,6 +3071,160 @@ def _evidence_item_text(item: dict[str, Any]) -> str:
     return _first_text(item, "content", "quote", "text", "summary")
 
 
+def _participant_scope(item: dict[str, Any]) -> str:
+    scope = _clean_text(item.get("participant_scope") or item.get("customer_scope")).lower()
+    if scope:
+        return scope
+    participant = _clean_text(item.get("participant") or item.get("participant_label") or item.get("speaker"))
+    if participant.startswith("同行客户"):
+        return "other_customer"
+    if participant.startswith("主咨询客户"):
+        return "primary_customer"
+    if participant.startswith("陪同"):
+        return "companion_or_family"
+    return ""
+
+
+_FACT_GRAPH_PARTICIPANT_LIST_KEYS = (
+    "demands",
+    "doctor_diagnoses",
+    "indication_candidates",
+    "recommendations",
+    "seed_recommendations",
+    "concerns",
+    "budget_facts",
+    "medical_history",
+    "profile_facts",
+    "deal_factors",
+)
+
+
+def _participant_label(item: dict[str, Any]) -> str:
+    label = _clean_text(item.get("participant") or item.get("participant_label"))
+    if label:
+        return _normalize_participant_display(label)
+    scope = _participant_scope(item)
+    if scope == "primary_customer":
+        return "主咨询客户"
+    if scope == "other_customer":
+        return "同行客户"
+    if scope == "companion_or_family":
+        return "陪同人员"
+    return ""
+
+
+def _participant_key(scope: str, label: str) -> str:
+    return f"{scope or 'unknown'}::{label or 'unknown'}"
+
+
+def _customer_participant_from_item(item: dict[str, Any]) -> dict[str, str] | None:
+    scope = _participant_scope(item)
+    label = _participant_label(item)
+    if scope not in {"primary_customer", "other_customer"}:
+        return None
+    if not label:
+        label = "主咨询客户" if scope == "primary_customer" else "同行客户"
+    return {"key": _participant_key(scope, label), "scope": scope, "label": label}
+
+
+def _collect_customer_participants(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
+    participants: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key in _FACT_GRAPH_PARTICIPANT_LIST_KEYS:
+        for item in _as_list(fact_graph.get(key)):
+            if not isinstance(item, dict):
+                continue
+            participant = _customer_participant_from_item(item)
+            if not participant or participant["key"] in seen:
+                continue
+            seen.add(participant["key"])
+            participants.append(participant)
+    deal_outcome = fact_graph.get("deal_outcome")
+    if isinstance(deal_outcome, dict):
+        participant = _customer_participant_from_item(deal_outcome)
+        if participant and participant["key"] not in seen:
+            participants.append(participant)
+    participants.sort(key=lambda item: (0 if item["scope"] == "primary_customer" else 1, item["label"]))
+    return participants
+
+
+def _item_matches_participant(item: dict[str, Any], participant: dict[str, str], *, include_shared: bool = False) -> bool:
+    scope = _participant_scope(item)
+    label = _participant_label(item)
+    if not scope:
+        return include_shared
+    if scope in {"unknown", "staff", "companion_or_family"}:
+        return include_shared
+    if scope != participant["scope"]:
+        return False
+    if not label:
+        return True
+    return _participant_key(scope, label) == participant["key"]
+
+
+def _filter_fact_graph_for_participant(
+    fact_graph: dict[str, Any],
+    participant: dict[str, str],
+    *,
+    include_shared: bool = False,
+) -> dict[str, Any]:
+    filtered = dict(fact_graph)
+    for key in _FACT_GRAPH_PARTICIPANT_LIST_KEYS:
+        filtered[key] = [
+            item
+            for item in _as_list(fact_graph.get(key))
+            if isinstance(item, dict) and _item_matches_participant(item, participant, include_shared=include_shared)
+        ]
+    deal_outcome = fact_graph.get("deal_outcome")
+    if isinstance(deal_outcome, dict) and _item_matches_participant(deal_outcome, participant, include_shared=include_shared):
+        filtered["deal_outcome"] = deal_outcome
+    else:
+        filtered["deal_outcome"] = {}
+    filtered["_participant"] = participant
+    return filtered
+
+
+def _default_fact_graph_for_single_result(fact_graph: dict[str, Any]) -> dict[str, Any]:
+    participants = _collect_customer_participants(fact_graph)
+    if not participants:
+        return fact_graph
+    primary = next((item for item in participants if item["scope"] == "primary_customer"), participants[0])
+    return _filter_fact_graph_for_participant(fact_graph, primary, include_shared=True)
+
+
+def _fact_graph_has_business_facts(fact_graph: dict[str, Any]) -> bool:
+    return any(_as_list(fact_graph.get(key)) for key in _FACT_GRAPH_PARTICIPANT_LIST_KEYS) or bool(
+        _as_dict(fact_graph.get("deal_outcome"))
+    )
+
+
+def _build_participant_analysis_results(fact_graph: dict[str, Any], raw: dict[str, Any]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for participant in _collect_customer_participants(fact_graph):
+        scoped = _filter_fact_graph_for_participant(fact_graph, participant, include_shared=False)
+        if not _fact_graph_has_business_facts(scoped):
+            continue
+        analysis_result = _build_analysis_result_from_fact_graph(
+            scoped,
+            raw,
+            include_participant_results=False,
+            allow_raw_augmentation=False,
+        )
+        results.append(
+            {
+                "participant_key": participant["key"],
+                "participant": participant["label"],
+                "participant_scope": participant["scope"],
+                "analysis_result": analysis_result,
+                "fact_counts": {
+                    key: len(_as_list(scoped.get(key)))
+                    for key in _FACT_GRAPH_PARTICIPANT_LIST_KEYS
+                },
+            }
+        )
+    return results
+
+
 def _evidence_item_to_fact_item(item: dict[str, Any], *, item_id: str, source_id: str | None = None) -> dict[str, Any]:
     fact_item = {
         "id": item_id,
@@ -2426,8 +3233,82 @@ def _evidence_item_to_fact_item(item: dict[str, Any], *, item_id: str, source_id
         "evidence_ids": [source_id or _clean_text(item.get("id"))],
         "evidence": [_first_text(item, "quote", "content", "text")],
         "confidence": item.get("confidence"),
+        "participant": _participant_label(item) or None,
+        "participant_scope": _participant_scope(item) or None,
     }
     return {key: value for key, value in fact_item.items() if value not in (None, "", [], {})}
+
+
+def _merge_profile_facts_from_evidence_graph(
+    fact_graph: dict[str, Any],
+    evidence_graph: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(fact_graph)
+    profile_facts = [item for item in _as_list(merged.get("profile_facts")) if isinstance(item, dict)]
+    seen = {
+        (
+            _normalize_key(_first_text(item, "category", "tag_category", "type")),
+            _normalize_key(_first_text(item, "value", "tag_value", "content", "text")),
+            _participant_key(_participant_scope(item), _participant_label(item)),
+        )
+        for item in profile_facts
+    }
+
+    def add_fact(category: str, value: str, item: dict[str, Any], source_id: str) -> None:
+        category = _clean_text(category)
+        value = _clean_text(value)
+        if not category or not value:
+            return
+        key = (
+            _normalize_key(category),
+            _normalize_key(value),
+            _participant_key(_participant_scope(item), _participant_label(item)),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        profile_facts.append(
+            {
+                "id": f"P{len(profile_facts) + 1}",
+                "category": category,
+                "value": value,
+                "content": value,
+                "evidence_ids": [_clean_text(item.get("id")) or source_id],
+                "evidence": [_first_text(item, "quote", "content", "text")],
+                "confidence": item.get("confidence"),
+                "participant": _participant_label(item) or None,
+                "participant_scope": _participant_scope(item) or None,
+            }
+        )
+
+    for item in _as_list(evidence_graph.get("profile_evidence")):
+        if not isinstance(item, dict):
+            continue
+        add_fact(
+            _first_text(item, "category", "tag_category", "type"),
+            _first_text(item, "value", "tag_value", "content", "text"),
+            item,
+            "profile_evidence",
+        )
+
+    for item in _as_list(evidence_graph.get("budget_evidence")):
+        if isinstance(item, dict):
+            text = _evidence_item_text(item)
+            if text:
+                add_fact("本次消费预算", text, item, "budget_evidence")
+
+    for item in _as_list(evidence_graph.get("concern_evidence")):
+        if not isinstance(item, dict):
+            continue
+        text = _profile_item_text(item)
+        if _has_any_text(text, ("价格", "预算", "贵", "便宜", "承受", "优惠")):
+            add_fact("价格敏感度", "高", item, "concern_evidence")
+        if _has_any_text(text, ("疼痛", "痛感", "怕痛", "怕疼", "痛不痛")):
+            add_fact("疼痛耐受度", "低" if _has_any_text(text, ("怕痛", "怕疼", "受不了")) else "中", item, "concern_evidence")
+
+    if profile_facts:
+        merged["profile_facts"] = profile_facts
+    return merged
 
 
 def _repair_empty_fact_graph_from_evidence_graph(
@@ -2445,7 +3326,8 @@ def _repair_empty_fact_graph_from_evidence_graph(
     demand_evidence = [
         item
         for item in _as_list(evidence_graph.get("customer_demand_evidence"))
-        if isinstance(item, dict) and not _item_has_low_confidence_fragment(item)
+        if isinstance(item, dict)
+        and not _item_has_low_confidence_fragment(item)
     ]
     diagnoses = [
         item
@@ -2490,6 +3372,8 @@ def _repair_empty_fact_graph_from_evidence_graph(
             "evidence_ids": [_clean_text(source_for_demand.get("id"))],
             "evidence": [_first_text(source_for_demand, "quote", "content")],
             "confidence": min(0.82, float(_item_confidence(source_for_demand) or 0.75)),
+            "participant": _participant_label(source_for_demand) or None,
+            "participant_scope": _participant_scope(source_for_demand) or None,
         }
     ]
     repaired["doctor_diagnoses"] = [
@@ -2514,6 +3398,8 @@ def _repair_empty_fact_graph_from_evidence_graph(
             "evidence_ids": [_clean_text(item.get("id"))],
             "evidence": [_first_text(item, "quote", "content")],
             "confidence": item.get("confidence"),
+            "participant": _participant_label(item) or None,
+            "participant_scope": _participant_scope(item) or None,
         }
         rec_items.append({key: value for key, value in rec.items() if value not in (None, "", [], {})})
     repaired["recommendations"] = rec_items
@@ -2527,7 +3413,8 @@ def _repair_empty_fact_graph_from_evidence_graph(
     repaired["concerns"] = [
         _evidence_item_to_fact_item(item, item_id=f"C{index}", source_id=_clean_text(item.get("id")))
         for index, item in enumerate(_as_list(evidence_graph.get("concern_evidence")), start=1)
-        if isinstance(item, dict) and not _item_has_low_confidence_fragment(item)
+        if isinstance(item, dict)
+        and not _item_has_low_confidence_fragment(item)
     ]
     uncertainties = _as_list(repaired.get("uncertainties"))
     uncertainties.append("客户完整主诉表达较少，已基于现场诊断、当前方案及客户确认反应生成保守主诉")
@@ -2597,6 +3484,8 @@ def _apply_indication_adjudication(
                 "evidence": _evidence_text(item.get("supporting_evidence")) or _clean_text(item.get("reason")),
                 "confidence": item.get("confidence"),
                 "adjudication_reason": _clean_text(item.get("reason")),
+                "participant": _participant_label(item) or None,
+                "participant_scope": _participant_scope(item) or None,
             }
         )
 
@@ -2624,7 +3513,47 @@ def _extract_correction_patch(parsed: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _number_dialogue_lines(dialogue: str) -> tuple[str, dict[str, str]]:
+def _raw_speaker_key_from_segment(segment: dict[str, Any]) -> str:
+    for key in (
+        "asr_original_speaker_id",
+        "asr_original_speaker",
+        "speaker_id",
+        "speaker_label",
+        "speaker_display_label",
+        "speaker",
+        "role",
+    ):
+        value = _clean_text(segment.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _build_line_speaker_metadata(dialogue: str, raw: dict[str, Any]) -> dict[str, dict[str, str]]:
+    metadata: dict[str, dict[str, str]] = {}
+    raw_segments = [
+        item
+        for item in _raw_transcribe_segments(raw)
+        if _clean_text(item.get("text") or item.get("content"))
+    ]
+    dialogue_lines = [line for line in dialogue.splitlines() if line.strip()]
+    for index, _line in enumerate(dialogue_lines, start=1):
+        line_id = f"L{index:04d}"
+        segment = raw_segments[index - 1] if index - 1 < len(raw_segments) else {}
+        if not isinstance(segment, dict):
+            segment = {}
+        speaker_key = _raw_speaker_key_from_segment(segment)
+        metadata[line_id] = {
+            "asr_speaker": speaker_key,
+            "speaker": _clean_text(segment.get("speaker")),
+            "speaker_id": _clean_text(segment.get("speaker_id")),
+            "speaker_label": _clean_text(segment.get("speaker_label") or segment.get("speaker_display_label")),
+            "role": _clean_text(segment.get("role") or segment.get("speaker_role") or segment.get("speaker_business_role")),
+        }
+    return metadata
+
+
+def _number_dialogue_lines(dialogue: str, line_metadata: dict[str, dict[str, str]] | None = None) -> tuple[str, dict[str, str]]:
     numbered: list[str] = []
     line_map: dict[str, str] = {}
     index = 1
@@ -2634,13 +3563,125 @@ def _number_dialogue_lines(dialogue: str) -> tuple[str, dict[str, str]]:
             continue
         line_id = f"L{index:04d}"
         line_map[line_id] = line
-        numbered.append(f"{line_id}: {line}")
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        role = _clean_text(metadata.get("role"))
+        meta_parts = []
+        if asr_speaker:
+            meta_parts.append(f"asr_speaker={asr_speaker}")
+        if role:
+            meta_parts.append(f"current_role={role}")
+        meta_text = f" [{'; '.join(meta_parts)}]" if meta_parts else ""
+        numbered.append(f"{line_id}{meta_text}: {line}")
         index += 1
     return "\n".join(numbered), line_map
 
 
-def _apply_correction_patch(numbered_dialogue: str, line_map: dict[str, str], patch: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _normalize_business_role_display(role: str) -> str:
+    normalized = _clean_text(role)
+    if not normalized:
+        return ""
+    role_map = {
+        "customer": "客户",
+        "client": "客户",
+        "顾客": "客户",
+        "客户": "客户",
+        "companion": "陪同人员",
+        "family": "陪同人员",
+        "陪同": "陪同人员",
+        "陪同人员": "陪同人员",
+        "consultant": "咨询师",
+        "advisor": "咨询师",
+        "consultant_staff": "咨询师",
+        "咨询": "咨询师",
+        "咨询师": "咨询师",
+        "doctor": "医生",
+        "physician": "医生",
+        "医生": "医生",
+        "expert_assistant": "专家助理",
+        "doctor_assistant": "专家助理",
+        "assistant": "专家助理",
+        "专家助理": "专家助理",
+        "医生助理": "专家助理",
+        "frontdesk": "前台",
+        "front_desk": "前台",
+        "reception": "前台",
+        "前台": "前台",
+        "staff_peer": "员工",
+        "staff": "员工",
+        "colleague": "员工",
+        "员工": "员工",
+        "other": "其他",
+        "unknown": "其他",
+        "其他": "其他",
+    }
+    lowered = normalized.lower()
+    return role_map.get(lowered) or role_map.get(normalized) or normalized
+
+
+def _normalize_participant_display(label: str, fallback_role: str = "") -> str:
+    normalized = _clean_text(label)
+    if not normalized:
+        return _normalize_business_role_display(fallback_role)
+    label_map = {
+        "primary_customer": "主咨询客户",
+        "main_customer": "主咨询客户",
+        "target_customer": "主咨询客户",
+        "customer_primary": "主咨询客户",
+        "主客户": "主咨询客户",
+        "主顾客": "主咨询客户",
+        "主咨询客户": "主咨询客户",
+        "other_customer": "同行客户",
+        "secondary_customer": "同行客户",
+        "同行客户": "同行客户",
+        "customer_a": "同行客户A",
+        "other_customer_a": "同行客户A",
+        "同行客户a": "同行客户A",
+        "同行客户A": "同行客户A",
+        "客户A": "同行客户A",
+        "customer_b": "同行客户B",
+        "other_customer_b": "同行客户B",
+        "同行客户b": "同行客户B",
+        "同行客户B": "同行客户B",
+        "客户B": "同行客户B",
+        "companion": "陪同人员",
+        "family": "陪同人员",
+        "companion_or_family": "陪同人员",
+        "陪同": "陪同人员",
+        "家属": "陪同人员",
+        "陪同人员": "陪同人员",
+    }
+    lowered = normalized.lower()
+    return label_map.get(lowered) or label_map.get(normalized) or _normalize_business_role_display(normalized)
+
+
+def _display_speaker_from_mapping(item: dict[str, Any], *, role_key: str = "role") -> str:
+    role = _clean_text(item.get(role_key) or item.get("corrected_speaker") or item.get("speaker_role"))
+    for key in ("participant_label", "display_speaker", "speaker_label", "label"):
+        label = _clean_text(item.get(key))
+        if label:
+            return _normalize_participant_display(label, role)
+    return _normalize_business_role_display(role)
+
+
+def _replace_line_speaker_role(line: str, role: str) -> str:
+    normalized_role = _normalize_participant_display(role)
+    if not normalized_role:
+        return line
+    match = re.match(r"^(\[[^\]]+\]\s*)([^:：\n]+)([:：]\s*)(.*)$", line)
+    if not match:
+        return line
+    return f"{match.group(1)}{normalized_role}{match.group(3)}{match.group(4)}"
+
+
+def _apply_correction_patch(
+    numbered_dialogue: str,
+    line_map: dict[str, str],
+    patch: dict[str, Any],
+    line_metadata: dict[str, dict[str, str]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     lines = dict(line_map)
+    applied_speaker_maps: list[dict[str, Any]] = []
     applied_speaker: list[dict[str, Any]] = []
     applied_terms: list[dict[str, Any]] = []
     skipped_terms: list[dict[str, Any]] = []
@@ -2665,6 +3706,52 @@ def _apply_correction_patch(numbered_dialogue: str, line_map: dict[str, str], pa
         lines[line_id] = lines[line_id].replace(original, corrected)
         applied_terms.append(item)
 
+    role_map: dict[str, dict[str, Any]] = {}
+    for item in _as_list(patch.get("speaker_role_map")):
+        if not isinstance(item, dict):
+            continue
+        asr_speaker = _clean_text(item.get("asr_speaker") or item.get("speaker") or item.get("speaker_id"))
+        role = _clean_text(item.get("role") or item.get("corrected_role") or item.get("speaker_role"))
+        confidence = item.get("confidence")
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = 0.0
+        if not asr_speaker or not role or confidence_value < 0.65:
+            continue
+        participant_label = _clean_text(item.get("participant_label") or item.get("display_speaker") or item.get("speaker_label"))
+        customer_scope = _clean_text(item.get("customer_scope") or item.get("participant_scope"))
+        role_map[asr_speaker] = {
+            **item,
+            "asr_speaker": asr_speaker,
+            "role": role,
+            "participant_label": participant_label,
+            "customer_scope": customer_scope,
+            "display_speaker": _display_speaker_from_mapping({**item, "role": role}),
+            "confidence": confidence_value,
+        }
+
+    if role_map:
+        for line_id, metadata in (line_metadata or {}).items():
+            asr_speaker = _clean_text(metadata.get("asr_speaker"))
+            mapped = role_map.get(asr_speaker)
+            if not mapped or line_id not in lines:
+                continue
+            before = lines[line_id]
+            lines[line_id] = _replace_line_speaker_role(lines[line_id], _clean_text(mapped.get("display_speaker") or mapped.get("role")))
+            if before != lines[line_id]:
+                applied_speaker_maps.append(
+                    {
+                        "line_id": line_id,
+                        "asr_speaker": asr_speaker,
+                        "role": mapped.get("role"),
+                        "participant_label": mapped.get("participant_label"),
+                        "customer_scope": mapped.get("customer_scope"),
+                        "display_speaker": mapped.get("display_speaker"),
+                        "reason": _clean_text(mapped.get("reason")),
+                    }
+                )
+
     speaker_notes: dict[str, str] = {}
     for item in _as_list(patch.get("speaker_corrections")):
         if not isinstance(item, dict):
@@ -2679,7 +3766,15 @@ def _apply_correction_patch(numbered_dialogue: str, line_map: dict[str, str], pa
         if not line_id or line_id not in lines or not speaker or confidence_value < 0.65:
             continue
         reason = _clean_text(item.get("reason"))
-        speaker_notes[line_id] = f" <speaker_correction={speaker}; reason={reason}>"
+        display_speaker = _display_speaker_from_mapping({**item, "role": speaker})
+        lines[line_id] = _replace_line_speaker_role(lines[line_id], display_speaker)
+        scope = _clean_text(item.get("customer_scope") or item.get("participant_scope"))
+        note_parts = [f"speaker_correction={display_speaker}"]
+        if scope:
+            note_parts.append(f"scope={scope}")
+        if reason:
+            note_parts.append(f"reason={reason}")
+        speaker_notes[line_id] = f" <{'; '.join(note_parts)}>"
         applied_speaker.append(item)
 
     merged_lines = []
@@ -2687,11 +3782,14 @@ def _apply_correction_patch(numbered_dialogue: str, line_map: dict[str, str], pa
         merged_lines.append(f"{line_id}: {lines[line_id]}{speaker_notes.get(line_id, '')}")
 
     metadata = {
+        "applied_speaker_role_map": applied_speaker_maps,
         "applied_speaker_corrections": applied_speaker,
         "applied_term_corrections": applied_terms,
         "skipped_term_corrections": skipped_terms,
         "uncertain_notes": _as_list(patch.get("uncertain_notes")),
         "input_line_count": len(line_map),
+        "speaker_role_map": list(role_map.values()),
+        "speaker_line_metadata": line_metadata or {},
     }
     return "\n".join(merged_lines), metadata
 
@@ -2750,7 +3848,8 @@ def analyze_transcript_staged(
 
     staff_text = _format_staff_context(staff_context)
     preprocess_context = _build_preprocess_context(dialogue, staff_context)
-    numbered_dialogue, numbered_line_map = _number_dialogue_lines(dialogue)
+    line_speaker_metadata = _build_line_speaker_metadata(dialogue, raw)
+    numbered_dialogue, numbered_line_map = _number_dialogue_lines(dialogue, line_speaker_metadata)
     correction_user_prompt = _CORRECTION_USER_TEMPLATE.format(
         staff_context=staff_text,
         preprocess_context=json.dumps(preprocess_context, ensure_ascii=False, indent=2),
@@ -2767,6 +3866,7 @@ def analyze_transcript_staged(
         numbered_dialogue,
         numbered_line_map,
         correction_patch,
+        line_speaker_metadata,
     )
     postprocessed = {
         "chunks": [],
@@ -2807,6 +3907,7 @@ def analyze_transcript_staged(
     judgment_parsed = _call_json(_JUDGMENT_SYSTEM_PROMPT, judgment_user_prompt, max_tokens=12000)
     fact_graph = _extract_fact_graph(judgment_parsed)
     fact_graph = _repair_empty_fact_graph_from_evidence_graph(fact_graph, evidence_graph)
+    fact_graph = _merge_profile_facts_from_evidence_graph(fact_graph, evidence_graph)
     indication_user_prompt = _INDICATION_ADJUDICATION_USER_TEMPLATE.format(
         fact_graph=json.dumps(_compact_fact_graph_for_indications(fact_graph), ensure_ascii=False, indent=2),
         candidate_indications=json.dumps(candidate_indications, ensure_ascii=False, indent=2),

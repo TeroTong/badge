@@ -45,27 +45,3 @@ apps/api/asr_v2_test.log
 .env
 apps/api/.env
 apps/web/.env
-
-# Local sync backups / documents / generated data
-/.bak*/
-/backups/
-/source_sync_backups/
-/docs/
-/exports/
-/logs/
-/remote/
-/wecom_verify/
-/apps/web/dist.bak*/
-/apps/api/.debug_*.py
-/apps/api/.tmp_*.py
-/apps/api/tmp_*.py
-/tmp_*.py
-/*_summary.json
-/stress_report.json
-/WW_verify_*.txt
-/*.pdf
-/*.docx
-/*.xlsx
-/*.xls
-/*.csv
-/*.jpg

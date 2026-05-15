@@ -340,7 +340,11 @@ async def create_sap_push_log(
     if trigger_mode.startswith("auto"):
         review_reason = await _analysis_quality_review_reason(db, recording_id)
         if review_reason:
-            raise SapPushPreparationError("analysis_requires_review", f"分析结果需要人工复核：{review_reason}")
+            logger.warning(
+                "sap auto push proceeds despite analysis quality warning recording_id=%s warning=%s",
+                recording_id,
+                review_reason,
+            )
 
     settings = get_settings()
     recording = await db.get(Recording, recording_id)

@@ -6,6 +6,7 @@ import json
 
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.sap_push_service import (
+    _extract_existing_consultation_no,
     _build_update_retry_payload,
     build_sap_gateway_request,
     summarize_sap_push_log_result,
@@ -158,3 +159,9 @@ def test_build_update_retry_payload_switches_to_update_mode() -> None:
     assert retried["zxxx"]["mode"] == "U"
     assert retried["zxxx"]["zxdh"] == "3121092001"
     assert payload["zxxx"]["mode"] == "C"
+
+
+def test_extract_existing_consultation_no_from_create_failure_message() -> None:
+    message = "分诊单【2118232697-110】已有咨询单【3121092001】，不能再创建！"
+
+    assert _extract_existing_consultation_no(message) == "3121092001"

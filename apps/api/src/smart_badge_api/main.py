@@ -18,8 +18,6 @@ from smart_badge_api.dingtalk_audio_archive import periodic_dingtalk_audio_archi
 from smart_badge_api.dingtalk_audio_backlog import periodic_dingtalk_audio_backlog_sync
 from smart_badge_api.dingtalk_audio_sync import (
     periodic_dingtalk_audio_sync,
-    start_dingtalk_pipeline_workers,
-    stop_dingtalk_pipeline_workers,
 )
 from smart_badge_api.dingtalk_iot import close_shared_iot_client
 from smart_badge_api.message_push import close_shared_message_push_client
@@ -73,12 +71,6 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         stop_event = asyncio.Event()
-        # 在启动所有周期任务之前，先启动钉钉录音流水线的有界队列与消费者池。
-        try:
-            await start_dingtalk_pipeline_workers()
-        except Exception:
-            logger.exception("failed to start dingtalk pipeline workers")
-
         # 后台预热 /recordings/archive 列表缓存：首次冷启动 ~6s 扫描 manifests
         # + archive 元数据，warm 后命中只需 ~10ms。
         # 注意：故意不预热 /analysis/results 缓存——它的冷启动需要 ~85s，会
@@ -433,10 +425,6 @@ def create_app() -> FastAPI:
         app.state.visit_order_sync_note = "到诊单兜底同步服务已停止"
 
         # 企业微信/钉钉 IOT 共享 httpx client 关闭。
-        try:
-            await stop_dingtalk_pipeline_workers()
-        except Exception:
-            logger.exception("failed to stop dingtalk pipeline workers cleanly")
         with suppress(Exception):
             await close_shared_wecom_client()
         with suppress(Exception):

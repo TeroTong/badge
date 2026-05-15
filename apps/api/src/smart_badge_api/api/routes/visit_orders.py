@@ -181,6 +181,8 @@ def _derive_recording_date_candidates(recording) -> list[str]:
         candidates.append(normalized)
 
     if recording.created_at:
+        # User-facing and SAP matching dates are business dates in Asia/Shanghai.
+        # Timestamps may be stored as UTC, so convert before extracting the date.
         add(_business_date_from_datetime(recording.created_at))
 
     file_name = str(getattr(recording, "file_name", "") or "").strip()

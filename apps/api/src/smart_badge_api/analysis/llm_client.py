@@ -34,9 +34,11 @@ def _get_config() -> tuple[str, str, str, float]:
 
 
 def _candidate_chat_urls(base_url: str) -> list[str]:
-    urls = [f"{base_url}/chat/completions"]
-    if not base_url.endswith("/v1"):
-        urls.append(f"{base_url}/v1/chat/completions")
+    if base_url.endswith("/v1"):
+        return [f"{base_url}/chat/completions"]
+    # Most OpenAI-compatible gateways expose /v1/chat/completions. Try that
+    # first to avoid paying a failed HTTP round trip for every LLM call.
+    urls = [f"{base_url}/v1/chat/completions", f"{base_url}/chat/completions"]
     return urls
 
 
@@ -63,9 +65,9 @@ def chat_completion(
         "response_format": {"type": "json_object"},
     }
     if model.startswith("gpt-5"):
-        # GPT-5-family models may spend the full completion budget on hidden
-        # reasoning for long extraction prompts unless the effort is bounded.
-        payload["reasoning_effort"] = "minimal"
+        # Some OpenAI-compatible gateways reject reasoning_effort for GPT-5
+        # aliases. Keep the request gateway-compatible and avoid fallback
+        # retries; prompt-specific max_tokens still bounds output size.
         payload["max_tokens"] = max(max_tokens, 12_000)
         timeout = max(timeout, 300.0)
     elif model == "deepseek-v4-pro":

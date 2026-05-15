@@ -105,7 +105,7 @@ def test_derive_recording_date_candidates_includes_filename_fallback() -> None:
         created_at=datetime(2026, 4, 13, 23, 59, tzinfo=timezone.utc),
     )
 
-    assert _derive_recording_date_candidates(recording) == ["2026-04-13", "2026-04-14"]
+    assert _derive_recording_date_candidates(recording) == ["2026-04-14"]
 
 
 def test_staff_list_visit_orders_returns_participated_orders_before_recording_upload() -> None:
