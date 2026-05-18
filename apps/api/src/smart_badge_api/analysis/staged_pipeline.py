@@ -143,25 +143,34 @@ Fact graph rules:
    treatment steps, implementation notes, and customer response.
 7. concerns and deal_factors must be concrete. Avoid vague labels like
    "treatment condition limitation" without the actual limitation.
-8. Do not turn skin problems on the nose area into nose surgery. If the transcript
+8. budget_facts are only the main customer's explicit budget, acceptable amount,
+   payment/deposit amount, clear affordability limit, or implicit budget pressure
+   tied to a concrete quoted amount/range. Example: "对总价约29000-30000元较敏感并反复核算"
+   is valid budget pressure and the final "本次预算" should be rendered as
+   "未明确；对总价约29000-30000元较敏感，倾向希望低于该区间". Staff-only quotes,
+   treatment prices, effect explanations such as "X块解决不了多少", and generic
+   price calculation must stay in recommendation details or deal_factors; do not
+   promote them to the final "本次预算" field unless there is a customer
+   affordability reaction.
+9. Do not turn skin problems on the nose area into nose surgery. If the transcript
    says pore/acne/oil/blackhead/skin texture on nose tip or nose wing, it is a skin
    concern, not rhinoplasty or nose comprehensive surgery unless explicit nose
    surgery/injection contouring is discussed.
-9. Do not turn concerns or expectations into demands. "wants natural result",
+10. Do not turn concerns or expectations into demands. "wants natural result",
    "worries about unevenness", "afraid of risks", and "needs to consider" are
    concerns/decision factors unless they are tied to a concrete body-area goal.
-10. Preserve specialty terms exactly when supported by evidence, especially:
+11. Preserve specialty terms exactly when supported by evidence, especially:
     眶外C线, 眉弓线, 颞区, 额颞, 外轮廓线, 内轮廓线, 鼻基底, 泪沟,
     瑞德喜, 艾维岚, 艾拉斯提, 贝丽菲尔, 双美胶原蛋白.
-11. If a plan contains dosage, brand, material, price, course, or sequence, put
+12. If a plan contains dosage, brand, material, price, course, or sequence, put
     those details into the structured fields instead of leaving the recommendation
     as a short generic phrase.
-12. For recommendations vs seed_recommendations, judge by relation to the
+13. For recommendations vs seed_recommendations, judge by relation to the
     customer's current demand. A staged sequence that completes the current goal
     remains a recommendation even if it says "later/afterwards"; a plan belongs
     to seed_recommendations only when it is outside the current goal, clearly
     lower priority, maintenance, next-visit, or explicitly "not recommended now".
-13. Indication candidates are preliminary and must be high precision. Do not add
+14. Indication candidates are preliminary and must be high precision. Do not add
     痤疮 from "闭口时/闭上嘴" mouth-closing context. Do not add 面部除皱 from
     咬肌肉毒/瘦脸 unless wrinkle/动态纹/核桃纹/除皱针 is explicit.
 
@@ -648,6 +657,12 @@ Judgment rules:
    decision maker, treatment preference, recovery/time constraint, or product
    preference. These facts are used for customer tags and must not be dropped
    just because they are not SAP indications.
+   For health-risk/contraindication profile_facts, only use evidence clearly
+   about the customer or accompanying customer. Do not convert staff/doctor
+   self-disclosure, product descriptions, or ambiguous skin sensitivity wording
+   into customer tags. "皮肤过敏/敏感肌/玫瑰痤疮" alone is not "过敏史";
+   output allergy history only for explicit medical allergy evidence such as
+   药物过敏、麻药过敏、碘伏/酒精/胶布过敏 or "对X过敏".
 
 Return JSON only:
 {
@@ -1105,6 +1120,9 @@ _BUSINESS_ACTION_TERMS = (
     "希望",
     "咨询",
     "了解",
+    "手术",
+    "内切",
+    "外切",
     "填充",
     "注射",
     "打",
@@ -1150,11 +1168,14 @@ def _looks_like_low_confidence_fragment(text: str) -> bool:
     compact = _normalize_key(text)
     if not compact:
         return False
-    if _has_any_text(compact, _LOW_CONFIDENCE_FRAGMENT_TERMS):
-        return True
     body_count = _body_fragment_count(compact)
     has_action = _has_any_text(compact, _BUSINESS_ACTION_TERMS)
     has_problem = _has_any_text(compact, _BUSINESS_PROBLEM_TERMS)
+    if _has_any_text(compact, _LOW_CONFIDENCE_FRAGMENT_TERMS):
+        if len(compact) <= 40:
+            return True
+        if body_count >= 1 and not has_action and not has_problem and len(compact) <= 80:
+            return True
     if body_count >= 2 and not has_action and not has_problem and len(compact) <= 28:
         return True
     if body_count >= 1 and "问题" in compact and not has_action and not has_problem and len(compact) <= 20:
@@ -1266,9 +1287,13 @@ def _has_wrinkle_context(text: str) -> bool:
 
 
 def _has_injectable_wrinkle_context(text: str) -> bool:
-    return _has_any_text(text, ("肉毒", "除皱针", "思奥美", "保妥适", "衡力", "动态纹", "鱼尾纹", "抬头纹", "川字纹")) and _has_any_text(
+    return (
+        _has_any_text(text, ("肉毒", "除皱针", "思奥美", "保妥适", "衡力"))
+        and _has_any_text(text, ("动态纹", "鱼尾纹", "抬头纹", "川字纹", "眉间纹", "皱纹", "除皱"))
+        and _has_any_text(
         text,
         ("打", "注射", "一瓶", "除皱", "放松肌肉", "肉毒素"),
+    )
     )
 
 
@@ -1278,6 +1303,26 @@ def _has_non_wrinkle_botox_context(text: str) -> bool:
 
 def _has_fill_context(text: str) -> bool:
     return _has_any_text(text, ("填充", "玻尿酸", "胶原", "瑞德喜", "艾维岚", "艾拉斯提", "贝丽菲尔", "双美", "支撑", "打", "支"))
+
+
+def _has_nose_axis_injection_context(text: str) -> bool:
+    return _has_any_text(
+        text,
+        ("鼻基底", "鼻头", "鼻翼", "鼻尖", "鼻小柱", "鼻中下段", "鼻中轴", "鼻中轴线", "三角结构"),
+    ) and _has_any_text(
+        text,
+        ("玻尿酸", "注射", "支撑", "填充", "塑形", "再生", "芭比针", "濡白", "鲁班", "鲁板", "三角结构"),
+    )
+
+
+def _has_jawline_injection_support_context(text: str) -> bool:
+    return _has_any_text(
+        text,
+        ("下颌线", "下划线", "下颌角", "下颌缘", "下颌轮廓", "下颌角拐点", "耳前", "耳后", "韧带", "外轮廓"),
+    ) and _has_any_text(
+        text,
+        ("玻尿酸", "注射", "支撑", "填充", "塑形", "童颜", "芭比", "濡白", "提升", "收紧"),
+    )
 
 
 def _has_lip_current_context(text: str) -> bool:
@@ -1301,7 +1346,9 @@ def _is_concern_like_text(text: str) -> bool:
         "纠结",
         "预算",
         "价格",
-        "贵",
+        "太贵",
+        "贵了",
+        "有点贵",
         "没时间",
         "恢复期",
     )
@@ -1319,6 +1366,16 @@ def _is_concern_like_text(text: str) -> bool:
     )
     has_concern = _text_has_any(text, concern_terms)
     has_goal = _text_has_any(text, concrete_goal_terms)
+    if _text_has_any(text, ("点痣", "祛痣", "色素痣", "祛斑", "色斑", "斑点", "雀斑", "痘坑", "毛孔", "颈纹", "红血丝")) and _text_has_any(
+        text,
+        ("治疗", "了解", "询问", "咨询", "做"),
+    ):
+        return False
+    if has_concern and _text_has_any(text, ("术后", "吸脂", "抽脂", "手术", "治疗后", "做完")) and _text_has_any(
+        text,
+        ("不满意", "效果不明显", "没有效果", "没抽", "像没抽", "凹凸不平", "坑坑洼洼", "形态不满意"),
+    ):
+        return False
     return has_concern and not has_goal
 
 
@@ -1535,7 +1592,13 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
         add("眼袋", "眼部")
     if _has_wrinkle_context(text):
         add("面部除皱", "面部")
-    if any(term in text for term in ("鼻基底", "苹果肌", "面部填充", "玻尿酸填充", "胶原填充", "瑞德喜")):
+    if _has_nose_axis_injection_context(text):
+        add("塑美", "鼻中轴线")
+    if _has_jawline_injection_support_context(text):
+        add("塑美", "下颌轮廓线")
+    if any(term in text for term in ("苹果肌", "面部填充", "玻尿酸填充", "胶原填充", "瑞德喜")) or (
+        "鼻基底" in text and not _has_nose_axis_injection_context(text)
+    ):
         add("面部填充", "面部")
     if any(term in text for term in ("泪沟", "下巴", "颏部", "太阳穴填充", "胶原蛋白", "双美")) and any(
         term in text for term in ("填充", "玻尿酸", "胶原", "瑞德喜", "支")
@@ -1549,10 +1612,27 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
         add("塑美", "外颊")
     if any(term in text for term in ("内颊", "面中", "中面部", "苹果肌", "内轮廓线", "颧突")):
         add("塑美", "内颊")
-    if any(term in text for term in ("下颌轮廓", "下颌缘", "下颌角", "颈阔肌", "轮廓线")):
+    if any(term in text for term in ("下颌轮廓", "下颌缘", "下颌角", "下颌线", "下划线", "下颌角拐点", "颈阔肌", "轮廓线")):
         add("塑美", "下颌轮廓线")
     if any(term in text for term in ("额区", "上庭窄", "上庭偏窄")):
         add("塑美", "额区")
+    if any(term in text for term in ("点痣", "祛痣", "色素痣")) or ("痣" in text and any(term in text for term in ("点", "去除", "祛", "包干", "复发"))):
+        if "眼" in text:
+            add("祛痣/祛疣", "眼部")
+        elif "颈" in text:
+            add("祛痣/祛疣", "颈部")
+        elif "身体" in text:
+            add("祛痣/祛疣", "身体")
+        else:
+            add("祛痣/祛疣", "面部")
+    if any(term in text for term in ("鼻基底", "鼻头", "鼻翼", "鼻尖", "鼻小柱", "鼻中下段", "鼻中段", "鼻下段", "鼻中轴", "鼻中轴线", "三角结构")) and any(
+        term in text for term in ("玻尿酸", "定彩", "注射", "支撑", "填充", "塑形", "抬高", "拉高", "纵深")
+    ):
+        add("塑美", "鼻中轴线")
+    if any(term in text for term in ("耳朵", "耳垂", "耳部", "耳基底")) and any(
+        term in text for term in ("玻尿酸", "注射", "支撑", "填充", "塑形", "拉长", "衬托", "偏小")
+    ):
+        add("塑美", "耳部")
     if any(term in text for term in ("副乳", "腋前", "胸外侧", "穿内衣勒出来", "穿内衣夹出来")):
         add("副乳整形", "胸部")
     if "富贵包" in text and any(term in text for term in ("吸脂", "抽脂", "超脂", "减脂", "局部减脂", "做掉", "去掉")):
@@ -1585,6 +1665,8 @@ def _should_drop_indication(row: dict[str, str], context: str) -> bool:
         return True
     if indication_name == "面部除皱" and not _has_wrinkle_context(context):
         return True
+    if indication_name == "面部除皱" and _has_non_wrinkle_botox_context(context) and not _has_injectable_wrinkle_context(context):
+        return True
     if indication_name == "面部除皱" and _has_non_wrinkle_botox_context(context) and not _has_wrinkle_context(context):
         return True
     if "唇" in body_part_name and not _has_lip_current_context(context):
@@ -1608,8 +1690,35 @@ def _indication_supported_by_context(row: dict[str, str], context: str) -> bool:
     if name == "紧致淡纹":
         return _has_skin_tightening_plan_context(context)
     if name == "面部除皱":
-        return _has_wrinkle_context(context)
+        return _has_wrinkle_context(context) and not (
+            _has_non_wrinkle_botox_context(context) and not _has_injectable_wrinkle_context(context)
+        )
+    if name == "祛痣/祛疣":
+        return any(term in context for term in ("点痣", "祛痣", "色素痣", "祛疣")) or (
+            "痣" in context and any(term in context for term in ("点", "去除", "祛", "包干", "复发"))
+        )
     if name == "面部填充":
+        explicit_face_fill = _has_any_text(
+            context,
+            (
+                "面部填充",
+                "脂肪填充",
+                "自体脂肪",
+                "太阳穴填充",
+                "额颞填充",
+                "苹果肌填充",
+                "泪沟填充",
+                "鼻基底填充",
+                "口基底填充",
+                "面中填充",
+                "外轮廓填充",
+                "侧面凹陷",
+            ),
+        )
+        if (not explicit_face_fill) and (
+            _has_nose_axis_injection_context(context) or _has_jawline_injection_support_context(context)
+        ):
+            return False
         has_body = _has_any_text(
             context,
             (
@@ -1643,10 +1752,11 @@ def _indication_supported_by_context(row: dict[str, str], context: str) -> bool:
                 "眶外C线": ("眶外C线", "眶外", "眉尾", "颧突", "内轮廓线"),
                 "内颊": ("内颊", "面中", "中面部", "苹果肌", "内轮廓线", "颧突"),
                 "外颊": ("外颊", "颧弓", "颧骨外侧", "外轮廓线"),
-                "下颌轮廓线": ("下颌轮廓", "下颌缘", "下颌角", "颈阔肌", "轮廓线"),
+                "下颌轮廓线": ("下颌轮廓", "下颌缘", "下颌角", "下颌线", "下划线", "下颌角拐点", "耳前", "耳后", "韧带", "外轮廓", "颈阔肌", "轮廓线"),
                 "眉弓线": ("眉弓", "眉弓线", "眉尾"),
                 "鼻额衔接线": ("鼻额", "山根", "鼻额衔接"),
-                "鼻中轴线": ("鼻中轴", "鼻梁", "鼻背", "山根"),
+                "鼻中轴线": ("鼻基底", "鼻头", "鼻翼", "鼻尖", "鼻中轴", "鼻中轴线", "鼻小柱", "鼻中下段", "鼻中段", "鼻下段", "鼻梁", "鼻背", "山根", "三角结构"),
+                "耳部": ("耳部", "耳朵", "耳垂", "耳基底"),
             }
             if _has_any_text(context, synonyms.get(body_base, ())):
                 return True
@@ -1742,8 +1852,41 @@ def _resolve_indications(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
     )
     adjudicated = bool(fact_graph.get("_indication_adjudicated"))
     selected: list[dict[str, str]] = []
+    rejected_name_body: set[tuple[str, str]] = set()
+    rejected_standardized: set[str] = set()
+    adjudication = _as_dict(fact_graph.get("_indication_adjudication"))
+    for rejected in _as_list(adjudication.get("rejected_indications")):
+        if not isinstance(rejected, dict):
+            continue
+        standardized = _clean_text(rejected.get("standardized_indication"))
+        if standardized:
+            rejected_standardized.add(standardized)
+            parts = standardized.split("|")
+            if len(parts) >= 6:
+                rejected_name_body.add((_clean_text(parts[3]), _clean_text(parts[5])))
+        name = _first_text(rejected, "indication_name", "name")
+        body = _first_text(rejected, "body_part_name", "body_part")
+        if name:
+            rejected_name_body.add((name, body))
 
-    def append(row: dict[str, str], evidence: str = "", support_context: str = "") -> None:
+    def is_rejected(row: dict[str, str]) -> bool:
+        standardized = "|".join(
+            _clean_text(row.get(key))
+            for key in (
+                "department_code",
+                "department_name",
+                "indication_code",
+                "indication_name",
+                "body_part_code",
+                "body_part_name",
+            )
+        )
+        name_body = (_clean_text(row.get("indication_name")), _clean_text(row.get("body_part_name")))
+        return standardized in rejected_standardized or name_body in rejected_name_body
+
+    def append(row: dict[str, str], evidence: str = "", support_context: str = "", force_include: bool = False) -> None:
+        if not force_include and is_rejected(row):
+            return
         support_context = support_context or current_context or context_all
         if not _indication_supported_by_context(row, support_context):
             return
@@ -1787,7 +1930,7 @@ def _resolve_indications(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
             continue
         if _should_drop_indication(row, item_context):
             continue
-        append(row, item_evidence, item_context)
+        append(row, item_evidence, item_context, bool(item.get("force_include")))
 
     fallback_rows = _map_common_indication_from_text(current_context)
     if not adjudicated:
@@ -1821,7 +1964,7 @@ def _resolve_indications(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
 def _dedupe_demands(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_key: dict[str, dict[str, Any]] = {}
     for item in items:
-        content = _first_text(item, "content", "demand", "text")
+        content = _first_text(item, "content", "demand_content", "demand", "text")
         if not content:
             continue
         key = _demand_semantic_key(content, item)
@@ -1829,7 +1972,7 @@ def _dedupe_demands(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         replaced = False
         for existing_key, existing in list(by_key.items()):
-            existing_content = _first_text(existing, "content", "demand", "text")
+            existing_content = _first_text(existing, "content", "demand_content", "demand", "text")
             if key in existing_key or existing_key in key:
                 if _demand_item_score(item) > _demand_item_score(existing):
                     by_key[existing_key] = item
@@ -1847,12 +1990,15 @@ def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
     body = _normalize_key(_first_text(item or {}, "body_part", "body_part_name", "area"))
     groups = (
         (("眼袋",), "眼袋"),
+        (("双眼皮", "小平扇", "平扇", "开扇", "眼尾"), "双眼皮"),
         (("泪沟", "眶下凹陷"), "泪沟凹陷"),
         (("隆胸", "丰胸", "胸部假体"), "隆胸"),
         (("卧蚕",), "卧蚕"),
         (("唇", "嘴唇", "嘴巴形状", "唇形"), "唇形"),
         (("鼻小柱",), "鼻小柱"),
-        (("毛孔", "痘印", "痘坑", "肤质", "皮肤炎症", "泛红"), "肤质问题"),
+        (("痘坑", "凹陷性痘坑", "痤疮瘢痕"), "痘坑"),
+        (("毛孔",), "毛孔"),
+        (("痘印", "痘痘", "痤疮", "闭口", "粉刺", "皮肤炎症", "泛红"), "肤质问题"),
         (("美白", "暗沉", "暗黄", "提亮"), "肤色提亮"),
         (("脱毛",), "脱毛"),
         (("瘦肩", "斜方肌"), "瘦肩"),
@@ -1860,6 +2006,10 @@ def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
         (("色斑", "斑"), "色斑"),
         (("富贵包",), "富贵包"),
         (("副乳",), "副乳"),
+        (("点痣", "祛痣", "色素痣"), "点痣祛痣"),
+        (("祛斑", "色斑", "斑点", "雀斑"), "色斑"),
+        (("胶原流失", "衰老", "抗衰", "紧致"), "面部抗衰紧致"),
+        (("卡粉", "上妆卡", "妆容不服帖", "妆感不服帖"), "卡粉肤质"),
         (("下颌线", "收紧", "紧致", "松弛", "提升", "超声炮"), "面部紧致提升"),
         (("鱼尾纹", "眼部纹", "眼纹", "除皱"), "眼部除皱"),
     )
@@ -1873,7 +2023,7 @@ def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
 
 
 def _demand_item_score(item: dict[str, Any]) -> int:
-    content = _first_text(item, "content", "demand", "text")
+    content = _first_text(item, "content", "demand_content", "demand", "text")
     compact = _normalize_key(content)
     score = 0
     if _has_any_text(compact, ("希望", "想", "改善", "调整", "解决", "去除", "收紧", "提升", "脱毛", "隆胸", "丰胸", "填充", "注射")):
@@ -1884,6 +2034,10 @@ def _demand_item_score(item: dict[str, Any]) -> int:
         score += 4
     if _has_any_text(compact, ("眼袋", "泪沟", "隆胸", "丰胸", "卧蚕", "唇", "鼻小柱", "脱毛", "瘦肩", "皱", "纹", "松弛", "下垂", "富贵包", "副乳")):
         score += 3
+    if _has_any_text(compact, ("小平扇", "平扇", "开扇", "眼尾", "延长", "偏宽", "自然")):
+        score += 4
+    if compact in {"想做双眼皮", "做双眼皮", "双眼皮手术", "通过手术方式做双眼皮"}:
+        score -= 3
     if _has_any_text(compact, ("咨询", "关注", "确认", "询问", "要求确认")):
         score -= 5
     if _is_process_or_meta_demand(content):
@@ -1902,6 +2056,11 @@ def _is_process_or_meta_demand(text: str) -> bool:
     compact = _normalize_key(text)
     if not compact:
         return True
+    if _has_any_text(compact, ("点痣", "祛痣", "色素痣", "祛斑", "色斑", "斑点", "雀斑", "痘坑", "毛孔", "颈纹", "红血丝")) and _has_any_text(
+        compact,
+        ("改善", "治疗", "去除", "了解", "询问", "咨询", "做"),
+    ):
+        return False
     if _has_any_text(
         compact,
         (
@@ -1978,7 +2137,7 @@ def _is_process_or_meta_demand(text: str) -> bool:
 def _demand_priority_map(demands: list[dict[str, Any]]) -> dict[str, int]:
     mapping: dict[str, int] = {}
     for index, item in enumerate(demands, start=1):
-        item_id = _clean_text(item.get("id")) or f"D{index}"
+        item_id = _clean_text(item.get("id")) or _clean_text(item.get("demand_id")) or f"D{index}"
         mapping[item_id] = index
     return mapping
 
@@ -2002,7 +2161,7 @@ def _build_demands(fact_graph: dict[str, Any]) -> tuple[dict[str, Any], list[dic
     for item in _as_list(fact_graph.get("demands")):
         if not isinstance(item, dict):
             continue
-        content = _first_text(item, "content", "demand", "text")
+        content = _first_text(item, "content", "demand_content", "demand", "text")
         if not content:
             continue
         if _item_has_low_confidence_fragment(item) or _looks_like_low_confidence_fragment(content):
@@ -2018,12 +2177,13 @@ def _build_demands(fact_graph: dict[str, Any]) -> tuple[dict[str, Any], list[dic
     priority_map = _demand_priority_map(demands)
     result_items: list[dict[str, Any]] = []
     for index, item in enumerate(demands, start=1):
+        evidence = _evidence_text(item.get("evidence")) or _first_text(item, "quote", "supporting_quote", "source_quote")
         result_items.append(
             {
                 "priority": index,
-                "demand": _first_text(item, "content", "demand", "text"),
+                "demand": _first_text(item, "content", "demand_content", "demand", "text"),
                 "body_part": _first_text(item, "body_part", "body_part_name") or None,
-                "evidence": _evidence_text(item.get("evidence")),
+                "evidence": evidence,
             }
         )
     summary = "；".join(item["demand"] for item in result_items if item.get("demand"))
@@ -2379,6 +2539,48 @@ def _mark_low_business_value_if_empty(result: dict[str, Any], raw: dict[str, Any
     result["analysis_quality"] = quality
 
 
+def _recommendation_needs_detail_suffix(recommendation: str) -> bool:
+    text = _clean_text(recommendation)
+    if not text:
+        return False
+    return len(text) <= 24 or _has_any_text(text, ("综合方案", "联合治疗", "治疗方案", "改善方案"))
+
+
+def _build_recommendation_display_text(
+    recommendation: str,
+    *,
+    brand: str,
+    material: str,
+    dosage: str,
+    price: str,
+    course: str,
+    steps: list[str],
+) -> str:
+    recommendation = _clean_text(recommendation)
+    if not _recommendation_needs_detail_suffix(recommendation):
+        return recommendation
+    details: list[str] = []
+    if brand:
+        details.append(f"项目/设备：{brand}")
+    if material and material not in brand:
+        details.append(f"材料：{material}")
+    if dosage:
+        details.append(f"用量：{dosage}")
+    if course:
+        details.append(f"疗程：{course}")
+    if price:
+        details.append(f"价格：{price}")
+    clean_steps = [_clean_text(value) for value in steps if _clean_text(value)]
+    if clean_steps:
+        details.append(f"步骤：{'；'.join(clean_steps[:5])}")
+    if not details:
+        return recommendation
+    suffix = "；".join(details)
+    if suffix in recommendation:
+        return recommendation
+    return f"{recommendation}（{suffix}）"
+
+
 def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int]) -> dict[str, Any] | None:
     recommendation = _first_text(item, "content", "recommendation", "plan", "text")
     if not recommendation:
@@ -2410,21 +2612,62 @@ def _build_recommendation_item(item: dict[str, Any], demand_map: dict[str, int])
         or _evidence_text(item.get("supporting_evidence"))
         or _first_text(item, "quote", "source_quote", "evidence_quote")
     )
+    brand = _first_text(item, "brand", "brand_or_product")
+    material = _first_text(item, "material", "brand_or_material")
+    dosage = _first_text(item, "dosage", "dosage_or_quantity", "dosage_or_course")
+    price = _first_text(item, "price")
+    course = _first_text(item, "course_or_frequency", "course", "frequency", "dosage_or_course")
+    recommendation = _build_recommendation_display_text(
+        recommendation,
+        brand=brand,
+        material=material,
+        dosage=dosage,
+        price=price,
+        course=course,
+        steps=[_clean_text(value) for value in steps if _clean_text(value)],
+    )
     return {
         "recommendation": recommendation,
         "product_or_solution": _first_text(item, "product_or_solution", "product", "solution", "brand_or_product") or None,
         "body_part": _first_text(item, "body_part", "body_part_name") or None,
-        "brand": _first_text(item, "brand", "brand_or_product") or None,
-        "material": _first_text(item, "material", "brand_or_material") or None,
-        "dosage": _first_text(item, "dosage", "dosage_or_quantity", "dosage_or_course") or None,
-        "price": _first_text(item, "price") or None,
-        "course_or_frequency": _first_text(item, "course_or_frequency", "course", "frequency", "dosage_or_course") or None,
+        "brand": brand or None,
+        "material": material or None,
+        "dosage": dosage or None,
+        "price": price or None,
+        "course_or_frequency": course or None,
         "treatment_steps": [_clean_text(value) for value in steps if _clean_text(value)],
         "implementation_notes": notes or None,
         "demand_priority": priorities,
         "evidence": evidence,
         "customer_response": _first_text(item, "customer_response", "response", "acceptance") or "未明确回应",
     }
+
+
+def _recommendation_semantic_key(text: object) -> str:
+    compact = _normalize_key(_clean_text(text))
+    if not compact:
+        return ""
+    if "水光" in compact and "提透" in compact and "冻颜" in compact:
+        return "水光提透冻颜"
+    if "水光" in compact and ("胶原" in compact or "补水" in compact or "肤质" in compact):
+        return "水光胶原补水"
+    if ("下颌线" in compact or "下颌角" in compact) and (
+        "支撑" in compact or "提升" in compact or "轮廓" in compact
+    ):
+        return "下颌线下颌角轮廓支撑"
+    if "口基底" in compact and ("填充" in compact or "支撑" in compact or "衔接" in compact):
+        return "口基底填充支撑"
+    if ("眉弓" in compact or "双c线" in compact or "双C线" in compact) and (
+        "支撑" in compact or "立体" in compact
+    ):
+        return "眉弓双C线支撑"
+    if "黄金微针" in compact:
+        return "黄金微针"
+    if "点痣" in compact or "祛痣" in compact:
+        return "点痣祛痣"
+    if "皮秒" in compact and ("祛斑" in compact or "色斑" in compact or "雀斑" in compact):
+        return "皮秒祛斑"
+    return compact
 
 
 def _build_recommendations(fact_graph: dict[str, Any], demand_map: dict[str, int], *, seed: bool = False) -> dict[str, Any]:
@@ -2457,8 +2700,8 @@ def _build_recommendations(fact_graph: dict[str, Any], demand_map: dict[str, int
         if mapped:
             if seed:
                 mapped["demand_priority"] = []
-            key = _normalize_key(mapped.get("recommendation"))
-            if key and all(_normalize_key(existing.get("recommendation")) != key for existing in result_items):
+            key = _recommendation_semantic_key(mapped.get("recommendation"))
+            if key and all(_recommendation_semantic_key(existing.get("recommendation")) != key for existing in result_items):
                 result_items.append(mapped)
     return {
         "summary": "；".join(item["recommendation"] for item in result_items),
@@ -2478,14 +2721,14 @@ def _ensure_recommendation_coverage(
     option or comparison product.
     """
     items = [dict(item) for item in _as_list(recommendations.get("items")) if isinstance(item, dict)]
-    seen = {_normalize_key(item.get("recommendation")) for item in items if _normalize_key(item.get("recommendation"))}
+    seen = {_recommendation_semantic_key(item.get("recommendation")) for item in items if _recommendation_semantic_key(item.get("recommendation"))}
     for source in _as_list(fact_graph.get("recommendations")):
         if not isinstance(source, dict):
             continue
         mapped = _build_recommendation_item(source, demand_map)
         if not mapped:
             continue
-        key = _normalize_key(mapped.get("recommendation"))
+        key = _recommendation_semantic_key(mapped.get("recommendation"))
         if not key or key in seen:
             continue
         relation = _clean_text(source.get("relation_to_current_demand"))
@@ -2500,6 +2743,33 @@ def _ensure_recommendation_coverage(
     return recommendations
 
 
+def _remove_seed_recommendations_covered_by_main(
+    seed_recommendations: dict[str, Any],
+    recommendations: dict[str, Any],
+) -> dict[str, Any]:
+    main_keys = {
+        _recommendation_semantic_key(item.get("recommendation"))
+        for item in _as_list(recommendations.get("items"))
+        if _recommendation_semantic_key(item.get("recommendation"))
+    }
+    if not main_keys:
+        return seed_recommendations
+    items: list[dict[str, Any]] = []
+    for item in _as_list(seed_recommendations.get("items")):
+        if not isinstance(item, dict):
+            continue
+        key = _recommendation_semantic_key(item.get("recommendation"))
+        if key and key in main_keys:
+            continue
+        items.append(item)
+    updated = dict(seed_recommendations)
+    updated["items"] = items
+    updated["summary"] = "；".join(
+        _clean_text(item.get("recommendation")) for item in items if _clean_text(item.get("recommendation"))
+    )
+    return updated
+
+
 def _build_concerns(fact_graph: dict[str, Any]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for item in _as_list(fact_graph.get("concerns")):
@@ -2508,11 +2778,12 @@ def _build_concerns(fact_graph: dict[str, Any]) -> dict[str, Any]:
         content = _first_text(item, "content", "concern", "text")
         if not content:
             continue
+        evidence = _evidence_text(item.get("evidence")) or _first_text(item, "quote", "supporting_quote", "source_quote")
         items.append(
             {
                 "type": _first_text(item, "type", "category") or "顾虑",
                 "content": content,
-                "evidence": _evidence_text(item.get("evidence")),
+                "evidence": evidence,
             }
         )
     return {"inference_note": None, "summary": "；".join(item["content"] for item in items), "items": items}
@@ -2535,8 +2806,22 @@ def _append_profile_tag(tags: list[dict[str, Any]], category: str, value: str, e
     canonical_value = canonicalize_profile_tag_value(canonical_category, value)
     if not canonical_value or not is_valid_profile_tag_value(canonical_category, canonical_value):
         return
+    single_value_ranks = {
+        "疼痛耐受度": {"低": 3, "中": 2, "高": 1},
+        "价格敏感度": {"高": 3, "中": 2, "低": 1},
+    }
     key = (_normalize_key(canonical_category), _normalize_key(canonical_value))
     for existing in tags:
+        if _normalize_key(existing.get("category")) == _normalize_key(canonical_category) and canonical_category in single_value_ranks:
+            ranks = single_value_ranks[canonical_category]
+            old_rank = ranks.get(_clean_text(existing.get("value")), 0)
+            new_rank = ranks.get(canonical_value, 0)
+            if new_rank > old_rank or (new_rank == old_rank and evidence and not existing.get("evidence")):
+                existing["value"] = canonical_value
+                existing["weight_level"] = _profile_weight_by_category().get(canonical_category)
+                if evidence:
+                    existing["evidence"] = evidence
+            return
         if canonical_category in {"本次消费预算"} and _normalize_key(existing.get("category")) == _normalize_key(canonical_category):
             if evidence and "[" in evidence and "[" not in _clean_text(existing.get("evidence")):
                 existing["value"] = canonical_value
@@ -2576,7 +2861,86 @@ def _profile_item_text(item: dict[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def _profile_item_is_staff_scoped(item: dict[str, Any]) -> bool:
+    scope = _participant_scope(item)
+    if scope in {"staff", "doctor", "consultant", "badge_owner", "employee", "assistant", "nurse"}:
+        return True
+    participant = _clean_text(
+        item.get("participant")
+        or item.get("participant_label")
+        or item.get("speaker")
+        or item.get("speaker_label")
+    )
+    return _has_any_text(participant, ("工牌本人", "咨询师", "医生", "顾问", "助理", "护士", "员工"))
+
+
+def _is_weak_allergy_profile_fact(item: dict[str, Any]) -> bool:
+    category = _first_text(item, "category", "tag_category", "type")
+    value = _first_text(item, "value", "tag_value", "content", "project", "material", "device", "text", "factor", "concern")
+    evidence = _profile_item_evidence(item)
+    text = _profile_item_text(item)
+    combined = " ".join(part for part in (category, value, evidence, text) if part)
+    if not combined or "过敏" not in combined:
+        return False
+    if not (_has_any_text(category, ("健康风险", "禁忌", "病史")) or "过敏" in value):
+        return False
+    if _has_any_text(combined, ("无药物过敏", "没有药物过敏", "无过敏史", "没有过敏史", "不过敏", "不是过敏")):
+        return True
+    if _has_any_text(combined, ("过敏率", "不易过敏", "不容易过敏", "低敏", "抗过敏")):
+        return True
+    allergy_context = " ".join(
+        part
+        for part in (
+            evidence,
+            _first_text(item, "quote", "source_quote", "evidence_quote"),
+        )
+        if part
+    )
+    if not allergy_context or _normalize_key(allergy_context) == _normalize_key(value):
+        content_text = _first_text(item, "content", "text", "summary")
+        if _normalize_key(content_text) != _normalize_key(value):
+            allergy_context = content_text
+    strong_allergy = _has_any_text(
+        allergy_context,
+        (
+            "药物过敏",
+            "麻药过敏",
+            "麻醉过敏",
+            "利多卡因过敏",
+            "碘伏过敏",
+            "酒精过敏",
+            "胶布过敏",
+            "敷贴过敏",
+            "过敏史",
+            "对玻尿酸过敏",
+            "对胶原过敏",
+            "对肉毒过敏",
+        ),
+    ) or bool(re.search(r"对.{1,12}过敏", allergy_context))
+    if strong_allergy:
+        return False
+    return _has_any_text(combined, ("皮肤过敏", "玫瑰痤疮", "敏感肌", "皮肤敏感", "容易泛红"))
+
+
+def _should_skip_profile_item_for_tags(item: dict[str, Any]) -> bool:
+    if _profile_item_is_staff_scoped(item):
+        return True
+    if _is_weak_allergy_profile_fact(item):
+        return True
+    category = canonicalize_profile_tag_category(_first_text(item, "category", "tag_category", "type"))
+    value = _first_text(item, "value", "tag_value", "content", "project", "material", "device", "text", "factor", "concern")
+    evidence = _profile_item_evidence(item)
+    if category == "治疗项目" and canonicalize_profile_tag_value(category, value) == "注射类":
+        if _is_non_aesthetic_injection_context(" ".join(part for part in (value, evidence) if part)):
+            return True
+    if category == "治疗项目" and _is_treatment_project_without_prior_history_context(value, evidence):
+        return True
+    return False
+
+
 def _append_profile_tag_from_item(tags: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    if _should_skip_profile_item_for_tags(item):
+        return
     category = _first_text(item, "category", "tag_category", "type")
     value = _first_text(item, "value", "tag_value", "content", "project", "material", "device", "text", "factor", "concern")
     if not category or not value:
@@ -2584,14 +2948,124 @@ def _append_profile_tag_from_item(tags: list[dict[str, Any]], item: dict[str, An
     _append_profile_tag(tags, category, value, _profile_item_evidence(item))
 
 
+def _extract_profile_age_from_fact_graph(fact_graph: dict[str, Any]) -> tuple[str | None, str | None]:
+    for item in _as_list(fact_graph.get("profile_facts")):
+        if not isinstance(item, dict):
+            continue
+        category = _first_text(item, "category", "tag_category", "type").lower()
+        value = _first_text(item, "value", "tag_value", "content", "text", "summary")
+        evidence = _profile_item_evidence(item)
+        text = " ".join(part for part in (category, value, evidence) if part)
+        if not text:
+            continue
+        match = re.search(r"(\d{1,3})\s*岁", text)
+        if category == "age" or "年龄" in category or match:
+            age = f"{match.group(1)}岁" if match else value
+            if age:
+                return age, evidence or value
+    return None, None
+
+
 def _classify_history_treatment_project(text: str) -> str:
-    if _has_any_text(text, ("手术", "双眼皮", "眼袋", "鼻综合", "隆鼻", "吸脂", "抽脂", "拉皮", "丰胸", "线雕")):
+    if _is_non_aesthetic_injection_context(text):
+        return ""
+    medical_surgery_terms = (
+        "双眼皮",
+        "眼袋",
+        "鼻综合",
+        "隆鼻",
+        "吸脂",
+        "抽脂",
+        "拉皮",
+        "丰胸",
+        "线雕",
+        "面部除皱",
+        "脂肪填充",
+        "假体",
+    )
+    non_aesthetic_surgery_terms = (
+        "中耳炎",
+        "阑尾",
+        "剖腹产",
+        "胆囊",
+        "骨折",
+        "种植牙",
+        "拔牙",
+        "甲状腺",
+        "肿瘤",
+        "囊肿",
+    )
+    if _has_any_text(text, medical_surgery_terms) or ("手术" in text and not _has_any_text(text, non_aesthetic_surgery_terms)):
         return "手术类"
     if _has_any_text(text, ("水光", "玻尿酸", "胶原", "肉毒", "除皱针", "瘦脸针", "注射", "填充", "童颜", "贝丽菲尔")):
         return "注射类"
     if _has_any_text(text, ("热玛吉", "超声炮", "光电", "黄金微针", "光子", "射频", "激光", "黑曜双波")):
         return "光电类"
     return ""
+
+
+def _is_non_aesthetic_injection_context(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized:
+        return False
+    non_aesthetic_terms = (
+        "减肥针",
+        "替泊尔肽",
+        "替尔泊肽",
+        "司美格鲁肽",
+        "利拉鲁肽",
+        "提西",
+        "胰岛素",
+        "疫苗",
+        "生长激素",
+    )
+    if not _has_any_text(normalized, non_aesthetic_terms):
+        return False
+    aesthetic_terms = (
+        "水光",
+        "玻尿酸",
+        "胶原",
+        "肉毒",
+        "除皱针",
+        "瘦脸针",
+        "填充",
+        "童颜",
+        "芭比针",
+        "濡白天使",
+        "瑞德喜",
+        "艾拉斯提",
+        "贝丽菲尔",
+    )
+    return not _has_any_text(normalized, aesthetic_terms)
+
+
+def _is_treatment_project_without_prior_history_context(value: str, evidence: str) -> bool:
+    text = " ".join(part for part in (_clean_text(value), _clean_text(evidence)) if part)
+    if not text:
+        return False
+    prior_markers = (
+        "做过",
+        "打过",
+        "填过",
+        "治疗过",
+        "做了",
+        "打了",
+        "割过",
+        "隆过",
+        "吸过",
+        "术后",
+        "手术史",
+        "既往",
+        "之前",
+        "以前",
+        "曾经",
+        "上次",
+        "多次",
+    )
+    if _has_any_text(text, prior_markers):
+        return False
+    # "治疗项目" profile tags describe prior history; current or hypothetical treatment belongs in recommendations.
+    return True
 
 
 def _extract_history_material_name(text: str) -> str:
@@ -2615,6 +3089,139 @@ def _extract_history_material_name(text: str) -> str:
         if term in text:
             return term
     return ""
+
+
+_BUDGET_AMOUNT_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?\s*(?:元|块钱|万|千|百)|"
+    r"[一二三四五六七八九十两俩]+(?:点[一二三四五六七八九十])?(?:多)?(?:万|千|百|块钱|元))"
+)
+
+_BUDGET_AMOUNT_PHRASE_PATTERN = re.compile(
+    r"((?:总价|价格|报价|费用)?约?\s*"
+    r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十两俩]+(?:点[一二三四五六七八九十])?)"
+    r"(?:\s*(?:-|—|~|到|至)\s*"
+    r"(?:\d+(?:\.\d+)?|[一二三四五六七八九十两俩]+(?:点[一二三四五六七八九十])?))?"
+    r"\s*(?:元|块钱|万|千|百))"
+)
+
+_BUDGET_FIELD_CUES = (
+    "预算",
+    "可接受",
+    "能接受",
+    "接受不了",
+    "承受",
+    "顶死",
+    "最多",
+    "上限",
+    "不超过",
+    "打不起",
+    "付款",
+    "支付",
+    "付了",
+    "付定",
+    "定金",
+    "订金",
+    "意向金",
+    "交钱",
+)
+
+_PRICE_REACTION_CUES = (
+    "价格偏高",
+    "价格高",
+    "太贵",
+    "贵了",
+    "有点贵",
+    "价格贵",
+    "便宜",
+    "优惠",
+    "打折",
+    "申请",
+    "少一点",
+    "不够",
+    "没那么多",
+    "价格敏感",
+    "敏感",
+    "反复核算",
+    "反复算",
+    "核算",
+    "差别有点大",
+)
+
+_NOT_BUDGET_EXPLANATION_CUES = (
+    "解决不了多少",
+    "改善的程度有限",
+    "改善程度有限",
+    "效果有限",
+    "做不了多少",
+    "没效果",
+)
+
+
+def _has_budget_amount(text: str) -> bool:
+    return bool(_BUDGET_AMOUNT_PATTERN.search(_clean_text(text)))
+
+
+def _is_explicit_budget_text(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized:
+        return False
+    has_budget_cue = _has_any_text(normalized, _BUDGET_FIELD_CUES)
+    has_amount = _has_budget_amount(normalized)
+    if _has_any_text(normalized, _NOT_BUDGET_EXPLANATION_CUES) and not has_budget_cue:
+        return False
+    return has_budget_cue and (
+        has_amount
+        or _has_any_text(normalized, ("预算有限", "打不起", "接受不了", "没那么多", "不够", "无预算"))
+    )
+
+
+def _is_price_sensitivity_text(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized:
+        return False
+    if _has_any_text(normalized, _NOT_BUDGET_EXPLANATION_CUES) and not _has_any_text(
+        normalized, _PRICE_REACTION_CUES + _BUDGET_FIELD_CUES
+    ):
+        return False
+    return _has_any_text(normalized, _PRICE_REACTION_CUES)
+
+
+def _extract_budget_amount_phrase(text: str) -> str:
+    normalized = _clean_text(text)
+    if not normalized:
+        return ""
+    match = _BUDGET_AMOUNT_PHRASE_PATTERN.search(normalized)
+    if match:
+        return re.sub(r"\s+", "", match.group(1))
+    match = _BUDGET_AMOUNT_PATTERN.search(normalized)
+    return re.sub(r"\s+", "", match.group(1)) if match else ""
+
+
+def _is_implicit_budget_pressure_text(text: str) -> bool:
+    normalized = _clean_text(text)
+    if not normalized or not _has_budget_amount(normalized):
+        return False
+    if _has_any_text(normalized, _NOT_BUDGET_EXPLANATION_CUES) and not _has_any_text(
+        normalized, _PRICE_REACTION_CUES + _BUDGET_FIELD_CUES
+    ):
+        return False
+    return _has_any_text(normalized, _PRICE_REACTION_CUES)
+
+
+def _budget_value_from_text(text: str) -> str | None:
+    normalized = _clean_text(text)
+    if not normalized:
+        return None
+    if _is_explicit_budget_text(normalized):
+        return normalized
+    if not _is_implicit_budget_pressure_text(normalized):
+        return None
+    amount = _extract_budget_amount_phrase(normalized)
+    if not amount:
+        return None
+    if not amount.startswith(("总价", "价格", "报价", "费用", "约")):
+        amount = f"约{amount}"
+    return f"未明确；对{amount}较敏感，倾向希望低于该区间"
 
 
 def _append_profile_tags_from_fact_graph(tags: list[dict[str, Any]], fact_graph: dict[str, Any]) -> None:
@@ -2645,23 +3252,41 @@ def _append_profile_tags_from_fact_graph(tags: list[dict[str, Any]], fact_graph:
                 continue
             text = _profile_item_text(item)
             evidence = _profile_item_evidence(item)
-            if _has_any_text(text, ("预算", "价格", "报价", "费用", "贵", "便宜", "承受", "优惠", "元", "万", "千")):
+            if _is_explicit_budget_text(text) or _is_price_sensitivity_text(text):
                 budget_texts.append((text, evidence))
     for text, evidence in budget_texts[:1]:
-        if _has_any_text(text, ("预算", "元", "万", "千", "七", "八", "7000", "8000", "6800", "9800", "11800")):
-            _append_profile_tag(tags, "本次消费预算", text, evidence)
+        budget_value = _budget_value_from_text(text)
+        if budget_value:
+            _append_profile_tag(tags, "本次消费预算", budget_value, evidence)
     all_business_text = json.dumps(fact_graph, ensure_ascii=False)
     all_budget_text = " ".join(text for text, _ in budget_texts) or all_business_text
-    if _has_any_text(all_budget_text, ("价格偏高", "预算有限", "贵", "顶死", "承受", "便宜吗", "申请", "优惠", "差别有点大")):
+    if _has_any_text(all_budget_text, ("价格偏高", "价格高", "太贵", "贵了", "有点贵", "预算有限", "顶死", "承受", "便宜吗", "申请", "优惠", "差别有点大")):
         _append_profile_tag(tags, "价格敏感度", "高", budget_texts[0][1] if budget_texts else "")
     elif _has_any_text(all_budget_text, ("价格", "预算", "费用", "报价")):
         _append_profile_tag(tags, "价格敏感度", "中", budget_texts[0][1] if budget_texts else "")
 
-    if _has_any_text(all_business_text, ("疼痛", "痛感", "疼", "痛不痛")):
-        pain_level = "低" if _has_any_text(all_business_text, ("怕痛", "很怕疼", "不能痛", "受不了痛")) else "中"
-        _append_profile_tag(tags, "疼痛耐受度", pain_level, "")
-    if _has_any_text(all_business_text, ("热玛吉", "超声炮", "黄金微针", "水光", "光电", "射频", "皮肤", "毛孔", "痘印", "暗沉", "抗衰")):
-        _append_profile_tag(tags, "创伤倾向", "皮肤", "")
+    pain_evidence = ""
+    for item in _as_list(fact_graph.get("profile_facts")) + _as_list(fact_graph.get("concerns")):
+        if not isinstance(item, dict):
+            continue
+        text = _profile_item_text(item)
+        if _has_any_text(text, ("怕痛", "怕疼", "很怕疼", "不能痛", "受不了痛", "不怕痛", "能忍痛", "痛感低", "痛感高")):
+            pain_evidence = _profile_item_evidence(item) or text
+            break
+    if pain_evidence:
+        pain_level = "低" if _has_any_text(pain_evidence, ("怕痛", "怕疼", "很怕疼", "不能痛", "受不了痛", "痛感高")) else "中"
+        _append_profile_tag(tags, "疼痛耐受度", pain_level, pain_evidence)
+
+    trauma_evidence = ""
+    for item in _as_list(fact_graph.get("profile_facts")) + _as_list(fact_graph.get("concerns")):
+        if not isinstance(item, dict):
+            continue
+        text = _profile_item_text(item)
+        if _has_any_text(text, ("不想动刀", "不做手术", "怕恢复期", "恢复期短", "不想注射", "只想做皮肤", "只想做抗衰", "偏向光电", "偏向皮肤管理")):
+            trauma_evidence = _profile_item_evidence(item) or text
+            break
+    if trauma_evidence:
+        _append_profile_tag(tags, "创伤倾向", "皮肤", trauma_evidence)
 
 
 def _first_raw_evidence_matching(raw: dict[str, Any], patterns: tuple[str, ...], *, customer_only: bool = False) -> str:
@@ -2680,12 +3305,19 @@ def _first_raw_evidence_matching(raw: dict[str, Any], patterns: tuple[str, ...],
 def _append_profile_tags_from_raw(tags: list[dict[str, Any]], raw: dict[str, Any]) -> None:
     if not raw:
         return
-    budget_evidence = _first_raw_evidence_matching(raw, (r"预算.{0,12}[七八九一二三四五六十百千万0-9]", r"[七八九一二三四五六十百千万0-9]{1,8}.{0,6}(顶死|预算|承受|块|元|万)"))
+    budget_evidence = _first_raw_evidence_matching(
+        raw,
+        (
+            r"(预算|最多|顶死|承受|可接受|能接受|不超过).{0,12}[七八九一二三四五六十百千万0-9]",
+            r"[七八九一二三四五六十百千万0-9]{1,8}.{0,8}(顶死|预算|承受|可接受|能接受|不超过)",
+        ),
+        customer_only=True,
+    )
     if budget_evidence:
         _append_profile_tag(tags, "本次消费预算", budget_evidence, budget_evidence)
         _append_profile_tag(tags, "价格敏感度", "高", budget_evidence)
 
-    price_evidence = _first_raw_evidence_matching(raw, (r"价格.{0,12}(贵|高|差别|便宜|申请|优惠)", r"(贵|便宜吗|差别有点大|预算有限|顶死)"))
+    price_evidence = _first_raw_evidence_matching(raw, (r"价格.{0,12}(太贵|贵了|有点贵|高|差别|便宜|申请|优惠)", r"(太贵|贵了|有点贵|便宜吗|差别有点大|预算有限|顶死)"))
     if price_evidence:
         _append_profile_tag(tags, "价格敏感度", "高", price_evidence)
 
@@ -2726,7 +3358,8 @@ def _build_customer_profile(fact_graph: dict[str, Any], raw: dict[str, Any] | No
     _append_profile_tags_from_fact_graph(tags, fact_graph)
     if raw:
         _append_profile_tags_from_raw(tags, raw)
-    return {"inference_note": None, "age": None, "age_evidence": None, "tags": tags}
+    age, age_evidence = _extract_profile_age_from_fact_graph(fact_graph)
+    return {"inference_note": None, "age": age, "age_evidence": age_evidence, "tags": tags}
 
 
 def _build_consumption_intent(fact_graph: dict[str, Any]) -> dict[str, Any]:
@@ -2739,12 +3372,10 @@ def _build_consumption_intent(fact_graph: dict[str, Any]) -> dict[str, Any]:
                 continue
             content = _first_text(item, "content", "factor", "text")
             if content:
-                decision_factors.append(content)
-                if key == "budget_facts" and budget is None and _has_any_text(
-                    content,
-                    ("预算", "价格", "贵", "便宜", "承受", "少一点", "优惠", "不够", "没那么多"),
-                ):
-                    budget = content
+                if key == "deal_factors" or (key == "budget_facts" and _is_price_sensitivity_text(content)):
+                    decision_factors.append(content)
+                if key == "budget_facts" and budget is None:
+                    budget = _budget_value_from_text(content)
             ev = _evidence_text(item.get("evidence"))
             if ev:
                 evidence.append(ev)
@@ -2923,6 +3554,7 @@ def _build_analysis_result_from_fact_graph(
     recommendations = _build_recommendations(fact_graph, demand_map, seed=False)
     recommendations = _ensure_recommendation_coverage(recommendations, fact_graph, demand_map)
     seed_recommendations = _build_recommendations(fact_graph, demand_map, seed=True)
+    seed_recommendations = _remove_seed_recommendations_covered_by_main(seed_recommendations, recommendations)
     concerns = _build_concerns(fact_graph)
     profile_raw = raw if allow_raw_augmentation and len(customer_participants) <= 1 else None
     profile = _build_customer_profile(fact_graph, profile_raw)
@@ -3301,7 +3933,7 @@ def _merge_profile_facts_from_evidence_graph(
         if not isinstance(item, dict):
             continue
         text = _profile_item_text(item)
-        if _has_any_text(text, ("价格", "预算", "贵", "便宜", "承受", "优惠")):
+        if _has_any_text(text, ("价格", "预算", "太贵", "贵了", "有点贵", "便宜", "承受", "优惠")):
             add_fact("价格敏感度", "高", item, "concern_evidence")
         if _has_any_text(text, ("疼痛", "痛感", "怕痛", "怕疼", "痛不痛")):
             add_fact("疼痛耐受度", "低" if _has_any_text(text, ("怕痛", "怕疼", "受不了")) else "中", item, "concern_evidence")
