@@ -11,6 +11,7 @@ from sqlalchemy import String, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from smart_badge_api.analysis.reference_data import resolve_indication_reference_item
 from smart_badge_api.api.deps import get_current_user, get_db
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.models import (
@@ -671,6 +672,36 @@ def _review_blocks_out(review: SapConsultationReview, current_staff_id: str) -> 
     ]
 
 
+def _enrich_sap_indication_payload(payload: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in payload or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        matched = resolve_indication_reference_item(
+            department_code=str(row.get("CCKS") or row.get("department_code") or "").strip(),
+            indication_code=str(row.get("CCSYZ") or row.get("indication_code") or "").strip(),
+            body_part_code=str(row.get("CCBW") or row.get("body_part_code") or "").strip(),
+        )
+        if matched is not None:
+            row.update(
+                {
+                    "department_code": matched.department_code,
+                    "department_name": matched.department_name,
+                    "indication_code": matched.indication_code,
+                    "indication_name": matched.indication_name,
+                    "body_part_code": matched.body_part_code,
+                    "body_part_name": matched.body_part_name,
+                }
+            )
+        else:
+            row.setdefault("department_code", str(row.get("CCKS") or "").strip())
+            row.setdefault("indication_code", str(row.get("CCSYZ") or "").strip())
+            row.setdefault("body_part_code", str(row.get("CCBW") or "").strip())
+        rows.append(row)
+    return rows
+
+
 def _detail_out(
     review: SapConsultationReview,
     *,
@@ -711,7 +742,7 @@ def _detail_out(
         generated_text=review.generated_text or "",
         effective_text=review.effective_text or "",
         blocks=blocks,
-        indication_payload=list(review.indication_payload or []),
+        indication_payload=_enrich_sap_indication_payload(list(review.indication_payload or [])),
         payload_snapshot=list(review.payload_snapshot or []),
         latest_push_log=serialize_sap_push_log(latest_log) if latest_log is not None else None,
     )

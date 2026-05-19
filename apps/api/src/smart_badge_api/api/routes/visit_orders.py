@@ -163,6 +163,10 @@ def _daily_visit_order_matches_keyword(visit_order: VisitOrder, keyword: str | N
             visit_order.dzdh,
             visit_order.ninam,
             visit_order.kunr,
+            visit_order.fzuer,
+            visit_order.fzuer_long,
+            visit_order.fzr_id_dq,
+            visit_order.fzr_name_dq,
             visit_order.advxc_long,
             visit_order.remark_dz,
         )
@@ -286,6 +290,7 @@ def _build_daily_visit_order_items(
             "sjrq": visit_order.sjrq,
             "fzsj": visit_order.fzsj,
             "fzuer": visit_order.fzuer or visit_order.fzr_id_dq,
+            "fzuer_long": visit_order.fzuer_long or visit_order.fzr_name_dq,
             "advxc_long": visit_order.advxc_long,
             "jcsta_txt": visit_order.jcsta_txt,
             "remark_dz": visit_order.remark_dz,

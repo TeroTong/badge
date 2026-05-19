@@ -44,11 +44,24 @@ export type SapReviewListItem = {
   updated_at: string | null
 }
 
+export type SapReviewIndication = {
+  CCKS?: string | null
+  CCSYZ?: string | null
+  CCBW?: string | null
+  department_code?: string | null
+  department_name?: string | null
+  indication_code?: string | null
+  indication_name?: string | null
+  body_part_code?: string | null
+  body_part_name?: string | null
+  [key: string]: unknown
+}
+
 export type SapReviewDetail = SapReviewListItem & {
   generated_text: string
   effective_text: string
   blocks: SapReviewBlock[]
-  indication_payload: Array<Record<string, unknown>>
+  indication_payload: SapReviewIndication[]
   payload_snapshot: Array<Record<string, unknown>>
   latest_push_log: Record<string, unknown> | null
 }

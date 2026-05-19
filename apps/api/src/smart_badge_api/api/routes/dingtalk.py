@@ -944,6 +944,16 @@ def _build_archive_analysis_summary(
             for item in (standardized_indications.get("items") or [])
             if isinstance(item, dict) and str(item.get("body_part_name") or "").strip()
         ]
+    if focus_areas:
+        deduped_focus_areas: list[str] = []
+        seen_focus_areas: set[str] = set()
+        for area in focus_areas:
+            normalized_area = re.sub(r"[\s/／、，,；;]+", "", area)
+            if normalized_area in seen_focus_areas:
+                continue
+            seen_focus_areas.add(normalized_area)
+            deduped_focus_areas.append(area)
+        focus_areas = deduped_focus_areas
 
     concern_items = concerns.get("items") if isinstance(concerns, dict) else []
     profile_tags = profile.get("tags") if isinstance(profile, dict) else []

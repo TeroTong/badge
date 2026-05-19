@@ -2185,6 +2185,8 @@ def _candidate_order_to_out(
         customer_type_label=customer_type_label,
         visit_date=vo.sjrq,
         advisor_code=vo.fzuer or vo.fzr_id_dq,
+        fzuer=vo.fzuer or vo.fzr_id_dq,
+        fzuer_long=vo.fzuer_long or vo.fzr_name_dq,
         triage_time=vo.fzsj,
         confidence=round(candidate.confidence, 4),
         decision=candidate.decision,

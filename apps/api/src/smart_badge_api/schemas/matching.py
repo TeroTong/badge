@@ -37,6 +37,8 @@ class VisitOrderMatchCandidateOut(BaseModel):
     customer_type_label: str | None = None
     visit_date: str | None = None
     advisor_code: str | None = None
+    fzuer: str | None = None
+    fzuer_long: str | None = None
     triage_time: str | None = None
     confidence: float
     decision: str

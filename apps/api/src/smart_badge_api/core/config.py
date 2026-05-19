@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-5.2-chat-latest"
     llm_timeout_seconds: float = 120.0
+    analysis_pipeline: Literal["agent", "staged"] = "agent"
     task_dispatch_mode: Literal["dramatiq", "background", "eager"] = "dramatiq"
 
     sap_rfc_app_id: str = "ai"

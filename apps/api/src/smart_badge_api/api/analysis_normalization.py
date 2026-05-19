@@ -261,7 +261,7 @@ def _primary_demand_body_part(item: dict[str, Any]) -> str:
     return ""
 
 
-def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int]:
+def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
     demand = _normalize_text(item.get("demand"))
     evidence = _normalize_text(item.get("evidence"))
     priority = item.get("priority")
@@ -271,6 +271,8 @@ def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int
         normalized_priority = 999
     return (
         1 if evidence else 0,
+        1 if "改善" in demand else 0,
+        -1 if any(keyword in demand for keyword in ("关注", "是否", "考虑是否")) else 0,
         len(_primary_demand_concepts(demand)),
         len(demand),
         -normalized_priority,
@@ -290,6 +292,7 @@ def _primary_demand_items_overlap(left: dict[str, Any], right: dict[str, Any]) -
         ("眼袋", "泪沟", "眼下", "疲态", "疲惫"),
         ("山根", "鼻背", "鼻头", "鼻尖", "鼻翼", "鼻型"),
         ("后背", "背部", "小后背", "大后背", "吸脂", "超脂"),
+        ("面颊", "颊区", "夹区", "脸颊"),
     )
     for anchors in shared_anchor_groups:
         if any(anchor in left_compact for anchor in anchors) and any(anchor in right_compact for anchor in anchors):

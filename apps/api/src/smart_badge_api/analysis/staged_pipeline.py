@@ -23,7 +23,7 @@ from smart_badge_api.analysis.extraction_prompts import SYSTEM_PROMPT as FALLBAC
 from smart_badge_api.analysis.llm_client import chat_completion, parse_json_response
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.analysis.reference_data import load_analysis_reference_data
-from smart_badge_api.analysis.transcript import prepare_transcript
+from smart_badge_api.analysis.transcript import extract_transcript_segments, prepare_transcript
 from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.tag_catalog_reference import (
     canonicalize_profile_tag_category,
@@ -1995,6 +1995,9 @@ def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
         (("隆胸", "丰胸", "胸部假体"), "隆胸"),
         (("卧蚕",), "卧蚕"),
         (("唇", "嘴唇", "嘴巴形状", "唇形"), "唇形"),
+        (("面颊凹陷", "颊区凹陷", "脸颊凹陷", "面颊", "颊区", "夹区"), "面颊凹陷填充"),
+        (("下巴", "颏部", "下庭", "下巴后缩", "下巴注射", "下巴塑形"), "下巴塑形"),
+        (("清纯甜美", "幼态", "甜美风", "清纯", "面部整体风格"), "面部风格"),
         (("鼻小柱",), "鼻小柱"),
         (("痘坑", "凹陷性痘坑", "痤疮瘢痕"), "痘坑"),
         (("毛孔",), "毛孔"),
@@ -2032,7 +2035,7 @@ def _demand_item_score(item: dict[str, Any]) -> int:
         score += 3
     if _first_text(item, "body_part", "body_part_name", "area"):
         score += 4
-    if _has_any_text(compact, ("眼袋", "泪沟", "隆胸", "丰胸", "卧蚕", "唇", "鼻小柱", "脱毛", "瘦肩", "皱", "纹", "松弛", "下垂", "富贵包", "副乳")):
+    if _has_any_text(compact, ("眼袋", "泪沟", "隆胸", "丰胸", "卧蚕", "唇", "鼻小柱", "脱毛", "瘦肩", "皱", "纹", "松弛", "下垂", "富贵包", "副乳", "下巴", "幼态")):
         score += 3
     if _has_any_text(compact, ("小平扇", "平扇", "开扇", "眼尾", "延长", "偏宽", "自然")):
         score += 4
@@ -2779,6 +2782,8 @@ def _build_concerns(fact_graph: dict[str, Any]) -> dict[str, Any]:
         if not content:
             continue
         evidence = _evidence_text(item.get("evidence")) or _first_text(item, "quote", "supporting_quote", "source_quote")
+        if not evidence:
+            continue
         items.append(
             {
                 "type": _first_text(item, "type", "category") or "顾虑",
@@ -2933,7 +2938,7 @@ def _should_skip_profile_item_for_tags(item: dict[str, Any]) -> bool:
     if category == "治疗项目" and canonicalize_profile_tag_value(category, value) == "注射类":
         if _is_non_aesthetic_injection_context(" ".join(part for part in (value, evidence) if part)):
             return True
-    if category == "治疗项目" and _is_treatment_project_without_prior_history_context(value, evidence):
+    if category in {"治疗项目", "历史用的设备/原材料名称"} and _is_treatment_project_without_prior_history_context(value, evidence):
         return True
     return False
 
@@ -3043,6 +3048,23 @@ def _is_treatment_project_without_prior_history_context(value: str, evidence: st
     text = " ".join(part for part in (_clean_text(value), _clean_text(evidence)) if part)
     if not text:
         return False
+    negative_history_markers = (
+        "从来没打过",
+        "从来没做过",
+        "没有打过",
+        "没打过",
+        "未打过",
+        "没有做过",
+        "没做过",
+        "未做过",
+        "没有治疗史",
+        "无治疗史",
+        "无既往",
+        "没有既往",
+        "否认既往",
+    )
+    if _has_any_text(text, negative_history_markers):
+        return True
     prior_markers = (
         "做过",
         "打过",
@@ -3058,12 +3080,31 @@ def _is_treatment_project_without_prior_history_context(value: str, evidence: st
         "既往",
         "之前",
         "以前",
+        "曾",
         "曾经",
+        "外院",
+        "去年",
+        "今年",
+        "最近一次",
         "上次",
         "多次",
     )
     if _has_any_text(text, prior_markers):
         return False
+    current_or_hypothetical_markers = (
+        "能打",
+        "可以打",
+        "适合打",
+        "这次打",
+        "现在打",
+        "再打一支",
+        "准备打",
+        "想打",
+        "材料选择",
+        "反正我都能打",
+    )
+    if _has_any_text(text, current_or_hypothetical_markers):
+        return True
     # "治疗项目" profile tags describe prior history; current or hypothetical treatment belongs in recommendations.
     return True
 
@@ -3237,6 +3278,9 @@ def _append_profile_tags_from_fact_graph(tags: list[dict[str, Any]], fact_graph:
         if not text:
             continue
         evidence = _profile_item_evidence(item)
+        history_context = " ".join(part for part in (text, evidence) if part)
+        if _is_treatment_project_without_prior_history_context("", history_context):
+            continue
         _append_profile_tag_from_item(tags, item)
         project_type = _classify_history_treatment_project(text)
         if project_type:
@@ -4165,7 +4209,7 @@ def _build_line_speaker_metadata(dialogue: str, raw: dict[str, Any]) -> dict[str
     metadata: dict[str, dict[str, str]] = {}
     raw_segments = [
         item
-        for item in _raw_transcribe_segments(raw)
+        for item in extract_transcript_segments(raw)
         if _clean_text(item.get("text") or item.get("content"))
     ]
     dialogue_lines = [line for line in dialogue.splitlines() if line.strip()]

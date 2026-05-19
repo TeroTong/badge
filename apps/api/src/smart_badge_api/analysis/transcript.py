@@ -38,6 +38,20 @@ _ROLE_MAP: dict[str, str] = {
 }
 _RAW_SPEAKER_PATTERN = re.compile(r"^speaker[_-]?\d+$", re.IGNORECASE)
 _CUSTOMER_SIDE_RAW_ROLES = {"customer", "client", "patient", "primary_customer", "visitor_companion", "visitor", "客户", "主客户", "同行人", "访客"}
+_CUSTOMER_SIDE_BUSINESS_ROLES = {"customer", "client", "patient", "primary_customer", "visitor_companion", "visitor"}
+_STAFF_SIDE_BUSINESS_ROLES = {
+    "badge_owner",
+    "consultant",
+    "advisor",
+    "staff_peer",
+    "doctor",
+    "frontdesk",
+    "front_desk",
+    "reception",
+    "expert_assistant",
+    "doctor_assistant",
+    "assistant",
+}
 _STAFF_OVERRIDE_ROLE = "consultant"
 _STAFF_OVERRIDE_LABEL = "咨询师"
 
@@ -143,6 +157,54 @@ _NON_DOCTOR_STAFF_CUES = (
     "喊他面诊",
     "我带顾客来",
 )
+_STAFF_OPERATION_CUES = (
+    "我的顾客",
+    "我有个顾客",
+    "我那个顾客",
+    "那个顾客",
+    "这个顾客",
+    "接顾客",
+    "带顾客",
+    "开检查单",
+    "开单",
+    "做检查",
+    "前台",
+    "值班医生",
+    "医生值班",
+    "我同事",
+    "给我同事",
+    "到账之后",
+    "到账后",
+    "买单",
+    "排在",
+    "手术台",
+)
+_STAFF_SIGNATURE_FLOW_CUES = (
+    "护士长",
+    "忘记签字",
+    "自己写的",
+    "他自己写",
+    "她自己写",
+    "喊",
+    "不用盖章",
+)
+_CURRENT_CUSTOMER_SELF_CUES = (
+    "我想",
+    "我希望",
+    "我主要",
+    "我怕",
+    "我担心",
+    "我以前",
+    "我之前",
+    "我做过",
+    "我打过",
+    "我没做过",
+    "我没有",
+    "我有",
+    "多少钱",
+    "价格",
+    "预算",
+)
 _DOCTOR_EXPLANATION_ADDRESS_CUES = (
     "给你讲一下",
     "给您讲一下",
@@ -195,6 +257,101 @@ def _clean_text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _normalized_role_key(value: object) -> str:
+    return _clean_text(value).lower()
+
+
+def _is_customer_side_role(value: object) -> bool:
+    role = _normalized_role_key(value)
+    return role in {item.lower() for item in _CUSTOMER_SIDE_RAW_ROLES} or normalize_role(role) in {
+        "客户",
+        "主客户",
+        "同行人",
+        "访客",
+    }
+
+
+def _is_staff_side_role(value: object) -> bool:
+    role = _normalized_role_key(value)
+    return role in _STAFF_SIDE_BUSINESS_ROLES or normalize_role(role) in {
+        "咨询师",
+        "医生",
+        "前台",
+        "工牌本人",
+        "员工同事",
+    }
+
+
+def _is_customer_side_label(value: object) -> bool:
+    label = _clean_text(value)
+    if not label:
+        return False
+    lowered = label.lower()
+    return lowered in _CUSTOMER_SIDE_BUSINESS_ROLES or any(term in label for term in ("主客户", "同行人", "客户", "顾客", "访客"))
+
+
+def _is_staff_side_label(value: object) -> bool:
+    label = _clean_text(value)
+    if not label:
+        return False
+    lowered = label.lower()
+    return lowered in _STAFF_SIDE_BUSINESS_ROLES or any(
+        term in label for term in ("工牌本人", "咨询师", "医生", "顾问", "助理", "护士", "员工", "前台")
+    )
+
+
+def _staff_role_from_business_role(value: object) -> str:
+    role = _normalized_role_key(value)
+    if role == "badge_owner":
+        return _STAFF_OVERRIDE_ROLE
+    if role in {"frontdesk", "front_desk", "reception"}:
+        return "frontdesk"
+    if role in {"expert_assistant", "doctor_assistant", "assistant"}:
+        return "expert_assistant"
+    if role in {"doctor", "staff_peer", "consultant"}:
+        return role
+    if role == "advisor":
+        return "consultant"
+    return _STAFF_OVERRIDE_ROLE
+
+
+def _sanitize_speaker_role_consistency(segment: dict[str, Any]) -> dict[str, Any]:
+    """Keep semantic role and identity label from contradicting each other.
+
+    ASR role inference and badge-owner/staff identity resolution are produced by
+    different steps. When they disagree, prefer the explicit business identity
+    so downstream prompts do not receive impossible labels such as
+    "客户（某某（工牌本人））".
+    """
+    role = _clean_text(segment.get("role") or segment.get("speaker_role"))
+    speaker_role = _clean_text(segment.get("speaker_role") or role)
+    business_role = _clean_text(segment.get("speaker_business_role"))
+    label = _clean_text(segment.get("speaker_label") or segment.get("speaker_display_label"))
+
+    staff_identity = _is_staff_side_role(business_role) or _is_staff_side_label(label)
+    customer_role = _is_customer_side_role(role) or _is_customer_side_role(speaker_role)
+    if staff_identity and customer_role:
+        corrected = dict(segment)
+        corrected.setdefault("role_consistency_corrected_from", role or speaker_role)
+        corrected_role = _staff_role_from_business_role(business_role)
+        corrected["role"] = corrected_role
+        corrected["speaker_role"] = corrected_role
+        if not _clean_text(corrected.get("speaker_business_role")):
+            corrected["speaker_business_role"] = corrected_role
+        return corrected
+
+    staff_role = _is_staff_side_role(role) or _is_staff_side_role(speaker_role)
+    customer_label = _is_customer_side_label(label) and not _is_staff_side_label(label)
+    if staff_role and customer_label:
+        corrected = dict(segment)
+        corrected.setdefault("speaker_label_consistency_corrected_from", label)
+        corrected.pop("speaker_label", None)
+        corrected.pop("speaker_display_label", None)
+        return corrected
+
+    return segment
+
+
 def _looks_like_staff_speech_mislabeled_as_customer(segment: dict[str, Any]) -> bool:
     role = _clean_text(segment.get("role") or segment.get("speaker_role")).lower()
     business_role = _clean_text(segment.get("speaker_business_role")).lower()
@@ -220,6 +377,43 @@ def _looks_like_non_doctor_staff_speech(segment: dict[str, Any]) -> bool:
     return bool(text and any(cue in text for cue in _NON_DOCTOR_STAFF_CUES))
 
 
+def _looks_like_staff_operations_mislabeled_as_customer(segment: dict[str, Any]) -> bool:
+    role = _clean_text(segment.get("role") or segment.get("speaker_role")).lower()
+    business_role = _clean_text(segment.get("speaker_business_role")).lower()
+    label = _clean_text(segment.get("speaker_label") or segment.get("speaker_display_label")).lower()
+    if not ({role, business_role, label} & {item.lower() for item in _CUSTOMER_SIDE_RAW_ROLES}):
+        return False
+    text = re.sub(r"\s+", "", _clean_text(segment.get("text")))
+    if not text:
+        return False
+    if any(cue in text for cue in _STAFF_OPERATION_CUES):
+        # "我有" alone can be a customer's personal statement, but "我有个顾客"
+        # / "我的顾客" / front-desk and order-flow wording are staff operations.
+        if "我有个顾客" in text or "我的顾客" in text or "我那个顾客" in text:
+            return True
+        if any(cue in text for cue in ("接顾客", "带顾客", "前台", "值班医生", "医生值班", "手术台", "给我同事")):
+            return True
+        if any(cue in text for cue in ("开检查单", "开单", "做检查", "到账之后", "到账后", "买单")) and any(
+            address in text for address in ("给你", "给您", "帮你", "帮您", "你", "您")
+        ):
+            return True
+    return False
+
+
+def _looks_like_staff_signature_flow_mislabeled_as_customer(segment: dict[str, Any]) -> bool:
+    role = _clean_text(segment.get("role") or segment.get("speaker_role")).lower()
+    business_role = _clean_text(segment.get("speaker_business_role")).lower()
+    label = _clean_text(segment.get("speaker_label") or segment.get("speaker_display_label")).lower()
+    if not ({role, business_role, label} & {item.lower() for item in _CUSTOMER_SIDE_RAW_ROLES}):
+        return False
+    text = re.sub(r"\s+", "", _clean_text(segment.get("text")))
+    if not text or ("签字" not in text and "盖章" not in text):
+        return False
+    if "喊" in text and "签字" in text:
+        return True
+    return any(cue in text for cue in _STAFF_SIGNATURE_FLOW_CUES)
+
+
 def _looks_like_doctor_explanation_mislabeled_as_customer(segment: dict[str, Any]) -> bool:
     role = _clean_text(segment.get("role") or segment.get("speaker_role")).lower()
     business_role = _clean_text(segment.get("speaker_business_role")).lower()
@@ -240,6 +434,29 @@ def _looks_like_doctor_explanation_mislabeled_as_customer(segment: dict[str, Any
 
 
 def _apply_speaker_role_correction(segment: dict[str, Any]) -> dict[str, Any]:
+    segment = _sanitize_speaker_role_consistency(segment)
+    if _looks_like_staff_signature_flow_mislabeled_as_customer(segment):
+        corrected = dict(segment)
+        corrected["role_corrected_from"] = _clean_text(segment.get("role") or segment.get("speaker_role"))
+        corrected["speaker_label_corrected_from"] = _clean_text(
+            segment.get("speaker_label") or segment.get("speaker_display_label")
+        )
+        corrected["role"] = "staff_peer"
+        corrected["speaker_role"] = "staff_peer"
+        corrected["speaker_business_role"] = "staff_peer"
+        corrected["speaker_label"] = "员工同事"
+        return corrected
+    if _looks_like_staff_operations_mislabeled_as_customer(segment):
+        corrected = dict(segment)
+        corrected["role_corrected_from"] = _clean_text(segment.get("role") or segment.get("speaker_role"))
+        corrected["speaker_label_corrected_from"] = _clean_text(
+            segment.get("speaker_label") or segment.get("speaker_display_label")
+        )
+        corrected["role"] = "staff_peer"
+        corrected["speaker_role"] = "staff_peer"
+        corrected["speaker_business_role"] = "staff_peer"
+        corrected["speaker_label"] = "员工同事"
+        return corrected
     if _looks_like_non_doctor_staff_speech(segment):
         corrected = dict(segment)
         corrected["role_corrected_from"] = _clean_text(segment.get("role") or segment.get("speaker_role"))
@@ -281,6 +498,7 @@ def _is_raw_speaker_label(value: object) -> bool:
 
 
 def _format_speaker_prefix(seg: dict[str, Any]) -> str:
+    seg = _sanitize_speaker_role_consistency(seg)
     role = normalize_role(_clean_text(seg.get("role")))
     label = _clean_text(
         seg.get("speaker_label")
@@ -289,6 +507,10 @@ def _format_speaker_prefix(seg: dict[str, Any]) -> str:
     )
     if not label or _is_raw_speaker_label(label):
         return role
+    if _is_staff_side_role(seg.get("role")) and _is_customer_side_label(label) and not _is_staff_side_label(label):
+        return role
+    if _is_customer_side_role(seg.get("role")) and _is_staff_side_label(label):
+        return label
     normalized_label = normalize_role(label)
     if label == role or normalized_label == role or role in label:
         return label

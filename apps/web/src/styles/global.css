@@ -30564,6 +30564,34 @@ a {
   margin-top: 8px;
 }
 
+.wc-sap-review-indications-card {
+  border-color: #bfdbfe;
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.88), #ffffff);
+}
+
+.wc-sap-review-indication {
+  align-items: flex-start;
+  height: auto;
+  min-height: 34px;
+  padding: 6px 8px;
+  line-height: 1.25;
+}
+
+.wc-sap-review-indication strong {
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.wc-sap-review-indication small {
+  max-width: 100%;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wc-sap-review-block {
   position: relative;
   gap: 10px;

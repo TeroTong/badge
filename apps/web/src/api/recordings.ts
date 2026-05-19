@@ -65,6 +65,8 @@ export type VisitOrderMatchCandidate = {
   customer_type_label: string | null
   visit_date: string | null
   advisor_code: string | null
+  fzuer: string | null
+  fzuer_long: string | null
   triage_time: string | null
   confidence: number
   decision: string
@@ -425,6 +427,7 @@ export type DailyVisitOrderItem = {
   sjrq: string | null
   fzsj: string | null
   fzuer: string | null
+  fzuer_long: string | null
   advxc_long: string | null
   jcsta_txt: string | null
   remark_dz: string | null

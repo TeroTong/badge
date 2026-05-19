@@ -3000,7 +3000,7 @@ def _is_staged_analysis_result(result: dict | None) -> bool:
     if not isinstance(debug, dict):
         return False
     chain = str(debug.get("production_chain") or "")
-    return chain.startswith("staged")
+    return chain.startswith("staged") or chain.startswith("agent_pipeline")
 
 
 def _load_recording_analysis_raw(recording: Recording) -> dict | None:

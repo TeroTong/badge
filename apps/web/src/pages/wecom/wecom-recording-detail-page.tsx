@@ -56,6 +56,13 @@ function formatDateTime(value: string | null) {
   return formatBeijingTime(value, 'YYYY-MM-DD HH:mm')
 }
 
+function formatVisitOrderReceptionist(order: {
+  fzuer_long?: string | null
+}) {
+  const name = String(order.fzuer_long || '').trim()
+  return name || '-'
+}
+
 function formatDuration(seconds: number | null) {
   if (seconds == null) return '-'
   const mins = Math.floor(seconds / 60)
@@ -1471,10 +1478,11 @@ export function WecomRecordingDetailPage() {
                             )}
                           </div>
                         </div>
-	                        <div className="wc-daily-order-card__meta">
-	                          <span>{item.fzsj ? `分诊 ${fmtClock(item.fzsj)}` : '分诊时间未知'}</span>
-	                          <span>{item.remark_dz || '线索未填写'}</span>
-	                        </div>
+                        <div className="wc-daily-order-card__meta">
+                          <span>接诊人：{formatVisitOrderReceptionist(item)}</span>
+                          <span>{item.fzsj ? `分诊 ${fmtClock(item.fzsj)}` : '分诊时间未知'}</span>
+                          <span>{item.remark_dz || '线索未填写'}</span>
+                        </div>
                         {item.linked_recording_names.length > 0 && (
                           <div className="wc-match-card__linked">已关联录音：{item.linked_recording_names.join('、')}</div>
                         )}
@@ -1957,6 +1965,7 @@ function MatchCard({
 
       <div className="wc-match-card__info">
         <span>{c.customer_name || '-'}{c.customer_code ? ` / ${c.customer_code}` : ''}</span>
+        <span>接诊人：{formatVisitOrderReceptionist(c)}</span>
         <span>{c.visit_date || '-'}</span>
         {matchMethodLabel ? <span>{matchMethodLabel}</span> : null}
         <span className="wc-match-card__conf">

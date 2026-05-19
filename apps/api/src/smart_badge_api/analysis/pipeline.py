@@ -1208,8 +1208,10 @@ _PRICE_SENSITIVITY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _CONCERN_HINTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("价格类", "在意价格和预算", ("太贵", "有点贵", "价格高", "预算", "便宜点", "划算", "性价比", "利息", "分期", "一次性支付", "刷信用卡", "怎么又多", "多了")),
     ("效果类", "担心效果不够自然或不明显", ("自然", "效果", "明显", "维持多久", "太假", "不明显", "馒化", "变化太多", "不完美")),
+    ("效果类", "担心咬肌肉毒后面颊凹陷加重", ("颊凹加重", "面颊凹陷加重", "凹陷加重", "怕凹", "凹的更狠", "越熬越狠")),
     ("恢复类", "担心恢复期、肿胀或影响上班", ("恢复期", "恢复", "肿", "消肿", "上班", "请假", "拆线")),
     ("疼痛类", "担心疼痛或耐受度问题", ("疼", "痛", "怕疼", "疼不疼", "麻药")),
+    ("风险类", "担心玻尿酸填充的安全性及后遗症", ("安不安全", "安全性", "后遗症", "副作用", "移位")),
     ("风险类", "担心风险、副作用或安全性", ("风险", "副作用", "害怕", "过敏", "失败", "移位", "鼻基底最好不要动", "不好东西")),
     ("治疗安排类", "担心治疗安排不能一次完成或需要反复到院", ("全部打", "一次打", "一次性完成", "不打了", "不做了", "一个月再过来", "下次", "那么远", "跑过来", "赶时间", "过几天要回去")),
     ("决策类", "仍需考虑、商量或继续比较", ("考虑一下", "再考虑", "商量", "对比", "回去看一下", "回去看看")),
@@ -1530,7 +1532,7 @@ def _primary_demand_body_part(item: dict[str, Any]) -> str:
     return candidates[0] if candidates else ""
 
 
-def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int]:
+def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
     demand = _clean_text(item.get("demand"))
     evidence = _clean_text(item.get("evidence"))
     priority = item.get("priority")
@@ -1540,6 +1542,8 @@ def _primary_demand_item_score(item: dict[str, Any]) -> tuple[int, int, int, int
         normalized_priority = 999
     return (
         1 if evidence else 0,
+        1 if "改善" in demand else 0,
+        -1 if any(keyword in demand for keyword in ("关注", "是否", "考虑是否")) else 0,
         len(_primary_demand_concepts(demand)),
         len(demand),
         -normalized_priority,
@@ -1576,6 +1580,7 @@ def _primary_demand_items_overlap(left: dict[str, Any], right: dict[str, Any]) -
         ("眼袋", "泪沟", "眼下", "疲态", "疲惫"),
         ("山根", "鼻背", "鼻头", "鼻尖", "鼻翼", "鼻型"),
         ("后背", "背部", "小后背", "大后背", "吸脂", "超脂"),
+        ("面颊", "颊区", "夹区", "脸颊"),
     )
     for anchors in shared_anchor_groups:
         if any(anchor in left_compact for anchor in anchors) and any(anchor in right_compact for anchor in anchors):
@@ -8213,8 +8218,10 @@ def sanitize_analysis_result_with_raw(result_dict: dict[str, Any], *, raw: dict[
     ASR or the LLM again.
     """
     debug = result_dict.get("staged_pipeline_debug")
-    if isinstance(debug, dict) and str(debug.get("production_chain") or "").startswith("staged"):
-        return False
+    if isinstance(debug, dict):
+        production_chain = str(debug.get("production_chain") or "")
+        if production_chain.startswith("staged") or production_chain.startswith("agent_pipeline"):
+            return False
 
     changed = False
     changed = _sanitize_customer_primary_demands(result_dict, raw=raw) or changed
@@ -8499,6 +8506,12 @@ def _concern_evidence_strength(evidence: str, segments: list[dict[str, Any]]) ->
     if customer_texts and all(_is_brief_customer_confirmation(item) for item in customer_texts) and any(
         cue in text for cue in _CONCERN_CUSTOMER_WORRY_CUES
     ):
+        return 2
+    if any(cue in text for cue in ("你担心的问题", "担心的那个问题", "客户担心")) and any(
+        cue in text for cue in ("安全", "安不安全", "后遗症", "副作用", "移位")
+    ):
+        return 2
+    if any(cue in text for cue in ("怕凹", "凹的更狠", "越熬越狠", "颊凹加重", "面颊凹陷加重")):
         return 2
     # Strong: explicit decision/comparison/recheck cues anywhere in evidence
     decision_cues = ("再考虑", "考虑一下", "回去看", "回去商量", "回去想", "再想想", "和别家比", "比一下", "对比", "先了解")

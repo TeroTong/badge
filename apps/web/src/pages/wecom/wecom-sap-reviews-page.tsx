@@ -1,4 +1,4 @@
-import { RightOutlined, SearchOutlined, SendOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, RightOutlined, SearchOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { message } from 'antd'
 import dayjs from 'dayjs'
@@ -10,6 +10,7 @@ import {
   fetchSapConsultationReviews,
   pushSapConsultationReview,
   updateSapConsultationReviewBlock,
+  type SapReviewIndication,
   type SapReviewBlock,
   type SapReviewListItem,
 } from '@/api/sap-consultation-reviews'
@@ -124,6 +125,35 @@ function pushInfoText(item: SapReviewListItem) {
     return `最近成功 ${formatTime(item.last_success_push_at)}${suffix}`
   }
   return '回传 -'
+}
+
+function indicationTextValue(item: SapReviewIndication, keys: string[]) {
+  for (const key of keys) {
+    const value = String(item[key] ?? '').trim()
+    if (value) return value
+  }
+  return ''
+}
+
+function formatIndicationLabel(item: SapReviewIndication) {
+  const name = indicationTextValue(item, ['indication_name', 'name'])
+  const body = indicationTextValue(item, ['body_part_name', 'body_part'])
+  if (name && body) return `${name}（${body}）`
+  if (name) return name
+  const code = indicationTextValue(item, ['CCSYZ', 'indication_code'])
+  const bodyCode = indicationTextValue(item, ['CCBW', 'body_part_code'])
+  return [code || '--', bodyCode || '--'].join(' / ')
+}
+
+function formatIndicationCode(item: SapReviewIndication) {
+  const departmentCode = indicationTextValue(item, ['CCKS', 'department_code'])
+  const indicationCode = indicationTextValue(item, ['CCSYZ', 'indication_code'])
+  const bodyPartCode = indicationTextValue(item, ['CCBW', 'body_part_code'])
+  return [departmentCode, indicationCode, bodyPartCode].filter(Boolean).join(' / ')
+}
+
+function formatIndicationDepartment(item: SapReviewIndication) {
+  return indicationTextValue(item, ['department_name', 'department'])
 }
 
 function resolveReviewDate(item: SapReviewListItem) {
@@ -507,6 +537,26 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
           <button className="wc-btn wc-btn--ghost" onClick={() => navigate('/wecom/sap-reviews')} type="button">
             返回列表
           </button>
+        </div>
+      </section>
+
+      <section className="wc-card wc-card--compact wc-sap-review-indications-card">
+        <div className="wc-sap-review-detail__section-title">
+          <CheckCircleOutlined />
+          <span>适应症（系统判断，不可编辑）</span>
+        </div>
+        <div className="wc-sap-review-detail__indications">
+          {data.indication_payload.length ? data.indication_payload.map((item, index) => {
+            const label = formatIndicationLabel(item)
+            const code = formatIndicationCode(item)
+            const department = formatIndicationDepartment(item)
+            return (
+              <span key={`${code || label}-${index}`} className="wc-chip wc-chip--blue wc-sap-review-indication" title={code}>
+                <strong>{label}</strong>
+                <small>{[department, code].filter(Boolean).join(' · ')}</small>
+              </span>
+            )
+          }) : <span className="wc-muted">暂无适应症</span>}
         </div>
       </section>
 
