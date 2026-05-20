@@ -161,7 +161,7 @@ def _normalize_sap_field_items(values: list[str]) -> list[str]:
 
 
 def _format_sap_multiline_field(title: str, values: list[str]) -> str:
-    items = _normalize_sap_field_items(values)
+    items = _dedupe_sap_primary_demand_items(values) if title == "顾客主诉" else _normalize_sap_field_items(values)
     if not items:
         return f"●{title}：无"
 
@@ -231,6 +231,63 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
             continue
         seen.add(text)
         deduped.append(text)
+    return deduped
+
+
+def _compact_sap_semantic_text(value: str) -> str:
+    text = _strip_sap_item_separator(value)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。、“”\"'（）()【】\[\]：:；;,.!！?？/、\-—_]+", "", text).lower()
+    for token in ("自述", "关注", "希望", "想要", "想", "考虑", "改善", "调整", "解决", "进行", "本次", "客户", "顾客"):
+        text = text.replace(token, "")
+    return text
+
+
+def _sap_primary_demand_semantic_key(value: str) -> str:
+    text = _compact_sap_semantic_text(value)
+    if not text:
+        return ""
+    groups: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("外轮廓线", "外廓线", "侧面轮廓", "侧面外轮廓", "颧弓外扩"), "外轮廓线改善"),
+        (("眶外c线", "框外c线", "眶外c", "框外c", "额颞交界", "眼窝外侧", "眼窝外缘"), "眶外C线额颞交界改善"),
+        (("面部上半部", "上半部轮廓", "上半脸轮廓", "上半部外扩", "轮廓上半部有外扩"), "面部上半部轮廓外扩"),
+        (("颊部凹陷", "颊部轻度凹陷", "颊凹", "面颊凹陷", "脸颊凹陷", "颊部有轻度凹陷"), "面颊凹陷填充"),
+        (("上镜需求", "镜头", "波浪线", "面部凹陷", "脸部凹陷", "凹进去了", "凹陷明显"), "面部凹陷上镜需求"),
+        (("双眼皮", "小平扇", "平扇", "开扇", "眼尾"), "双眼皮"),
+        (("眼袋",), "眼袋"),
+        (("泪沟", "眶下凹陷"), "泪沟凹陷"),
+        (("鼻基底",), "鼻基底"),
+        (("下巴", "颏部", "下庭"), "下巴塑形"),
+        (("毛孔",), "毛孔"),
+        (("痘坑", "痤疮瘢痕"), "痘坑"),
+        (("痘印", "痘痘", "痤疮", "闭口", "粉刺", "泛红"), "肤质问题"),
+        (("美白", "暗沉", "暗黄", "提亮"), "肤色提亮"),
+        (("松弛", "下垂", "收紧", "提升", "抗衰"), "面部紧致提升"),
+    )
+    for terms, key in groups:
+        if any(term in text for term in terms):
+            return key
+    return text
+
+
+def _dedupe_sap_primary_demand_items(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    by_key: dict[str, str] = {}
+    for value in values:
+        text = _strip_sap_item_separator(value)
+        if not text or text in {"无", "暂无", "未明确", "-"} or _is_empty_analysis_placeholder(text):
+            continue
+        key = _sap_primary_demand_semantic_key(text)
+        if not key:
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = text
+            deduped.append(text)
+            continue
+        if len(_compact_sap_semantic_text(text)) > len(_compact_sap_semantic_text(existing)):
+            by_key[key] = text
+            deduped[deduped.index(existing)] = text
     return deduped
 
 

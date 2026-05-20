@@ -1983,19 +1983,71 @@ def _dedupe_demands(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(by_key.values())
 
 
+def _rebuild_primary_demands_payload(items: list[dict[str, Any]]) -> dict[str, Any]:
+    result_items: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        demand = _first_text(item, "demand", "content", "demand_content", "text")
+        if not demand:
+            continue
+        copied = dict(item)
+        copied["priority"] = index
+        copied["demand"] = demand
+        copied["body_part"] = _first_text(item, "body_part", "body_part_name") or None
+        copied["evidence"] = (
+            _evidence_text(item.get("evidence"))
+            or _first_text(item, "evidence", "quote", "supporting_quote", "source_quote")
+            or None
+        )
+        result_items.append(
+            {
+                "priority": copied["priority"],
+                "demand": copied["demand"],
+                "body_part": copied["body_part"],
+                "evidence": copied["evidence"],
+            }
+        )
+    return {
+        "inference_note": None,
+        "summary": "；".join(item["demand"] for item in result_items if item.get("demand")),
+        "items": result_items,
+    }
+
+
+def _dedupe_primary_demands_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Semantic de-duplication for the final displayed/SAP primary-demand block."""
+    if not isinstance(payload, dict):
+        return {"inference_note": None, "summary": "", "items": []}
+    items = [item for item in _as_list(payload.get("items")) if isinstance(item, dict)]
+    if not items:
+        return payload
+    deduped = _dedupe_demands(items)
+    if len(deduped) == len(items):
+        return payload
+    rebuilt = _rebuild_primary_demands_payload(deduped)
+    if payload.get("inference_note"):
+        rebuilt["inference_note"] = payload.get("inference_note")
+    return rebuilt
+
+
 def _demand_semantic_key(text: str, item: dict[str, Any] | None = None) -> str:
     compact = _normalize_key(text)
     if not compact:
         return ""
     body = _normalize_key(_first_text(item or {}, "body_part", "body_part_name", "area"))
     groups = (
+        (("外轮廓线", "外廓线", "侧面轮廓", "侧面外轮廓", "颧弓外扩"), "外轮廓线改善"),
+        (("眶外c线", "框外c线", "眶外c", "框外c", "额颞交界", "眼窝外侧", "眼窝外缘"), "眶外C线额颞交界改善"),
+        (("面部上半部", "上半部轮廓", "上半脸轮廓", "上面轮廓", "上半部外扩"), "面部上半部轮廓外扩"),
+        (("面部整体轮廓", "上镜需求", "镜头", "面部凹陷", "脸部凹陷", "脸凹", "凹进去了"), "面部凹陷上镜需求"),
         (("眼袋",), "眼袋"),
         (("双眼皮", "小平扇", "平扇", "开扇", "眼尾"), "双眼皮"),
         (("泪沟", "眶下凹陷"), "泪沟凹陷"),
         (("隆胸", "丰胸", "胸部假体"), "隆胸"),
         (("卧蚕",), "卧蚕"),
         (("唇", "嘴唇", "嘴巴形状", "唇形"), "唇形"),
-        (("面颊凹陷", "颊区凹陷", "脸颊凹陷", "面颊", "颊区", "夹区"), "面颊凹陷填充"),
+        (("面颊凹陷", "颊部凹陷", "颊凹", "颊部", "颊区凹陷", "脸颊凹陷", "面颊", "颊区", "夹区"), "面颊凹陷填充"),
         (("下巴", "颏部", "下庭", "下巴后缩", "下巴注射", "下巴塑形"), "下巴塑形"),
         (("清纯甜美", "幼态", "甜美风", "清纯", "面部整体风格"), "面部风格"),
         (("鼻小柱",), "鼻小柱"),
@@ -3676,6 +3728,8 @@ def _build_analysis_result_from_fact_graph(
         _augment_explicit_skin_followup_demands_from_raw(finalized, raw)
         _mark_low_business_value_if_empty(finalized, raw)
     primary_demands = _as_dict(finalized.get("customer_primary_demands"))
+    primary_demands = _dedupe_primary_demands_payload(primary_demands)
+    finalized["customer_primary_demands"] = primary_demands
     indications = _as_dict(finalized.get("standardized_indications"))
     finalized["consultation_result"] = _build_consultation_result(
         primary_demands,
