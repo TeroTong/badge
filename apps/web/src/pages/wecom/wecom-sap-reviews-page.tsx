@@ -1,4 +1,4 @@
-import { CheckCircleOutlined, RightOutlined, SearchOutlined, SendOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, RightOutlined, SearchOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { message } from 'antd'
 import dayjs from 'dayjs'
@@ -8,9 +8,12 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   fetchSapConsultationReview,
   fetchSapConsultationReviews,
+  fetchSapReviewIndicationOptions,
   pushSapConsultationReview,
   updateSapConsultationReviewBlock,
+  updateSapConsultationReviewIndications,
   type SapReviewIndication,
+  type SapReviewIndicationOption,
   type SapReviewBlock,
   type SapReviewListItem,
 } from '@/api/sap-consultation-reviews'
@@ -127,9 +130,10 @@ function pushInfoText(item: SapReviewListItem) {
   return '回传 -'
 }
 
-function indicationTextValue(item: SapReviewIndication, keys: string[]) {
+function indicationTextValue(item: unknown, keys: string[]) {
+  const record = (item ?? {}) as Record<string, unknown>
   for (const key of keys) {
-    const value = String(item[key] ?? '').trim()
+    const value = String(record[key] ?? '').trim()
     if (value) return value
   }
   return ''
@@ -154,6 +158,46 @@ function formatIndicationCode(item: SapReviewIndication) {
 
 function formatIndicationDepartment(item: SapReviewIndication) {
   return indicationTextValue(item, ['department_name', 'department'])
+}
+
+function indicationCodeKey(item: SapReviewIndication | SapReviewIndicationOption) {
+  const departmentCode = indicationTextValue(item, ['CCKS', 'department_code'])
+  const indicationCode = indicationTextValue(item, ['CCSYZ', 'indication_code'])
+  const bodyPartCode = indicationTextValue(item, ['CCBW', 'body_part_code'])
+  return [departmentCode, indicationCode, bodyPartCode].join('|')
+}
+
+function indicationOptionToPayload(option: SapReviewIndicationOption): SapReviewIndication {
+  return {
+    CCKS: option.department_code,
+    CCSYZ: option.indication_code,
+    CCBW: option.body_part_code,
+    department_code: option.department_code,
+    department_name: option.department_name,
+    indication_code: option.indication_code,
+    indication_name: option.indication_name,
+    body_part_code: option.body_part_code,
+    body_part_name: option.body_part_name,
+  }
+}
+
+function sameIndicationList(left: SapReviewIndication[], right: SapReviewIndication[]) {
+  const leftKeys = left.map(indicationCodeKey)
+  const rightKeys = right.map(indicationCodeKey)
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every((key, index) => key === rightKeys[index])
+}
+
+function uniqueByKey<T>(items: T[], getKey: (item: T) => string) {
+  const seen = new Set<string>()
+  const result: T[] = []
+  for (const item of items) {
+    const key = getKey(item)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    result.push(item)
+  }
+  return result
 }
 
 function resolveReviewDate(item: SapReviewListItem) {
@@ -437,15 +481,163 @@ function ReviewListCard({ item }: { item: SapReviewListItem }) {
   )
 }
 
+function IndicationEditor({
+  draft,
+  options,
+  optionsLoading,
+  saving,
+  savedItems,
+  onChange,
+  onSave,
+}: {
+  draft: SapReviewIndication[]
+  options: SapReviewIndicationOption[]
+  optionsLoading: boolean
+  saving: boolean
+  savedItems: SapReviewIndication[]
+  onChange: (items: SapReviewIndication[]) => void
+  onSave: () => void
+}) {
+  const [departmentCode, setDepartmentCode] = useState('')
+  const [bodyPartCode, setBodyPartCode] = useState('')
+  const [indicationCode, setIndicationCode] = useState('')
+  const changed = !sameIndicationList(draft, savedItems)
+  const departments = useMemo(() => (
+    uniqueByKey(options, (item) => item.department_code)
+  ), [options])
+  const bodyParts = useMemo(() => (
+    uniqueByKey(
+      options.filter((item) => item.department_code === departmentCode),
+      (item) => item.body_part_code,
+    )
+  ), [options, departmentCode])
+  const indications = useMemo(() => (
+    uniqueByKey(
+      options.filter((item) => item.department_code === departmentCode && item.body_part_code === bodyPartCode),
+      (item) => item.indication_code,
+    )
+  ), [options, departmentCode, bodyPartCode])
+  const selectedOption = options.find((item) => (
+    item.department_code === departmentCode
+    && item.body_part_code === bodyPartCode
+    && item.indication_code === indicationCode
+  ))
+
+  useEffect(() => {
+    setBodyPartCode('')
+    setIndicationCode('')
+  }, [departmentCode])
+
+  useEffect(() => {
+    setIndicationCode('')
+  }, [bodyPartCode])
+
+  function addSelected() {
+    if (!selectedOption) {
+      message.info('请先选择科室、部位和适应症')
+      return
+    }
+    const next = indicationOptionToPayload(selectedOption)
+    const key = indicationCodeKey(next)
+    if (draft.some((item) => indicationCodeKey(item) === key)) {
+      message.info('该适应症已添加')
+      return
+    }
+    onChange([...draft, next])
+  }
+
+  function removeItem(index: number) {
+    onChange(draft.filter((_item, itemIndex) => itemIndex !== index))
+  }
+
+  function handleSave() {
+    if (!changed) {
+      message.info('适应症未修改，无需保存')
+      return
+    }
+    onSave()
+  }
+
+  return (
+    <div className="wc-sap-review-indication-editor">
+      <div className="wc-sap-review-detail__indications">
+        {draft.length ? draft.map((item, index) => {
+          const label = formatIndicationLabel(item)
+          const code = formatIndicationCode(item)
+          const department = formatIndicationDepartment(item)
+          return (
+            <span key={`${code || label}-${index}`} className="wc-chip wc-chip--blue wc-sap-review-indication" title={code}>
+              <strong>{label}</strong>
+              <small>{[department, code].filter(Boolean).join(' · ')}</small>
+              <button aria-label={`删除${label}`} onClick={() => removeItem(index)} type="button">
+                <DeleteOutlined />
+              </button>
+            </span>
+          )
+        }) : <span className="wc-muted">暂无适应症，可在下方添加</span>}
+      </div>
+
+      <div className="wc-sap-review-indication-picker">
+        <label>
+          <span>科室</span>
+          <select disabled={optionsLoading} onChange={(event) => setDepartmentCode(event.currentTarget.value)} value={departmentCode}>
+            <option value="">{optionsLoading ? '加载中…' : '选择科室'}</option>
+            {departments.map((item) => (
+              <option key={item.department_code} value={item.department_code}>{item.department_name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>部位</span>
+          <select disabled={!departmentCode} onChange={(event) => setBodyPartCode(event.currentTarget.value)} value={bodyPartCode}>
+            <option value="">选择部位</option>
+            {bodyParts.map((item) => (
+              <option key={item.body_part_code} value={item.body_part_code}>{item.body_part_name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>适应症</span>
+          <select disabled={!bodyPartCode} onChange={(event) => setIndicationCode(event.currentTarget.value)} value={indicationCode}>
+            <option value="">选择适应症</option>
+            {indications.map((item) => (
+              <option key={item.indication_code} value={item.indication_code}>{item.indication_name}</option>
+            ))}
+          </select>
+        </label>
+        <button className="wc-btn wc-btn--ghost wc-sap-review-indication-picker__add" disabled={!selectedOption} onClick={addSelected} type="button">
+          <PlusOutlined /> 添加
+        </button>
+      </div>
+
+      {selectedOption?.indication_note ? (
+        <div className="wc-sap-review-indication-note">{selectedOption.indication_note}</div>
+      ) : null}
+
+      <div className="wc-sap-review-indication-actions">
+        <button className="wc-btn wc-btn--primary" disabled={saving} onClick={handleSave} type="button">
+          {saving ? '保存中…' : '保存适应症'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function ReviewDetailPage({ visitId }: { visitId: string }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [indicationDraft, setIndicationDraft] = useState<SapReviewIndication[]>([])
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['wecom', 'sap-review', visitId],
     queryFn: () => fetchSapConsultationReview(visitId),
     staleTime: 5_000,
+  })
+  const { data: indicationOptions = [], isLoading: indicationOptionsLoading } = useQuery({
+    queryKey: ['wecom', 'sap-review-indication-options'],
+    queryFn: fetchSapReviewIndicationOptions,
+    staleTime: 10 * 60_000,
   })
 
   useEffect(() => {
@@ -457,6 +649,7 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
       }
       return next
     })
+    setIndicationDraft(data.indication_payload ?? [])
   }, [data])
 
   const updateMutation = useMutation({
@@ -470,6 +663,18 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
     },
     onError: (err) => {
       message.error(err instanceof Error ? err.message : '保存失败')
+    },
+  })
+
+  const updateIndicationsMutation = useMutation({
+    mutationFn: (items: SapReviewIndication[]) => updateSapConsultationReviewIndications(visitId, items),
+    onSuccess: (next) => {
+      queryClient.setQueryData(['wecom', 'sap-review', visitId], next)
+      queryClient.invalidateQueries({ queryKey: ['wecom', 'sap-reviews'] })
+      message.success('已保存适应症')
+    },
+    onError: (err) => {
+      message.error(err instanceof Error ? err.message : '适应症保存失败')
     },
   })
 
@@ -497,13 +702,18 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
   }
 
   const order = data.visit_order_no ? `${data.visit_order_no}${data.visit_order_seg ? `-${data.visit_order_seg}` : ''}` : '未关联 SAP 单号'
-  const hasUnsavedChanges = data.blocks.some((block) => (
+  const hasUnsavedRemarkChanges = data.blocks.some((block) => (
     (drafts[block.recording_id] ?? block.effective_body).trim() !== block.effective_body.trim()
   ))
+  const hasUnsavedIndicationChanges = !sameIndicationList(indicationDraft, data.indication_payload ?? [])
   const canManualPush = data.status === 'modified_pending' || data.status === 'modified_failed'
   const handleManualPush = () => {
-    if (hasUnsavedChanges) {
+    if (hasUnsavedRemarkChanges) {
       message.info('请先保存修改后的咨询备注，再提交回传')
+      return
+    }
+    if (hasUnsavedIndicationChanges) {
+      message.info('请先保存修改后的适应症，再提交回传')
       return
     }
     if (!canManualPush) {
@@ -543,21 +753,17 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
       <section className="wc-card wc-card--compact wc-sap-review-indications-card">
         <div className="wc-sap-review-detail__section-title">
           <CheckCircleOutlined />
-          <span>适应症（系统判断，不可编辑）</span>
+          <span>适应症</span>
         </div>
-        <div className="wc-sap-review-detail__indications">
-          {data.indication_payload.length ? data.indication_payload.map((item, index) => {
-            const label = formatIndicationLabel(item)
-            const code = formatIndicationCode(item)
-            const department = formatIndicationDepartment(item)
-            return (
-              <span key={`${code || label}-${index}`} className="wc-chip wc-chip--blue wc-sap-review-indication" title={code}>
-                <strong>{label}</strong>
-                <small>{[department, code].filter(Boolean).join(' · ')}</small>
-              </span>
-            )
-          }) : <span className="wc-muted">暂无适应症</span>}
-        </div>
+        <IndicationEditor
+          draft={indicationDraft}
+          options={indicationOptions}
+          optionsLoading={indicationOptionsLoading}
+          saving={updateIndicationsMutation.isPending}
+          savedItems={data.indication_payload ?? []}
+          onChange={setIndicationDraft}
+          onSave={() => updateIndicationsMutation.mutate(indicationDraft)}
+        />
       </section>
 
       <section className="wc-sap-review-detail__blocks">

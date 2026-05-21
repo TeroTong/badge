@@ -19,7 +19,7 @@ from smart_badge_api.api.analysis_normalization import normalize_analysis_result
 from smart_badge_api.api.deps import get_current_user
 from smart_badge_api.api.hospital_scope import normalize_hospital_code, recording_hospital_condition
 from smart_badge_api.analysis.agent_pipeline import analyze_transcript_agent
-from smart_badge_api.analysis.prompt_builder import build_system_prompt
+from smart_badge_api.analysis.prompt_builder import build_asr_correction_hotwords, build_system_prompt
 from smart_badge_api.analysis.staged_pipeline import analyze_transcript_staged
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.core.config import get_settings
@@ -695,6 +695,9 @@ async def run_staged_analysis_result(
         "staff_role": recording.staff.role if recording and recording.staff else "",
         "hospital_code": hospital_code or "",
     }
+    asr_correction_hotwords = await build_asr_correction_hotwords(db)
+    if asr_correction_hotwords:
+        staff_context["asr_correction_hotwords"] = asr_correction_hotwords
 
     try:
         staged = await asyncio.to_thread(
@@ -793,6 +796,9 @@ async def run_agent_analysis_result(
         "staff_role": recording.staff.role if recording and recording.staff else "",
         "hospital_code": hospital_code or "",
     }
+    asr_correction_hotwords = await build_asr_correction_hotwords(db)
+    if asr_correction_hotwords:
+        staff_context["asr_correction_hotwords"] = asr_correction_hotwords
 
     try:
         agent = await asyncio.to_thread(

@@ -120,6 +120,41 @@ def _review_effective_text_matches_push_log(review: SapConsultationReview, log: 
     return bool(review_text and log_text and review_text == log_text)
 
 
+def _review_has_manual_indication_edits(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    snapshots = review.payload_snapshot if isinstance(review.payload_snapshot, list) else []
+    if any(isinstance(item, dict) and bool(item.get("_manual_indications")) for item in snapshots):
+        return True
+    return any(
+        isinstance(item, dict) and bool(item.get("_manual"))
+        for item in (review.indication_payload if isinstance(review.indication_payload, list) else [])
+    )
+
+
+def _review_has_manual_edits(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    if _review_has_manual_indication_edits(review):
+        return True
+    return any(
+        isinstance(block, dict) and str(block.get("edited_body") or "").strip()
+        for block in (review.blocks if isinstance(review.blocks, list) else [])
+    )
+
+
+async def _visit_has_manual_review_edits(db, visit_id: str | None) -> bool:
+    normalized_visit_id = str(visit_id or "").strip()
+    if not normalized_visit_id:
+        return False
+    review = (
+        await db.execute(
+            select(SapConsultationReview).where(SapConsultationReview.visit_id == normalized_visit_id)
+        )
+    ).scalar_one_or_none()
+    return _review_has_manual_edits(review)
+
+
 def _is_effective_success_push_log(log: SapPushLog | None) -> bool:
     if log is None:
         return False
@@ -257,6 +292,13 @@ async def _has_current_auto_push_log(
     link_changed_at = (await db.execute(link_change_stmt)).scalar_one_or_none()
     changed_at = _as_utc_aware(link_changed_at or recording.created_at)
     if effective_visit_id:
+        review = (
+            await db.execute(
+                select(SapConsultationReview).where(SapConsultationReview.visit_id == effective_visit_id)
+            )
+        ).scalar_one_or_none()
+        if _review_has_manual_edits(review):
+            return True
         review_changed_at = (
             await db.execute(
                 select(SapConsultationReview.updated_at).where(
@@ -364,6 +406,8 @@ async def _find_pending_review_candidate_refs(
     for review in reviews:
         visit_id = str(review.visit_id or "").strip()
         if not visit_id or visit_id in excluded_visit_ids:
+            continue
+        if _review_has_manual_edits(review):
             continue
         recording_id = _first_review_recording_id(review)
         if not recording_id:
@@ -549,6 +593,8 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             visit_recording_counts = {str(visit_id): int(count) for visit_id, count in count_rows}
 
         for recording_id, visit_id in raw_single_rows:
+            if await _visit_has_manual_review_edits(db, visit_id):
+                continue
             if visit_recording_counts.get(visit_id, 0) <= 1:
                 single_refs.append((recording_id, None))
                 continue
@@ -607,6 +653,8 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             visit_id = str(visit_id)
             key = (recording_id, visit_id)
             if key in seen_multi_fallback_keys:
+                continue
+            if await _visit_has_manual_review_edits(db, visit_id):
                 continue
             scoped_mapping_status = (
                 await db.execute(
@@ -680,6 +728,13 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             .limit(remaining_limit)
         )
         multi_refs = [(str(recording_id), str(visit_id)) for recording_id, visit_id in (await db.execute(multi_stmt)).all()]
+        if multi_refs:
+            filtered_multi_refs: list[tuple[str, str]] = []
+            for recording_id, visit_id in multi_refs:
+                if await _visit_has_manual_review_edits(db, visit_id):
+                    continue
+                filtered_multi_refs.append((recording_id, visit_id))
+            multi_refs = filtered_multi_refs
         refs = [*refs, *multi_refs]
         remaining_review_limit = max(limit, 1) - len(refs)
         if remaining_review_limit <= 0:

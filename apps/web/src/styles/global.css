@@ -30571,9 +30571,10 @@ a {
 
 .wc-sap-review-indication {
   align-items: flex-start;
+  position: relative;
   height: auto;
   min-height: 34px;
-  padding: 6px 8px;
+  padding: 6px 28px 6px 8px;
   line-height: 1.25;
 }
 
@@ -30590,6 +30591,75 @@ a {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.wc-sap-review-indication button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(30, 64, 175, 0.08);
+  color: #1d4ed8;
+  place-items: center;
+}
+
+.wc-sap-review-indication-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.wc-sap-review-indication-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.wc-sap-review-indication-picker label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.wc-sap-review-indication-picker label span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.wc-sap-review-indication-picker select {
+  width: 100%;
+  height: 36px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #0f172a;
+  font-size: 12px;
+}
+
+.wc-sap-review-indication-picker__add {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.wc-sap-review-indication-note {
+  border-left: 3px solid rgba(37, 99, 235, 0.45);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(239, 246, 255, 0.8);
+  color: #475569;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.wc-sap-review-indication-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .wc-sap-review-block {
@@ -31019,6 +31089,15 @@ a {
 
   .wc-sap-review-hero__actions {
     grid-template-columns: 1fr;
+  }
+
+  .wc-sap-review-indication-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .wc-sap-review-indication-actions .wc-btn,
+  .wc-sap-review-indication-picker__add {
+    width: 100%;
   }
 
   .wc-sap-review-detail__actions,

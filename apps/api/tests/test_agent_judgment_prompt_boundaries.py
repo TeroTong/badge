@@ -2,6 +2,7 @@ from smart_badge_api.analysis.agent_pipeline import (
     _JUDGMENT_AGENT_SYSTEM_PROMPT,
     _JUDGMENT_AGENT_USER_TEMPLATE,
     _agent_ensure_common_indications,
+    _agent_finalize_analysis_result,
     _agent_filter_non_deal_factors,
     _agent_has_jawline_support_context,
     _agent_normalize_non_deal_outcome,
@@ -167,6 +168,48 @@ def test_agent_common_indications_do_not_map_injection_support_to_surgical_face_
         not (item.get("indication_name") == "面部填充" and item.get("body_part_name") == "面部")
         for item in normalized["indication_candidates"]
     )
+
+
+def test_agent_finalizer_does_not_append_surgical_face_fill_for_injection_support() -> None:
+    result = {
+        "staff_recommendations": {
+            "items": [
+                {
+                    "recommendation": "颊凹玻尿酸填充支撑",
+                    "product_or_solution": "玻尿酸",
+                    "material": "玻尿酸",
+                }
+            ]
+        },
+        "standardized_indications": {"items": []},
+    }
+    finalized = _agent_finalize_analysis_result(result, context="颊凹玻尿酸填充支撑")
+
+    assert all(
+        not (item.get("indication_name") == "面部填充" and item.get("body_part_name") == "面部")
+        for item in finalized["standardized_indications"]["items"]
+    )
+
+
+def test_agent_finalizer_normalizes_haiwei_brand_from_asr_near_sound() -> None:
+    result = {
+        "staff_recommendations": {
+            "items": [
+                {
+                    "recommendation": "颊凹海派玻尿酸填充",
+                    "brand": "海派",
+                    "evidence": "首选海派这样的一支",
+                }
+            ]
+        },
+        "staff_seed_recommendations": {"items": []},
+        "standardized_indications": {"items": []},
+    }
+    finalized = _agent_finalize_analysis_result(result, context="首选海派这样的一支玻尿酸填充")
+    item = finalized["staff_recommendations"]["items"][0]
+
+    assert item["brand"] == "海薇"
+    assert "海薇" in item["recommendation"]
 
 
 def test_agent_common_indications_remove_jawline_candidate_for_outer_cheek_fill() -> None:

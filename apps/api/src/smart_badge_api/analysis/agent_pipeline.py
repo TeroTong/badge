@@ -16,8 +16,6 @@ from typing import Any
 
 from smart_badge_api.analysis.staged_pipeline import (
     STAGED_LLM_MODEL,
-    _INDICATION_ADJUDICATION_SYSTEM_PROMPT,
-    _INDICATION_ADJUDICATION_USER_TEMPLATE,
     _build_analysis_result_from_fact_graph,
     _build_line_speaker_metadata,
     _build_preprocess_context,
@@ -25,6 +23,7 @@ from smart_badge_api.analysis.staged_pipeline import (
     _candidate_indications_from_text,
     _clean_text,
     _compact_fact_graph_for_indications,
+    _catalog_match_by_code,
     _catalog_match_by_name,
     _estimate_payload_chars,
     _extract_correction_patch,
@@ -91,7 +90,8 @@ _CORRECTION_AGENT_SYSTEM_PROMPT = """\
 
 6. ASR 术语纠错范围。
    只纠正高置信度中文医美 ASR 错词。根据预处理提示、热词、上下文判断产品、材料、项目、部位和品牌。
-   典型例子：注射语境中的“一字光波/一次光波/一支光波”可能是“一支玻尿酸”；“鲁板/鲁班”可能是“濡白天使”；轮廓语境中的“下划线”可能是“下颌线”。
+   预处理中的 asr_hotword_correction_candidates 来自系统热词库的本录音召回结果，只是候选标准词，不是强制替换表。只有当原文片段与候选词在发音/字形/上下文上强相关，且同段业务语境支持时，才输出 term_corrections。
+   典型例子：注射语境中的“一字光波/一次光波/一支光波”可能是“一支玻尿酸”；“鲁板/鲁班”可能是“濡白天使”；轮廓语境中的“下划线”可能是“下颌线”；鼻基底/内侧苹果肌骨性支撑且同段强调“不含玻尿酸、不吸水、避免馒化”时，“瑞1/瑞一/瑞的一/瑞仪/瑞的仪/read的1/为的仪”等音近词可能是“瑞德喜”。“双美”通常按胶原/胶原蛋白类材料理解，不要改成玻尿酸。
    产品/品牌/材料名必须更保守：只有命中热词/预处理提示、同段反复出现、或上下文唯一强指向时才改；仅凭“像某个产品”不能改。
    不要把不确定的品牌名、产品名、机构名强行改成常见词，例如不要仅凭眼周语境把陌生词改成“嗨体”，不要仅凭玻尿酸语境把陌生品牌改成某个具体品牌。
    数字、单位、金额、支数和时间只有在上下文明确重复或逻辑强约束时才改；否则保留原文并写 uncertain_notes。
@@ -410,6 +410,19 @@ _EVENT_AGENT_SYSTEM_PROMPT = """\
    - 只保留客户/陪同的真实顾虑、价格承受度、还价、预算上限或付款压力。
    - 员工单纯报价、科普价格、解释优惠不是 budget_event，除非客户表现出价格敏感、还价或支付压力。
    - 客户普通询价、询问价格差异、问“多少钱/价格差不多吗”但没有还价、预算上限或支付压力时，不生成 budget_event。
+
+方案极性补充：
+6. 一个方案如果同时满足“员工/医生明确推荐或说效果更好/更适合”“有具体报价、用量、步骤或疗程”
+   “客户继续围绕费用、时长、分步或安全性追问”中的任意两项，并且解决当前主诉或当前诊断问题，
+   应标为 current_recommendation。即使它是第二档、加强版、分步方案或与基础方案做比较，
+   也不要仅因为存在多个方案就降为 comparison_or_backup。
+7. comparison_or_backup 只用于没有被实际建议执行、没有客户进一步决策互动，或明确只是科普/横向比较
+   的方案。若后文出现报价核算、手术时长、用量确认、是否一次做完等决策互动，应回看并提升为
+   current_recommendation，除非客户或员工明确否定。
+8. 客户主动问“要不要加/需不需要/多少钱/怎么收费/如果加”的提肌、去皮、去脂、开眼角等加项，
+   如果员工只是解释价格、流程或说“看医生评估/如果需要/不一定”，标为 customer_question 或
+   staff_explanation；只有员工/医生明确说“建议加/需要加/一起做/纳入方案/已开单成交”，才可标为
+   current_recommendation。可做但非本次核心目标的加项标为 seed_recommendation。
 
 只返回 event_graph JSON：
 {
@@ -739,10 +752,17 @@ _JUDGMENT_AGENT_SYSTEM_PROMPT = """\
    除非同时表达明确改善目标，否则不要作为独立 demand。
    “小毛毛/汗毛/体毛”等闲聊只有明确要求脱毛/冰点脱毛/激光脱毛时才可成为 demand。
    同一个证据或同义句只输出一条 demand；不要一条写泛化目标、一条写项目化目标造成重复。
+   “有点/一点点/轻度/自觉”等弱观察只有在客户明确希望处理，或当前推荐方案正在解决该问题时
+   才可成为 demand；如果员工/医生说暂时不管、先不处理或无方案支持，应留在诊断/备注中。
+   同一问题的不同说法必须合并，例如“印第安纹下移/印第安纹有一点下垂/面中印第安纹显现”
+   只能输出一条主诉。
 6. doctor_diagnoses 保留医生/咨询师对当前客户的观察、诊断和结构分析；不要因为诊断提到某问题
    就自动生成客户主诉。
-7. recommendations 是为解决当前 demands 的当前方案；必须尽量关联 related_demand_ids。
-   分阶段治疗如果是解决当前主诉的必要步骤，仍属于 recommendations。
+7. recommendations 是为解决当前 demands 的当前方案，也可包含解决当前诊断问题且已被明确建议执行的方案；
+   必须尽量关联 related_demand_ids 或诊断证据。分阶段治疗如果是解决当前主诉/诊断的必要步骤，
+   仍属于 recommendations。员工/医生明确说效果更好、给出价格/步骤/用量，且客户继续追问费用、
+   时长或能否分步的方案，要保留为 recommendations；不要因为它是高阶方案、加强方案或第二方案
+   就误放入 seed_recommendations 或删除。
 8. seed_recommendations 是额外种草、维养、低优先级、下次/转科/可延后或当前主诉之外的方案。
    员工提到“全脸/T区/整体设计/后面再做/可以先不做/分步选做”的可选方案，应保留为
    seed_recommendations，而不是删除或误放入当前 recommendations。
@@ -756,6 +776,9 @@ _JUDGMENT_AGENT_SYSTEM_PROMPT = """\
     已经出现在 recommendation_evidence 中就丢掉。员工单纯报价不算预算事实；客户对报价敏感、
     还价、要求优惠、反复核算、表达支付压力时，要输出类似“对26800元方案价格敏感，要求优惠”
     或“预算上限约7000-8000元”的简洁事实。
+    客户普通询价、询问分步做总价、比较一次做和分开做的费用、或说“先做基础方案看看效果”，
+    只表示方案决策与价格比较；除非同时明确太贵、承受不了、预算上限、要优惠/分期/降价，
+    不要推断成“预算低于某金额”或“价格敏感”。
 12. profile_evidence 转成 profile_facts；medical_history、budget、concern、deal 中描述客户画像的
     信号也要保留为 profile_facts，例如既往项目/材料/仪器、预算与价格敏感、疼痛耐受、家庭/子女、
     行业/特殊身份、竞品机构、决策人、项目偏好、恢复/时间限制、产品偏好等。这些用于客户标签，
@@ -850,6 +873,8 @@ _PLAN_AGENT_SYSTEM_PROMPT = """\
    敷料换药、排期、开单/付款/核销、护理注意事项。
 5. 分阶段治疗的判断看目的：所有步骤都为解决当前主诉时，保留为 recommendations；
    只是可选增强、后续维养、另一个问题的方案时，放 seed_recommendations。
+   如果某个“增强/第二档”方案解决的是同一个当前问题，且员工/医生明确报价、说明步骤或客户继续
+   核算费用/时长/分步做法，应视为当前可选推荐方案，保留在 recommendations。
 6. 参与者必须隔离。主咨询客户、同行客户A/B、陪同人员分别裁决；不要把同行客户自己的方案
    合并到主咨询客户，也不要删除同行客户有证据支持的方案。
 7. 保留证据中的可执行细节：brand、material、dosage、price、course_or_frequency、
@@ -864,6 +889,10 @@ _PLAN_AGENT_SYSTEM_PROMPT = """\
 10. 结构支撑、注射填充、光电、皮肤管理、手术等不同项目按同一原则裁决：只要是为当前主诉
     明确提出的执行方案，就保留为 recommendations；如果只是额外优化、种草、未来可做，
     就放 seed_recommendations。不要为某个部位写死例外规则。
+11. 对“客户询问型加项”要保守：提肌、去皮、去脂、开眼角、附加项目、升级项等，如果证据只是
+    客户问价格/是否需要，员工解释“要看医生评估、如果需要再加、不一定”，不能放入
+    recommendations；可放入 seed_recommendations 或 rejected_recommendations。只有员工/医生
+    明确把它作为本次执行方案、必要分步骤，或出现开单/付款/成交证据，才放入 recommendations。
 
 只输出 JSON:
 {
@@ -896,52 +925,174 @@ _PLAN_AGENT_USER_TEMPLATE = """\
 """
 
 
+_AGENT_INDICATION_ADJUDICATION_SYSTEM_PROMPT = """\
+你是中文医美录音分析链路中的 Agent 10：Indication adjudication / SAP 适应症裁决 Agent。
+
+你的任务是在 fact_graph 已经抽取出主诉、诊断、推荐方案和种草方案后，从本地
+candidate_indications 中裁决最终要写入 SAP 的适应症。SAP 适应症字段会直接影响
+业务回写，必须优先保证准确性；宁可少选，也不要选择相似但不精确、证据不足、
+或属于其他参与者的适应症。
+
+输入内容：
+1. preliminary fact_graph：包含 demands、doctor_diagnoses、recommendations、
+   seed_recommendations、indication_candidates 等事实。
+2. candidate_indications：本地 SAP 适应症字典召回候选。只能从这里复制
+   standardized_indication 原文，不得自造编码、项目名或部位。
+
+裁决流程：
+1. 先确定参与者。主咨询客户、同行客户A/B 必须分别裁决；每条 final_indication
+   都要保留 participant 和 participant_scope。不能用同行客户证据支持主咨询客户，
+   也不能把主咨询客户的适应症写给同行客户。
+2. 再判断“当前性”。最终适应症必须至少由以下一种证据支持：
+   当前客户明确主诉、员工/医生对当前客户的诊断、解决当前主诉的当前推荐方案、
+   或已经被明确作为真实项目建议的种草方案。单纯员工科普、客户随口提问、
+   备选比较、明确不推荐/不适合、术前检查、术后护理、用药、疤痕膏、换药、
+   排期、付款动作，不能单独支持适应症。
+3. 再匹配项目和部位。项目类别、治疗方式、部位三者都要与证据一致；
+   不要因为同一段话出现相邻部位、泛化部位词、品牌名、材料名或产品名就跨项目映射。
+4. 如果具体候选和泛化候选都可支持，优先保留更具体项；泛化项只有在代表另一个
+   真实治疗类别且有独立证据时才保留。
+5. 一个多部位轮廓/填充方案如果证据支持多个不同部位或类别，可以保留多个准确
+   适应症；不要因为它们出现在同一方案里就合并成一个泛化适应症，也不要把没有
+   当前处理证据的顺带部位一起选入。
+6. 使用 candidate_indications 的 selection_note / note / reason 作为排除和消歧依据。
+   如果候选备注说明不匹配当前主诉或方案，即使部位名相似也要拒绝。
+
+常见边界统一规则：
+1. 肉毒/大提拉/咬肌/瘦脸/下颌缘放松不等于“面部除皱”；只有明确皱纹、
+   动态纹、核桃纹、除皱针等证据时才可选除皱类适应症。
+2. “闭口时/闭上嘴/闭嘴”等口部动作不是痤疮；痤疮必须有痘痘、粉刺、炎症痘、
+   当前痤疮治疗等证据。痘印/痘坑不能单独推出痤疮。
+3. 痘坑、凹陷性痘坑、痤疮瘢痕、点阵术后凹陷等属于瘢痕/疤痕问题；如果是
+   当前主诉或有点阵、黄金微针、皮肤修复等当前/明确后续治疗计划，应优先选择
+   疤痕类候选，不能只用痤疮、暗黄或毛孔替代。
+4. 祛痣/祛疣必须按证据里的痣所在部位选择：下眼睑/眼周才选眼部；面部/脸上/
+   鼻旁/额头/下巴等选面部。不要因为同一录音里另有眼部项目，就把面部痣误判成眼部。
+5. 毛孔、黑头、出油、鼻头/鼻翼皮肤质地问题不能推出鼻综合、隆鼻或鼻部塑形；
+   只有明确鼻部手术、注射支撑或鼻形态调整方案时才可选鼻部塑形/修复类适应症。
+6. 卧蚕、泪沟、眼下/眶下凹陷使用胶原、双美、嗨体、福曼、玻尿酸等注射材料时，
+   应优先匹配微创“塑美-眼部（D）”；不要误选外科双眼皮，也不要因为出现“填充”
+   就自动补成外科“面部填充”，除非证据明确为自体脂肪/脂肪胶移植。
+7. 鼻基底、鼻头、鼻翼、鼻尖、鼻小柱、鼻中下段、三角结构等注射/玻尿酸/
+   再生材料支撑，应优先匹配注射塑形类鼻中轴线相关候选；不要误选外科鼻综合
+   或外科面部填充，除非证据明确为手术或自体脂肪/脂肪胶移植。
+8. 自体脂肪、脂肪胶、脂肪移植等外科填充才支持外科“面部填充”；玻尿酸、
+   胶原、童颜针、再生材料、芭比针、瑞德喜、濡白天使等注射材料不要补成
+   外科“面部填充”。
+9. 下颌线、下颌角拐点、耳前/耳后韧带、外轮廓支撑等注射/再生材料方案，
+   优先匹配对应的注射塑形轮廓线候选；不要泛化成身体吸脂或除皱。
+10. 副乳/腋前/胸外侧鼓出有明确诉求或方案时优先选择“副乳整形”具体候选，
+   不要用通用身体吸脂替代。富贵包没有专用候选时，只有明确吸脂/抽脂/局部减脂
+   当前方案才可选身体吸脂；单纯评估富贵包不够。
+11. 唇部方案被明确暂缓、不推荐、仅比较或客户说以后再做时，不进入最终适应症；
+   只有本次明确推荐或当前处理时才选择唇部相关适应症。
+12. 美白、皮肤管理、光电、抗衰等转科/下次/种草需求可保留在主诉或种草方案中，
+   但不能作为最终 SAP 适应症，除非本次有明确当前推荐或执行计划。
+13. 皮肤抗衰场景中，若核心问题是松弛、下垂、紧致、淡纹，且方案是热玛吉、
+    超声炮、黄金微针、黑曜双波、射频/光电，应优先选择松弛下垂/紧致淡纹类候选；
+    不要因顺带提到毛孔、暗黄、痘印而错误选择毛孔/痤疮类。
+14. 本地规则补充到 fact_graph.indication_candidates 的候选，也要按同一标准裁决；
+    如果证据支持当前主诉或当前/明确后续治疗计划，不要因为 recall_reason 是 fallback
+    就忽略；如果证据不足，同样要拒绝。
+15. 独立术前检查、术后护理、药物、疤痕膏、敷料换药、清创、拆线等只作为方案
+    说明或护理事项，不能生成最终适应症。
+16. 多个独立当前推荐方案要逐一裁决。若同一客户同时有鼻部支撑、内颊/中面部填充、下颌线、
+    眶外C、唇部等多个明确当前方案，且 candidate_indications 中分别有精确候选，应保留多个
+    final_indications；不要只保留主方案而遗漏次要但仍属于本次当前方案的适应症。
+17. 客户询问型加项不支持适应症：提肌、去皮、去脂、开眼角等只有客户问价/问是否需要，
+    员工未明确建议本次执行时，不要选对应适应症；若员工/医生明确建议本次加做、必要分步骤
+    或已成交，才可选择。
+
+输出要求：
+1. final_indications 中每条 standardized_indication 必须完全复制 candidate_indications
+   中的候选字符串。
+2. reason 简明说明为什么匹配；supporting_evidence 填直接支持的证据文本或 evidence_id。
+3. rejected_indications 中列出被召回但不应选择的关键候选，并写清拒绝理由。
+4. 如果没有当前客户主诉/诊断/推荐方案，或只有内部员工聊天、前台订单、付款/核销、
+   缺席第三方案例，final_indications 返回空列表。
+
+只输出 JSON：
+{
+  "final_indications": [
+    {
+      "standardized_indication": "Y2|微创|SYZ2001|塑美|BW2019|眶外C线（小O）",
+      "participant": "主咨询客户|同行客户A|同行客户B|unknown",
+      "participant_scope": "primary_customer|other_customer|unknown",
+      "reason": "",
+      "supporting_evidence": [],
+      "confidence": 0.0
+    }
+  ],
+  "rejected_indications": [
+    {
+      "standardized_indication": "",
+      "reason": ""
+    }
+  ]
+}
+"""
+
+
+_AGENT_INDICATION_ADJUDICATION_USER_TEMPLATE = """\
+预裁决 fact_graph：
+{fact_graph}
+
+本地 SAP 适应症字典召回候选：
+{candidate_indications}
+
+只输出最终 SAP 适应症裁决 JSON。
+"""
+
+
 _AUDIT_AGENT_SYSTEM_PROMPT = """\
-You are Agent 7 in a Chinese medical-aesthetic recording analysis chain:
-the final audit and repair agent.
+你是中文医美录音分析链路的第 8 步 Audit / fact_graph 审计 Agent。
 
-Audit the fact_graph before code renders analysis_result. You may return a
-corrected_fact_graph only when there is a clear evidence-backed issue.
+你的任务是在代码把 fact_graph 渲染成最终 analysis_result 之前做最后审计。
+不要重新分析整段录音，不要重写 SAP 咨询备注；只检查 fact_graph 是否存在
+明确、可由 evidence_graph / event_graph / 转写片段支持的结构性错误。
 
-Audit priorities:
-0. Enforce event_graph polarity. Do not keep final recommendations or SAP
-   indications for customer_question, staff_explanation, comparison_or_backup,
-   diagnosis_only, or not_recommended events. Deal outcome must be tied to a
-   deal_confirmed/payment/deposit/order_created event for a specific plan when
-   the transcript contains multiple options.
-1. SAP indications must be evidence-backed and exact to body area/project.
-   When participant_scope exists, each indication/recommendation/concern/budget
-   must stay attached to its own participant. Do not merge 同行客户A/同行客户B facts
-   into 主咨询客户, but do not delete valid同行客户 facts either.
-2. Do not miss explicit current customer demands such as 副乳、富贵包、美白、毛孔、
-   痘印、暗沉 when the customer raised them.
-3. Do not turn referral/deferred demands into final SAP indications without a
-   current plan.
-4. Recommendations and seed recommendations must be separated correctly.
-5. Do not keep standalone pre/post-op care as recommendation.
-6. Do not infer nose surgery from nasal skin texture.
-7. Do not infer acne from 闭口时/闭上嘴.
-8. Deal outcome requires direct payment/order/deposit evidence.
-9. Do not delete valid profile_facts such as budget, price sensitivity, prior
-   treatment/material, children/family, industry, decision maker, treatment
-   preference, or comparison institution when evidence supports them.
-10. If budget_evidence exists but budget_facts are empty or less specific, repair
-    budget_facts. If recommendation evidence has price/dosage/material in a
-    nested detail but final recommendation lacks it, repair the flat fields.
-11. If a current main recommendation in fact_graph would be lost from rendered
-    output due to backup/comparison wording, preserve it and only demote the
-    backup option.
-12. If 下颌线/下颌角拐点/耳前耳后韧带 support evidence exists but final
-    recommendations only keep 肉毒/大提拉, repair the structural support plan
-    as the main recommendation.
-13. If 面部除皱 is selected only because of 咬肌/瘦脸/大提拉/下颌线 and there
-    is no explicit wrinkle/dynamic-line treatment, remove it.
-14. If 鼻基底/鼻头/鼻翼 三角结构 injection evidence exists but final
-    indications only keep 面部填充 or 鼻综合, repair to 塑美（鼻中轴线（H））.
-15. If you cannot confidently repair an issue, leave fact_graph unchanged and
-   add an audit issue instead of inventing.
+审计原则：
+1. 证据优先：修复必须能在 evidence_graph、event_graph 或转写片段中找到直接依据。
+   如果证据不足，只在 audit.issues / unresolved_risks 中说明，不要凭经验补写。
+2. event_graph 的事件极性优先：customer_question、staff_explanation、
+   comparison_or_backup、diagnosis_only、not_recommended 不应进入最终推荐方案、
+   种草方案、成交结论或 SAP 适应症；只有 current_recommendation、seed_recommendation、
+   deal_confirmed、payment、deposit、order_created 等正向事件才支持对应事实。
+3. 参与者必须隔离：当 participant_scope / participant 存在时，需求、适应症、
+   推荐方案、种草方案、顾虑、预算、画像事实都必须保留在对应客户名下。
+   不要把同行客户事实合并到主咨询客户，也不要删除证据充分的同行客户事实。
+4. 审计数据丢失：如果证据中有明确的当前主诉、医生诊断、当前推荐方案、
+   种草方案、客户顾虑、预算/价格敏感、既往治疗/材料/仪器、决策人、
+   行业/家庭等画像信息，而 fact_graph 中缺失或过于笼统，应补到对应字段。
+5. 审计字段错位：不要把客户随口询问、员工科普、术前术后注意事项、价格计算、
+   排期/付款动作、对比备选、暂缓/转科/下次再做内容误放进当前主诉或当前推荐。
+   推荐方案是解决当前主诉的本次核心方案；种草方案是额外、低优先级、下次、
+   转科、维养或可延后的方案。
+6. 审计适应症：SAP 适应症只能来自 candidate_indications，且必须精确匹配当前
+   客户的主诉/诊断/推荐方案的部位和项目。不要因相邻部位、泛化部位词、
+   皮肤质地描述、口部动作、咬肌/轮廓方案等推导出无证据的手术、痤疮、
+   除皱或其他无关适应症；若候选字典有更具体项，避免保留过宽泛项。
+7. 审计推荐细节：如果 evidence_graph 中有品牌、材料、用量、价格、疗程、
+   操作步骤、实施要点、客户认可/犹豫/拒绝等信息，fact_graph 的方案字段应尽量
+   扁平保留这些细节，不要只留下空泛方案名。
+8. 审计预算和成交：预算应是客户预算、价格敏感或可承受上限的归纳，不是原文
+   价格句子。成交结论必须绑定明确付款、定金、下单、签字或成交确认事件；
+   多个方案并存时，不要把某个方案的付款/确认扩展到所有方案。
+   如果成交金额把备选报价、未支付方案报价或多个方案报价范围混入已成交项目，
+   必须在 corrected_fact_graph.deal_outcome 中修正；没有直接付款金额证据时，
+   amount 置为 null 或只保留已付款项目有证据支持的金额。
+9. 尊重前序裁决：fact_graph 已经过推荐方案/种草方案裁决和适应症裁决。
+   只有发现裁决与 event_graph 或证据明确冲突时才修复；不要因为措辞像“后续”
+   就自动覆盖第 7 步的方案分类。
+10. 如果 revision_required=true，corrected_fact_graph 必须实际解决对应 high/medium
+    问题：去重就返回去重后的完整列表，字段错位就返回重排后的完整列表，
+    关联缺失就补齐 related_demand_ids；不要只报告问题而不修复。
+11. corrected_fact_graph 只返回需要替换的 fact_graph 字段，未修改字段不要重复返回。
+    可替换字段包括 demands、doctor_diagnoses、indication_candidates、
+    recommendations、seed_recommendations、concerns、budget_facts、medical_history、
+    profile_facts、deal_factors、uncertainties、deal_outcome。
 
-Return JSON only:
+只输出 JSON：
 {
   "audit": {
     "revision_required": false,
@@ -961,59 +1112,77 @@ Return JSON only:
 
 
 _AUDIT_AGENT_USER_TEMPLATE = """\
-Fact graph after recommendation and indication adjudication:
+触发审计的 fact_graph（已完成推荐/种草方案裁决和适应症裁决）：
 {fact_graph}
 
-Evidence graph:
+证据图：
 {evidence_graph}
 
-Event graph:
+事件图：
 {event_graph}
 
-Candidate indications:
+候选 SAP 适应症：
 {candidate_indications}
 
-Relevant corrected transcript excerpts:
+相关纠错后转写片段：
 {dialogue}
 
-Return audit JSON only. Include corrected_fact_graph only if a repair is clearly evidence-backed.
+只输出 audit JSON。只有在修复有明确证据支持时，才填写 corrected_fact_graph。
 """
 
 
 _FINAL_RESULT_AUDIT_SYSTEM_PROMPT = """\
-You are Agent 8 in a Chinese medical-aesthetic recording analysis chain:
-the final user-visible result consistency auditor.
+你是中文医美录音分析链路的 Agent 9 / 第 9 步 Final result audit / 展示结果审计 Agent。
 
-Audit the rendered analysis_result after code has converted fact_graph into
-display fields. Your output may patch only the final result sections. Prefer
-small, evidence-backed repairs.
+你的任务是在 fact_graph 已渲染成 analysis_result 后，审计用户最终会在网页、
+企微和 SAP 预回写中看到的展示字段是否自洽。不要重新构建 fact_graph，不要重写
+整段分析，只做小范围、证据支持的展示结果修复。
 
-Audit priorities:
-1. Customer primary demands must be concrete treatment goals for the current
-   visit/customer. Do not keep duplicate or near-duplicate demands. Do not treat
-   doctor preference, brand preference, price calculation, payment/deposit,
-   recovery/scar questions, or general worries as primary demands.
-2. Customer concerns must include explicit worry/hesitation from the customer,
-   especially safety, side effects, worsening hollowing, scars, recovery, pain,
-   migration, price pressure, or doctor/operator concerns.
-3. Recommendations must be actual staff/doctor plans for the customer's current
-   demand. Seed recommendations are additional/next-visit/cross-department
-   plans, not replacements for the current plan.
-4. Every recommendation's demand_priority must point to an existing demand
-   priority. If no exact demand exists, leave the link empty instead of linking
-   to the wrong demand.
-5. SAP indications must be exact to the project/body area and supported by
-   current recommendations or confirmed current demands. Do not invent
-   indications for unsupported nose surgery, acne, wrinkle treatment, or
-   unrelated post-deal care.
-6. Budget must be a normalized budget/price-sensitivity conclusion, not a raw
-   evidence quote. A deposit/order amount is not automatically the customer's
-   budget. If the customer repeatedly calculates or resists a quoted total,
-   summarize the price sensitivity or upper bound.
-7. Preserve useful recommendation details: dosage, material, brand, price,
-   course/frequency, steps, implementation notes, and customer response.
+审计原则：
+1. 证据优先：只能依据 scope_graph、evidence_graph、event_graph、fact_graph、
+   analysis_result 和转写片段修复。证据不足时记录 issue / unresolved_risks，
+   不要凭常识补写。
+2. 主诉必须是本次客户明确想改善的部位、问题或审美目标。去除重复/近重复主诉；
+   不把医生偏好、品牌偏好、价格计算、付款动作、排期、术后护理、泛泛担心、
+   仅诊断观察或未形成处理方向的闲聊写成主诉。
+   “有点/一点点/轻度/自觉”等弱观察，如果没有当前推荐方案支持，或同段/后文明确说暂时不管、
+   先不处理、不要处理，应从主诉中删除；同一问题的近义表达如“印第安纹下移/印第安纹有一点下垂”
+   必须合并为一条。
+   如果客户先提出宽泛目标、后续又明确否定或收窄（例如不要整脸/全脸、只做某个
+   部位），最终展示必须按最后确认的范围重写或删除宽泛主诉，并同步
+   consultation_result.chief_complaint_and_indications。
+3. 顾客顾虑必须来自客户明确表达的担心、犹豫或拒绝，包括安全、风险、副作用、
+   疼痛、恢复、疤痕、凹陷加重、移位、价格压力、医生/操作者顾虑等。若推荐方案
+   的 customer_response 中已有这些担心而顾虑为空，应补到 customer_concerns。
+4. 推荐方案和种草方案必须区分：推荐方案是针对本次主诉的当前核心方案；
+   种草方案是额外、低优先级、下次、转科、维养、可延后或客户仅初步询问的方案。
+   方案应保留品牌、材料、用量、价格、疗程、步骤、实施要点和客户反馈。
+5. 方案与主诉的 demand_priority 只能指向已有且语义匹配的主诉；找不到匹配主诉时
+   留空，不要为了满足格式而连到错误主诉。
+6. SAP 适应症必须与最终推荐方案或已确认当前主诉精确匹配到项目和部位。
+   不因相邻部位、泛化部位词、皮肤质地描述、口部动作、咬肌/轮廓方案、
+   术后护理或成交动作推导出无证据的手术、痤疮、除皱或其他适应症。
+7. 预算/消费意向必须是归纳结论，而不是原文时间戳或长证据句。
+   付款/定金金额不等于客户预算；客户反复核算、压价、分期、贷款利息敏感、拒绝总价时，应总结为价格
+   敏感、可承受区间或支付偏好。
+   但普通询价、询问分步总价、比较不同方案价格，或想先做基础方案看看效果，不能单独推出
+   “预算低于某金额”或“价格敏感”；必须有太贵、承受不了、预算上限、要求优惠/降价/分期等证据。
+8. 成交结论必须有明确付款、定金、下单、签字、核销、成交确认或预约执行证据。
+   多方案并存时，不要把一个方案的付款/确认扩展到其他方案；参与者和 participant_scope
+   必须与 evidence/fact_graph 一致，不能把同行客户成交归到主咨询客户。
+9. 客户画像只保留客户本人的事实。不要把员工自述、医生科普、其他客户案例、产品介绍
+   当成客户标签；既往治疗/材料、健康风险、过敏史等高风险标签必须有客户本人证据。
+   “本次消费预算/价格敏感度”只能来自本次方案的预算上限、承受区间、压价、打折、
+   分期、反复核算、拒绝总价等当前消费证据；不要把既往项目花费、外院价格、
+   员工报价说明或单纯问价写成本次预算或价格敏感。
+10. 如果发现某个展示项无证据、误归因或与事实图冲突，revision_required=true 时必须
+    在 analysis_result_patch 中返回删除/修正后的完整模块列表，不能只在 issues 中说明。
+    例如顾虑、主诉、画像标签、推荐方案被判定无证据时，应从对应 items 中移除，并让
+    summary 与 items 保持一致。
+11. analysis_result_patch 只返回需要替换的顶层展示模块；未修改模块不要重复返回。
+    如果 revision_required=true，patch 应实际修复 high/medium 问题，而不是只列问题。
 
-Return JSON only:
+只输出 JSON：
 {
   "final_result_audit": {
     "revision_required": false,
@@ -1030,7 +1199,7 @@ Return JSON only:
   "analysis_result_patch": null
 }
 
-If repairs are needed, analysis_result_patch may include only these sections:
+如需修复，analysis_result_patch 只能包含以下顶层模块：
 customer_primary_demands, customer_concerns, staff_recommendations,
 staff_seed_recommendations, standardized_indications, consumption_intent,
 consultation_result, customer_profile.
@@ -1038,28 +1207,28 @@ consultation_result, customer_profile.
 
 
 _FINAL_RESULT_AUDIT_USER_TEMPLATE = """\
-Trigger reasons:
+触发展示结果审计的原因：
 {trigger_reasons}
 
-Scope graph:
+范围图：
 {scope_graph}
 
-Evidence graph:
+证据图：
 {evidence_graph}
 
-Event graph:
+事件图：
 {event_graph}
 
-Fact graph:
+事实图：
 {fact_graph}
 
-Rendered analysis_result:
+已渲染的 analysis_result：
 {analysis_result}
 
-Relevant corrected transcript excerpts:
+相关纠错后转写片段：
 {dialogue}
 
-Return final_result_audit JSON only. Include analysis_result_patch only when a repair is clearly evidence-backed.
+只输出 final_result_audit JSON。只有在修复有明确证据支持时，才填写 analysis_result_patch。
 """
 
 
@@ -1275,6 +1444,49 @@ def _agent_has_explicit_budget_intent(text: str) -> bool:
             "订金",
             "意向金",
             "交钱",
+        )
+    )
+
+
+def _agent_has_explicit_affordability_reaction(text: str) -> bool:
+    text = _clean_text(text)
+    if not text:
+        return False
+    return any(
+        term in text
+        for term in (
+            "我的预算",
+            "我预算",
+            "预算是",
+            "预算最多",
+            "预算上限",
+            "预算有限",
+            "预算不够",
+            "超预算",
+            "太贵",
+            "有点贵",
+            "贵了",
+            "价格高",
+            "价格偏高",
+            "接受不了",
+            "承受不了",
+            "承受",
+            "顶死",
+            "最多",
+            "上限",
+            "不超过",
+            "打不起",
+            "付不起",
+            "没那么多",
+            "钱不够",
+            "优惠",
+            "便宜点",
+            "少一点",
+            "打折",
+            "折扣",
+            "分期",
+            "贷款",
+            "利息",
         )
     )
 
@@ -1620,6 +1832,8 @@ def _agent_preserve_deferred_seed_recommendations(
     fact_graph: dict[str, Any],
     evidence_graph: dict[str, Any],
 ) -> dict[str, Any]:
+    if isinstance(fact_graph.get("_recommendation_adjudication"), dict):
+        return fact_graph
     deferred_items = [
         item
         for item in _as_list(evidence_graph.get("recommendation_evidence"))
@@ -1995,6 +2209,10 @@ def _agent_demand_cluster(item: dict[str, Any]) -> str:
         any(term in text for term in ("变瘦", "凹进去", "凹陷感", "凹陷")) and any(term in text for term in ("面部", "脸", "颊"))
     ):
         return "cheek_hollow"
+    if "印第安纹" in text:
+        return "indian_line"
+    if "鼻基底" in text and any(term in text for term in ("后缩", "凹陷", "支撑", "塌", "不够")):
+        return "nose_base_retrusion"
     if "鼻" in text and any(term in text for term in ("残留", "没溶干净", "摸得到", "填充物")):
         return "nose_residual_filler"
     if any(term in text for term in ("水光", "补水", "干燥", "肤质粗", "胶原流失")):
@@ -2372,6 +2590,8 @@ def _agent_plan_quality_score(item: dict[str, Any]) -> int:
         score += 30
     if _clean_text(item.get("customer_response")):
         score += 20
+    if _clean_text(item.get("implementation_notes")):
+        score += 18
     if _as_list(item.get("treatment_steps")):
         score += 12
     if "推断" in text:
@@ -2742,34 +2962,67 @@ def _agent_filter_unsupported_medical_safety_concerns(fact_graph: dict[str, Any]
     return updated
 
 
+def _agent_rejection_is_explicit_negative(reason: str) -> bool:
+    if not reason:
+        return False
+    return any(
+        term in reason
+        for term in (
+            "明确暂停",
+            "暂停",
+            "暂缓",
+            "以后再做",
+            "不做",
+            "不写",
+            "不进入",
+            "不要选",
+            "不应选择",
+            "拒绝",
+            "否定",
+            "不建议",
+            "不适合",
+            "不处理",
+            "无当前处理",
+            "没有当前处理",
+            "仅询问",
+            "只是询问",
+            "客户询问",
+        )
+    )
+
+
 def _agent_remove_rejected_indications(
     fact_graph: dict[str, Any],
     indication_adjudication: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if not isinstance(indication_adjudication, dict):
         return fact_graph
-    rejected = {
-        _clean_text(item.get("standardized_indication"))
-        for item in _as_list(indication_adjudication.get("rejected_indications"))
-        if isinstance(item, dict) and _clean_text(item.get("standardized_indication"))
-    }
-    rejected_name_body: set[tuple[str, str]] = set()
-    for standardized in rejected:
+    rejected: dict[str, str] = {}
+    for item in _as_list(indication_adjudication.get("rejected_indications")):
+        if not isinstance(item, dict):
+            continue
+        standardized = _clean_text(item.get("standardized_indication"))
+        if standardized:
+            rejected[standardized] = _clean_text(item.get("reason"))
+    rejected_name_body: dict[tuple[str, str], str] = {}
+    for standardized, reason in rejected.items():
         parts = standardized.split("|")
         if len(parts) >= 6:
-            rejected_name_body.add((_clean_text(parts[3]), _clean_text(parts[5])))
+            rejected_name_body[(_clean_text(parts[3]), _clean_text(parts[5]))] = reason
     if not rejected and not rejected_name_body:
         return fact_graph
     candidates = [item for item in _as_list(fact_graph.get("indication_candidates")) if isinstance(item, dict)]
-    kept = [
-        item
-        for item in candidates
-        if item.get("force_include")
-        or (
-            _clean_text(item.get("standardized_indication")) not in rejected
-            and (_clean_text(item.get("indication_name")), _clean_text(item.get("body_part_name"))) not in rejected_name_body
-        )
-    ]
+    kept = []
+    for item in candidates:
+        standardized = _clean_text(item.get("standardized_indication"))
+        name_body = (_clean_text(item.get("indication_name")), _clean_text(item.get("body_part_name")))
+        rejected_reason = rejected.get(standardized) or rejected_name_body.get(name_body, "")
+        if not rejected_reason:
+            kept.append(item)
+            continue
+        if item.get("force_include") and not _agent_rejection_is_explicit_negative(rejected_reason):
+            kept.append(item)
+            continue
     if len(kept) == len(candidates):
         return fact_graph
     updated = dict(fact_graph)
@@ -2805,6 +3058,52 @@ def _agent_add_catalog_indication(
     return True
 
 
+def _agent_merge_candidate_indications_from_fact_graph(
+    candidate_indications: list[dict[str, Any]],
+    fact_graph: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Make deterministic/local fact candidates visible to the LLM adjudicator."""
+
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def append_candidate(item: dict[str, Any]) -> None:
+        standardized = _clean_text(item.get("standardized_indication"))
+        if not standardized:
+            return
+        if standardized in seen:
+            return
+        seen.add(standardized)
+        merged.append(item)
+
+    for item in candidate_indications:
+        if isinstance(item, dict):
+            append_candidate(dict(item))
+
+    for item in _as_list(fact_graph.get("indication_candidates")):
+        if not isinstance(item, dict):
+            continue
+        row = _catalog_match_by_code(item)
+        if row is None:
+            continue
+        formatted_items = _format_candidate_indications([row])
+        if not formatted_items:
+            continue
+        formatted = dict(formatted_items[0])
+        evidence = _agent_existing_fact_evidence_text(item)
+        reason = _clean_text(item.get("reason") or item.get("adjudication_reason") or item.get("recall_reason"))
+        note_parts = [
+            _clean_text(formatted.get("selection_note")),
+            f"fact_graph_reason:{reason}" if reason else "",
+            f"fact_graph_evidence:{evidence[:240]}" if evidence else "",
+        ]
+        formatted["selection_note"] = "；".join(part for part in note_parts if part)
+        formatted["recall_reason"] = _clean_text(formatted.get("recall_reason")) or "fact_graph_indication_candidate"
+        append_candidate(formatted)
+
+    return merged
+
+
 def _agent_result_has_indication(items: list[dict[str, Any]], *, name: str, body_contains: str) -> bool:
     return any(
         _clean_text(item.get("indication_name")) == name
@@ -2832,6 +3131,61 @@ def _agent_append_result_catalog_indication(result: dict[str, Any], *, name: str
         if _clean_text(item.get("indication_name"))
     )
     return True
+
+
+def _agent_profile_budget_tag_is_prior_spend_only(category: str, value: str, evidence: str) -> bool:
+    normalized_category = _AGENT_PROFILE_CATEGORY_ALIASES.get(category, category)
+    if normalized_category not in {"本次消费预算", "价格敏感度"}:
+        return False
+    combined = _agent_join_text(value, evidence)
+    if not combined or not re.search(r"\d|[一二三四五六七八九十两俩]+[千百]?多?万", combined):
+        return False
+    past_spend_cues = (
+        "花了",
+        "花费",
+        "花多少钱",
+        "花了多少钱",
+        "消费过",
+        "以前",
+        "之前",
+        "上次",
+        "既往",
+        "外院",
+        "那边",
+        "在那边",
+        "别的地方",
+        "其他地方",
+        "做过",
+        "打过",
+    )
+    if not any(term in combined for term in past_spend_cues):
+        return False
+    current_budget_cues = (
+        "预算",
+        "本次",
+        "这次",
+        "今天",
+        "当前",
+        "现在",
+        "这个方案",
+        "总价",
+        "承受",
+        "接受不了",
+        "不超过",
+        "最多",
+        "上限",
+        "分期",
+        "贷款",
+        "打折",
+        "优惠",
+        "申请",
+        "价格偏高",
+        "太贵",
+        "贵了",
+        "反复核算",
+        "核算",
+    )
+    return not any(term in combined for term in current_budget_cues)
 
 
 def _agent_prune_result_profile_tags(result: dict[str, Any]) -> bool:
@@ -2881,6 +3235,13 @@ def _agent_prune_result_profile_tags(result: dict[str, Any]) -> bool:
         value = _clean_text(item.get("value"))
         evidence = _clean_text(item.get("evidence"))
         combined = _agent_join_text(category, value, evidence)
+        normalized_category = _AGENT_PROFILE_CATEGORY_ALIASES.get(category, category)
+        if _agent_profile_budget_tag_is_prior_spend_only(category, value, evidence):
+            changed = True
+            continue
+        if normalized_category == "价格敏感度" and not _agent_has_affordability_reaction(combined):
+            changed = True
+            continue
         if category in {"治疗项目", "历史用的设备/原材料名称"}:
             if any(term in combined for term in negative_history_markers) or not any(term in combined for term in prior_markers):
                 changed = True
@@ -2918,10 +3279,59 @@ def _agent_recompute_result_recommendation_summary(result: dict[str, Any]) -> No
     )
 
 
-def _agent_correct_result_brand_terms(result: dict[str, Any], *, context: str) -> bool:
-    if "海派" not in context:
+def _agent_dedupe_result_recommendation_block(result: dict[str, Any], block_name: str) -> bool:
+    block = result.get(block_name)
+    if not isinstance(block, dict):
         return False
+    items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    if len(items) <= 1:
+        return False
+    kept_by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        stable_basis = _agent_join_text(
+            _first_text(item, "content", "plan", "recommendation", "summary"),
+            _first_text(item, "body_part", "body_part_name"),
+            _first_text(item, "brand", "material", "dosage", "price", "course_or_frequency"),
+        )
+        signature = _agent_plan_semantic_signature(item)
+        text_key = _compact_key_text(_agent_plan_text(item))
+        key = _compact_key_text(stable_basis) or signature or text_key
+        if not key:
+            key = f"index:{len(order)}"
+        if key not in kept_by_key:
+            kept_by_key[key] = item
+            order.append(key)
+        elif _agent_plan_quality_score(item) > _agent_plan_quality_score(kept_by_key[key]):
+            kept_by_key[key] = item
+    deduped = [kept_by_key[key] for key in order if key in kept_by_key]
+    if len(deduped) == len(items):
+        return False
+    block["items"] = deduped
+    if block_name == "staff_recommendations":
+        _agent_recompute_result_recommendation_summary(result)
+    elif block_name == "staff_seed_recommendations":
+        _agent_recompute_result_seed_summary(result)
+    return True
+
+
+def _agent_correct_result_brand_terms(result: dict[str, Any], *, context: str) -> bool:
+    context_text = _clean_text(context)
     changed = False
+
+    def replace_text(value: Any, replacements: dict[str, str]) -> Any:
+        nonlocal changed
+        if isinstance(value, str):
+            next_value = value
+            for source, target in replacements.items():
+                next_value = next_value.replace(source, target)
+            if next_value != value:
+                changed = True
+            return next_value
+        if isinstance(value, list):
+            return [replace_text(item, replacements) for item in value]
+        return value
+
     for block_name in ("staff_recommendations", "staff_seed_recommendations"):
         block = result.get(block_name)
         if not isinstance(block, dict):
@@ -2929,10 +3339,71 @@ def _agent_correct_result_brand_terms(result: dict[str, Any], *, context: str) -
         for item in _as_list(block.get("items")):
             if not isinstance(item, dict):
                 continue
-            for key in ("recommendation", "brand", "implementation_notes", "evidence"):
-                value = item.get(key)
-                if isinstance(value, str) and "海薇" in value:
-                    item[key] = value.replace("海薇", "海派")
+
+            item_context = _agent_join_text(item, context_text)
+            item_text = _agent_plan_text(item)
+            if "海派" in item_context and any(term in item_context for term in ("玻尿酸", "填充", "注射", "一支", "每支", "每次一支")):
+                for key in ("recommendation", "brand", "implementation_notes", "evidence", "treatment_steps"):
+                    if key in item:
+                        item[key] = replace_text(item.get(key), {"海派": "海薇"})
+
+            if "双美" in item_text:
+                replacements = {
+                    "双美玻尿酸": "双美胶原蛋白",
+                    "双美的玻尿酸": "双美胶原蛋白",
+                    "深层双美玻尿酸": "深层双美胶原蛋白",
+                }
+                for key in ("recommendation", "brand", "material", "implementation_notes", "evidence", "treatment_steps"):
+                    if key in item:
+                        item[key] = replace_text(item.get(key), replacements)
+                if _clean_text(item.get("brand")) == "双美":
+                    item["brand"] = "双美"
+                material = _clean_text(item.get("material"))
+                if material in {"玻尿酸", "双美玻尿酸", "双美的玻尿酸"}:
+                    item["material"] = "胶原蛋白"
+                    changed = True
+
+            nose_support_context = any(term in item_text for term in ("鼻基底", "内侧苹果肌", "上颌骨", "中面部"))
+            non_ha_context = any(
+                term in item_context
+                for term in (
+                    "不含玻尿酸",
+                    "不吸水",
+                    "千万别打玻尿酸",
+                    "不能打玻尿酸",
+                    "玻尿酸会吸水",
+                    "玻尿酸会抛",
+                    "玻尿酸就会抛",
+                    "打玻尿酸就会抛",
+                    "馒化",
+                )
+            )
+            rh_cues = ("read的1", "read的仪", "瑞1", "瑞一", "瑞的1", "为的仪", "为的一", "五性材料")
+            if nose_support_context and non_ha_context and any(term in item_context for term in rh_cues):
+                replacements = {
+                    "read的1（音似）": "瑞德喜",
+                    "read的1": "瑞德喜",
+                    "read的仪": "瑞德喜",
+                    "瑞1": "瑞德喜",
+                    "瑞一": "瑞德喜",
+                    "瑞的1": "瑞德喜",
+                    "瑞蓝1号": "瑞德喜",
+                    "瑞蓝1": "瑞德喜",
+                    "为的仪": "瑞德喜",
+                    "为的一": "瑞德喜",
+                    "五性材料": "骨性支撑材料",
+                    "玻尿酸填充": "注射支撑",
+                    "玻尿酸注射": "注射支撑",
+                }
+                for key in ("recommendation", "brand", "material", "implementation_notes", "evidence", "treatment_steps"):
+                    if key in item:
+                        item[key] = replace_text(item.get(key), replacements)
+                if _clean_text(item.get("brand")) in {"", "瑞1", "瑞一", "瑞的1", "read的1", "read的1（音似）", "为的仪", "瑞蓝1", "瑞蓝1号"}:
+                    item["brand"] = "瑞德喜"
+                    changed = True
+                material = _clean_text(item.get("material"))
+                if not material or material in {"玻尿酸", "骨性材料", "五性材料", "不含玻尿酸的骨性材料", "不含玻尿酸的五性材料"}:
+                    item["material"] = "再生类骨性支撑材料"
                     changed = True
     if changed:
         _agent_recompute_result_recommendation_summary(result)
@@ -2970,6 +3441,16 @@ def _agent_result_demand_key(item: dict[str, Any]) -> str:
         _first_text(item, "body_part", "body_part_name", "area"),
         item.get("evidence"),
     )
+    if any(term in text for term in ("鼻头", "鼻尖")) and any(
+        term in text for term in ("很大", "偏大", "圆钝", "钝", "缩小", "精致")
+    ):
+        return "nose_tip_shape"
+    if "空着" in text and any(term in text for term in ("下次", "下一步", "做什么", "哪个部位", "可改善")):
+        return "empty_region_next_step"
+    if "空着" in text and any(term in text for term in ("下次", "做什么", "可改善", "改善")) and any(
+        term in text for term in ("鼻基底", "中面部", "内侧苹果肌", "上颌骨", "后续指向")
+    ):
+        return "midface_support_empty_region"
     if any(term in text for term in ("面颊", "颊区", "夹区", "脸颊")) and any(
         term in text for term in ("凹陷", "填充", "玻尿酸")
     ):
@@ -3064,6 +3545,7 @@ def _agent_append_result_concern(result: dict[str, Any], *, content: str, eviden
 def _agent_backfill_result_concerns_from_recommendations(result: dict[str, Any], *, context: str) -> bool:
     changed = False
     recommendations = _as_list(_as_dict(result.get("staff_recommendations")).get("items"))
+    existing_concern_text = _agent_join_text(_as_dict(result.get("customer_concerns")).get("items"))
     for item in recommendations:
         if not isinstance(item, dict):
             continue
@@ -3071,18 +3553,28 @@ def _agent_backfill_result_concerns_from_recommendations(result: dict[str, Any],
         if not response:
             continue
         body = _first_text(item, "body_part", "body_part_name")
-        text = _agent_join_text(response, item.get("evidence"), item.get("recommendation"), body)
-        if any(term in text for term in ("颊凹", "夹凹", "凹陷")) and any(
-            term in text for term in ("担心", "怕", "更狠", "加重", "更凹", "越凹")
+        evidence = _clean_text(item.get("evidence"))
+        concern_source = _agent_join_text(response, evidence)
+        text = _agent_join_text(concern_source, item.get("recommendation"), body)
+        if any(term in concern_source for term in ("颊凹", "夹凹", "凹陷")) and any(
+            term in concern_source for term in ("担心", "怕", "会不会", "不会有", "更狠", "加重", "更凹", "越凹")
         ):
-            evidence = _agent_context_evidence_for_terms(
-                context, ("怕凹", "怕越", "凹的更", "凹陷加重", "颊凹加重")
-            ) or response
-            changed = _agent_append_result_concern(
-                result,
-                content="担心咬肌肉毒后面颊凹陷加重",
-                evidence=evidence,
-            ) or changed
+            if any(term in concern_source for term in ("咬肌", "肉毒", "瘦脸针", "瘦脸")):
+                evidence_text = _agent_context_evidence_for_terms(
+                    context, ("咬肌", "肉毒", "瘦脸针", "颊凹加重", "凹陷加重")
+                ) or response
+                changed = _agent_append_result_concern(
+                    result,
+                    content="担心咬肌肉毒后面颊凹陷加重",
+                    evidence=evidence_text,
+                ) or changed
+            elif "凹陷" not in existing_concern_text:
+                target = body or "治疗"
+                changed = _agent_append_result_concern(
+                    result,
+                    content=f"担心{target}治疗后仍有凹陷或改善不足",
+                    evidence=evidence or response,
+                ) or changed
         if any(term in text for term in ("安全", "后遗症", "风险", "移位", "副作用")) and any(
             term in text for term in ("担心", "怕", "询问", "安不安全", "有没有")
         ):
@@ -3168,7 +3660,26 @@ def _agent_result_item_text(item: dict[str, Any]) -> str:
     )
 
 
-def _agent_demote_non_demand_result_items(result: dict[str, Any]) -> bool:
+def _agent_result_demand_body_terms(item: dict[str, Any]) -> tuple[str, ...]:
+    text = _agent_result_item_text(item)
+    if any(term in text for term in ("上眼皮", "上睑", "眼皮肿", "眼皮有点肿")):
+        return ("上眼皮", "上睑", "眼皮")
+    if "印第安纹" in text:
+        return ("印第安纹",)
+    if any(term in text for term in ("苹果肌", "面中", "中面部")):
+        return ("苹果肌", "面中", "中面部")
+    if "眼袋" in text:
+        return ("眼袋",)
+    if "泪沟" in text:
+        return ("泪沟",)
+    if "黑眼圈" in text:
+        return ("黑眼圈",)
+    if "鼻" in text:
+        return ("鼻", "鼻梁", "鼻头", "鼻基底")
+    return tuple()
+
+
+def _agent_demote_non_demand_result_items(result: dict[str, Any], *, context: str = "") -> bool:
     block = result.get("customer_primary_demands")
     if not isinstance(block, dict):
         return False
@@ -3177,8 +3688,29 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any]) -> bool:
         return False
     kept: list[dict[str, Any]] = []
     changed = False
+    recommendation_items = [
+        dict(item)
+        for item in _as_list(_as_dict(result.get("staff_recommendations")).get("items"))
+        if isinstance(item, dict)
+    ]
+    recommendation_context = _agent_join_text(
+        recommendation_items,
+        _as_dict(result.get("standardized_indications")).get("items"),
+    )
+    recommendation_link_context = _agent_join_text(
+        [
+            {
+                "plan": _first_text(item, "recommendation", "content", "plan", "summary"),
+                "body_part": _first_text(item, "body_part", "body_part_name", "area"),
+                "evidence": _clean_text(item.get("evidence")),
+            }
+            for item in recommendation_items
+        ]
+    )
+    full_context = _agent_join_text(context, result, recommendation_context)
     for item in items:
         text = _agent_result_item_text(item)
+        evidence = _clean_text(item.get("evidence"))
         has_goal = any(term in text for term in _AGENT_TREATMENT_GOAL_CUES)
         is_concern = any(term in text for term in _AGENT_NON_DEMAND_CONCERN_CUES)
         is_price = any(term in text for term in _AGENT_NON_DEMAND_PRICE_CUES)
@@ -3186,6 +3718,42 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any]) -> bool:
         is_brand_preference = any(term in text for term in ("倾向选择", "偏向选择", "想用", "品牌")) and any(
             term in text for term in ("保妥适", "衡力", "吉适", "瑞德喜", "艾拉斯提", "乔雅登", "濡白")
         )
+        history_only_evidence = (
+            any(term in evidence for term in ("之前打", "以前打", "外面打", "打过", "已吸收", "吸收了", "没了吸收"))
+            and not any(term in evidence for term in ("想", "希望", "想要", "要做", "想做", "改善", "关注", "考虑", "担心", "怕"))
+        )
+        if history_only_evidence:
+            changed = True
+            continue
+        weak_observation = any(term in text for term in ("有点", "一点点", "一丢丢", "轻度", "自觉", "稍微")) and not any(
+            term in text for term in ("强烈", "明显", "主要", "核心", "困扰")
+        )
+        no_treatment_context = any(
+            term in full_context
+            for term in (
+                "暂时不处理",
+                "暂时不需要处理",
+                "先不处理",
+                "不用处理",
+                "不要处理",
+                "暂时不管",
+                "先不管",
+                "不用管",
+                "不要去管",
+                "不建议现在处理",
+                "后期再处理",
+            )
+        )
+        body_terms = _agent_result_demand_body_terms(item)
+        linked_to_current_plan = bool(body_terms) and any(term in recommendation_link_context for term in body_terms)
+        goal_source = evidence or text
+        explicit_goal = any(term in goal_source for term in ("想", "想要", "希望", "改善", "解决", "处理", "要做", "想做"))
+        if weak_observation and not explicit_goal and not linked_to_current_plan:
+            changed = True
+            continue
+        if weak_observation and no_treatment_context and not linked_to_current_plan:
+            changed = True
+            continue
         if (is_concern or is_price) and not has_goal:
             changed = _agent_append_result_concern(
                 result,
@@ -3206,6 +3774,93 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any]) -> bool:
     block["summary"] = "；".join(
         _first_text(item, "demand", "content", "text", "summary")
         for item in kept
+        if _first_text(item, "demand", "content", "text", "summary")
+    )
+    return True
+
+
+def _agent_context_has_demand_intent_for_terms(context: str, terms: tuple[str, ...]) -> bool:
+    if not context:
+        return False
+    intent_cues = "想|想要|希望|要做|想做|咨询|了解|改善|解决|处理|去掉|去除|祛|调整"
+    for term in terms:
+        escaped = re.escape(term)
+        if re.search(rf"({intent_cues}).{{0,18}}{escaped}|{escaped}.{{0,18}}({intent_cues})", context):
+            return True
+    return False
+
+
+def _agent_backfill_result_demands_from_recommendations(result: dict[str, Any], *, context: str = "") -> bool:
+    block = result.setdefault("customer_primary_demands", {})
+    if not isinstance(block, dict):
+        block = {"summary": "", "items": []}
+        result["customer_primary_demands"] = block
+    demand_items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    recommendation_items = [
+        dict(item)
+        for item in _as_list(_as_dict(result.get("staff_recommendations")).get("items"))
+        if isinstance(item, dict)
+    ]
+    if not recommendation_items:
+        return False
+    demand_context = _agent_join_text(demand_items)
+    recommendation_context = _agent_join_text(recommendation_items)
+    changed = False
+
+    def append_demand(text: str, body_part: str, evidence: str) -> None:
+        nonlocal changed, demand_context
+        if any(term in demand_context for term in (body_part, text)):
+            return
+        demand_items.append(
+            {
+                "priority": len(demand_items) + 1,
+                "demand": text,
+                "body_part": body_part,
+                "evidence": evidence[:260],
+            }
+        )
+        demand_context = _agent_join_text(demand_items)
+        changed = True
+
+    if (
+        "眼袋" in recommendation_context
+        and any(term in recommendation_context for term in ("内切", "外切", "去眼袋", "祛眼袋", "眼袋手术"))
+        and "眼袋" not in demand_context
+        and _agent_context_has_demand_intent_for_terms(context, ("眼袋",))
+    ):
+        append_demand(
+            "希望解决眼袋问题",
+            "眼袋",
+            recommendation_context,
+        )
+    if (
+        any(term in recommendation_context for term in ("苹果肌", "面中", "中面部"))
+        and any(term in recommendation_context for term in ("自体脂肪", "填充", "回填"))
+        and not any(term in demand_context for term in ("苹果肌", "面中", "中面部"))
+        and _agent_context_has_demand_intent_for_terms(context, ("苹果肌", "面中", "中面部"))
+    ):
+        append_demand(
+            "苹果肌/面中凹陷，容量不足，希望改善",
+            "苹果肌/面中",
+            recommendation_context,
+        )
+    if (
+        "泪沟" in recommendation_context
+        and any(term in recommendation_context for term in ("填充", "回填", "脂肪"))
+        and not any(term in demand_context for term in ("泪沟", "苹果肌", "面中", "中面部"))
+        and _agent_context_has_demand_intent_for_terms(context, ("泪沟",))
+    ):
+        append_demand(
+            "泪沟凹陷，希望改善",
+            "泪沟",
+            recommendation_context,
+        )
+    if not changed:
+        return False
+    block["items"] = demand_items
+    block["summary"] = "；".join(
+        _first_text(item, "demand", "content", "text", "summary")
+        for item in demand_items
         if _first_text(item, "demand", "content", "text", "summary")
     )
     return True
@@ -3266,6 +3921,136 @@ def _agent_repair_result_recommendation_links(result: dict[str, Any]) -> bool:
     return changed
 
 
+def _agent_demote_unlinked_chin_recommendations(result: dict[str, Any]) -> bool:
+    demand_text = _agent_join_text(_as_dict(result.get("customer_primary_demands")).get("items"))
+    if "下巴" in demand_text:
+        return False
+    block = result.get("staff_recommendations")
+    if not isinstance(block, dict):
+        return False
+    kept: list[dict[str, Any]] = []
+    changed = False
+    for item in [dict(value) for value in _as_list(block.get("items")) if isinstance(value, dict)]:
+        text = _agent_plan_text(item)
+        demand_links = _as_list(item.get("demand_priority")) + _as_list(item.get("related_demand_ids")) + _as_list(item.get("linked_demand_ids"))
+        if not demand_links and "下巴" in text and any(term in text for term in ("玻尿酸", "填充", "塑形", "后缩", "翘")):
+            changed = _agent_append_result_seed_recommendation(result, item) or changed
+            continue
+        kept.append(item)
+    if not changed:
+        return False
+    block["items"] = kept
+    _agent_recompute_result_recommendation_summary(result)
+    return True
+
+
+_AGENT_RECOMMENDATION_EVIDENCE_ANCHORS = (
+    "童颜针",
+    "瑞德喜",
+    "濡白",
+    "双美",
+    "胶原",
+    "玻尿酸",
+    "艾拉斯提",
+    "海薇",
+    "英伦大提升",
+    "鼻基底",
+    "鼻小柱",
+    "鼻尖",
+    "鼻头",
+    "苹果肌",
+    "泪沟",
+    "卧蚕",
+    "下巴",
+    "颞区",
+    "太阳穴",
+    "耳部",
+    "耳区",
+    "耳朵",
+    "下颌缘",
+    "下颌线",
+    "唇部",
+    "嘴巴",
+)
+
+_AGENT_RECOMMENDATION_GENERIC_EVIDENCE_ANCHORS = {"玻尿酸", "胶原", "胶原蛋白"}
+
+
+def _agent_repair_result_recommendation_evidence(result: dict[str, Any], *, context: str) -> bool:
+    if not context:
+        return False
+    changed = False
+    for block_name in ("staff_recommendations", "staff_seed_recommendations"):
+        block = result.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+        if not items:
+            continue
+        block_changed = False
+        for item in items:
+            plan_text = _agent_join_text(
+                _first_text(item, "content", "plan", "recommendation", "summary"),
+                _first_text(item, "body_part", "body_part_name"),
+                _first_text(item, "brand", "material", "dosage", "price", "course_or_frequency", "implementation_notes"),
+                item.get("treatment_steps"),
+            )
+            evidence = _clean_text(item.get("evidence"))
+            anchors = [term for term in _AGENT_RECOMMENDATION_EVIDENCE_ANCHORS if term in plan_text]
+            if "耳部" in anchors and "耳朵" not in anchors:
+                anchors.insert(0, "耳朵")
+            if "下颌线" in anchors and "下颌缘" not in anchors:
+                anchors.insert(0, "下颌缘")
+            if not anchors:
+                continue
+            strong_anchors = [term for term in anchors if term not in _AGENT_RECOMMENDATION_GENERIC_EVIDENCE_ANCHORS]
+            match_anchors = strong_anchors or anchors
+            if evidence and any(term in evidence for term in match_anchors):
+                continue
+            repaired = _agent_context_evidence_for_terms(context, tuple(match_anchors))
+            if not repaired or repaired == evidence:
+                continue
+            item["evidence"] = repaired
+            changed = True
+            block_changed = True
+        if block_changed:
+            block["items"] = items
+            if block_name == "staff_recommendations":
+                _agent_recompute_result_recommendation_summary(result)
+            else:
+                _agent_recompute_result_seed_summary(result)
+    return changed
+
+
+def _agent_remove_unsupported_result_concerns(result: dict[str, Any]) -> bool:
+    block = result.get("customer_concerns")
+    if not isinstance(block, dict):
+        return False
+    items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    if not items:
+        return False
+    kept: list[dict[str, Any]] = []
+    changed = False
+    for item in items:
+        content = _first_text(item, "content", "concern", "text", "summary")
+        evidence = _clean_text(item.get("evidence"))
+        if any(term in content for term in ("咬肌", "肉毒", "瘦脸")) and not any(
+            term in evidence for term in ("咬肌", "肉毒", "瘦脸")
+        ):
+            changed = True
+            continue
+        kept.append(item)
+    if not changed:
+        return False
+    block["items"] = kept
+    block["summary"] = "；".join(
+        _first_text(item, "content", "concern", "text", "summary")
+        for item in kept
+        if _first_text(item, "content", "concern", "text", "summary")
+    )
+    return True
+
+
 def _agent_remove_executor_only_result_recommendations(result: dict[str, Any]) -> bool:
     block = result.get("staff_recommendations")
     if not isinstance(block, dict):
@@ -3310,6 +4095,45 @@ def _agent_repair_budget_raw_quote(result: dict[str, Any], *, context: str) -> b
     return changed
 
 
+def _agent_repair_overinferred_budget(result: dict[str, Any], *, context: str) -> bool:
+    block = result.get("consumption_intent")
+    if not isinstance(block, dict):
+        return False
+    budget = _clean_text(block.get("budget"))
+    if not budget:
+        return False
+    budget_claims_price_limit = any(
+        term in budget
+        for term in (
+            "低于",
+            "少于",
+            "不超过",
+            "上限",
+            "承受",
+            "接受不了",
+            "价格敏感",
+            "较敏感",
+            "预算有限",
+            "太贵",
+            "偏贵",
+        )
+    )
+    if not budget_claims_price_limit:
+        return False
+    if _agent_has_explicit_affordability_reaction(context):
+        return False
+    # 普通询价、分步核算或“先做基础方案看看效果”只能说明方案比较，
+    # 不能推出客户预算低于某个报价。
+    block["budget"] = None
+    block["evidence"] = [
+        item
+        for item in _as_list(block.get("evidence"))
+        if not any(term in _clean_text(item) for term in ("低于", "少于", "价格敏感", "预算有限"))
+    ]
+    result["consumption_intent"] = block
+    return True
+
+
 def _agent_clear_resolved_quality_flags(result: dict[str, Any]) -> None:
     has_indications = bool(_as_list(_as_dict(result.get("standardized_indications")).get("items")))
     quality = result.get("analysis_quality")
@@ -3343,46 +4167,171 @@ def _agent_append_result_seed_recommendation(result: dict[str, Any], item: dict[
     return True
 
 
-def _agent_finalize_analysis_result(result: dict[str, Any], *, context: str = "") -> dict[str, Any]:
+def _agent_sync_final_display_sections(result: dict[str, Any]) -> bool:
+    """Keep legacy nested display sections aligned with the audited top-level result."""
+    changed = False
+    consultation_result = result.get("consultation_result")
+    if not isinstance(consultation_result, dict):
+        consultation_result = {}
+        result["consultation_result"] = consultation_result
+        changed = True
+
+    demand_items = [
+        dict(item)
+        for item in _as_list(_as_dict(result.get("customer_primary_demands")).get("items"))
+        if isinstance(item, dict)
+    ]
+    demand_texts: list[str] = []
+    seen_demands: set[str] = set()
+    for item in demand_items:
+        text = _first_text(item, "demand", "content", "text", "summary")
+        key = _compact_key_text(text)
+        if text and key and key not in seen_demands:
+            demand_texts.append(text)
+            seen_demands.add(key)
+    if demand_texts:
+        chief = consultation_result.get("chief_complaint_and_indications")
+        if not isinstance(chief, dict):
+            chief = {}
+            consultation_result["chief_complaint_and_indications"] = chief
+            changed = True
+        if _as_list(chief.get("primary_demands")) != demand_texts:
+            chief["primary_demands"] = demand_texts
+            changed = True
+        demand_summary = "；".join(demand_texts)
+        if _clean_text(chief.get("summary")) != demand_summary:
+            chief["summary"] = demand_summary
+            changed = True
+
+        indication_texts: list[str] = []
+        seen_indications: set[str] = set()
+        for item in _as_list(_as_dict(result.get("standardized_indications")).get("items")):
+            if not isinstance(item, dict):
+                continue
+            name = _clean_text(item.get("indication_name")) or _clean_text(item.get("name"))
+            body = _clean_text(item.get("body_part_name")) or _clean_text(item.get("body_part"))
+            if not name:
+                continue
+            text = f"{name}（{body}）" if body else name
+            key = _compact_key_text(text)
+            if key and key not in seen_indications:
+                indication_texts.append(text)
+                seen_indications.add(key)
+        if indication_texts and _as_list(chief.get("standardized_indications")) != indication_texts:
+            chief["standardized_indications"] = indication_texts
+            changed = True
+
+    concern_block = result.get("customer_concerns")
+    concern_items = [dict(item) for item in _as_list(_as_dict(concern_block).get("items")) if isinstance(item, dict)]
+    deal_factors = consultation_result.get("deal_factors")
+    if not isinstance(deal_factors, dict):
+        deal_factors = {}
+        consultation_result["deal_factors"] = deal_factors
+        changed = True
+    if concern_items:
+        concern_texts = [
+            _first_text(item, "content", "concern", "text", "summary")
+            for item in concern_items
+            if _first_text(item, "content", "concern", "text", "summary")
+        ]
+        if concern_texts and _as_list(deal_factors.get("concerns")) != concern_texts:
+            deal_factors["concerns"] = concern_texts
+            changed = True
+    else:
+        backfilled_items: list[dict[str, Any]] = []
+        seen_concerns: set[str] = set()
+        for raw in _as_list(deal_factors.get("concerns")):
+            if isinstance(raw, dict):
+                text = _first_text(raw, "content", "concern", "text", "summary")
+                evidence = _clean_text(raw.get("evidence"))
+            else:
+                text = _clean_text(raw)
+                evidence = ""
+            key = _compact_key_text(text)
+            if text and key and key not in seen_concerns:
+                backfilled_items.append({"type": "顾虑", "content": text, "evidence": evidence})
+                seen_concerns.add(key)
+        if backfilled_items:
+            result["customer_concerns"] = {
+                "summary": "；".join(item["content"] for item in backfilled_items),
+                "items": backfilled_items,
+            }
+            changed = True
+
+    customer_profile = _as_dict(result.get("customer_profile"))
+    profile_tags = [dict(item) for item in _as_list(customer_profile.get("tags")) if isinstance(item, dict)]
+    profile_age = _clean_text(customer_profile.get("age")) or None
+    profile_age_evidence = _clean_text(customer_profile.get("age_evidence")) or None
+    if profile_tags or profile_age:
+        next_profile_summary = {
+            "summary": f"本次录音共提取 {len(profile_tags)} 个画像标签。" if profile_tags else "本次录音暂未提取出明确画像标签。",
+            "extracted_tag_count": len(profile_tags),
+            "age": profile_age,
+            "age_evidence": profile_age_evidence,
+            "tags": profile_tags,
+        }
+        if consultation_result.get("customer_profile_summary") != next_profile_summary:
+            consultation_result["customer_profile_summary"] = next_profile_summary
+            changed = True
+
+    return changed
+
+
+def _agent_finalize_analysis_result(
+    result: dict[str, Any],
+    *,
+    context: str = "",
+    allow_indication_backfill: bool = True,
+) -> dict[str, Any]:
     updated = dict(result)
     changed = False
     changed = _agent_correct_result_brand_terms(updated, context=context) or changed
     changed = _agent_demote_result_orphan_recommendations(updated) or changed
     changed = _agent_dedupe_result_demands(updated) or changed
     changed = _agent_backfill_result_concerns_from_recommendations(updated, context=context) or changed
-    changed = _agent_demote_non_demand_result_items(updated) or changed
+    changed = _agent_remove_unsupported_result_concerns(updated) or changed
+    changed = _agent_demote_non_demand_result_items(updated, context=context) or changed
+    changed = _agent_backfill_result_demands_from_recommendations(updated, context=context) or changed
     changed = _agent_remove_executor_only_result_recommendations(updated) or changed
     changed = _agent_repair_result_recommendation_links(updated) or changed
+    changed = _agent_demote_unlinked_chin_recommendations(updated) or changed
+    changed = _agent_repair_result_recommendation_evidence(updated, context=context) or changed
     changed = _agent_repair_budget_raw_quote(updated, context=context) or changed
+    changed = _agent_repair_overinferred_budget(updated, context=context) or changed
     changed = _agent_dedupe_result_demands(updated) or changed
     recommendation_context = _agent_join_text(_as_dict(updated.get("staff_recommendations")).get("items"))
-    if any(term in recommendation_context for term in ("唇部", "嘴唇", "嘴巴", "唇峰", "唇珠", "口周")) and any(
-        term in recommendation_context for term in ("玻尿酸", "填充", "注射", "补打", "塑形", "海派", "海妹", "弹性材料")
-    ):
-        changed = _agent_append_result_catalog_indication(
-            updated,
-            name="塑美",
-            body="唇部",
-            evidence="正式推荐方案出现唇部玻尿酸/弹性材料注射补打或塑形，按本系统字典映射为塑美-唇部（D）",
-        ) or changed
+    if allow_indication_backfill:
+        if any(term in recommendation_context for term in ("唇部", "嘴唇", "嘴巴", "唇峰", "唇珠", "口周")) and any(
+            term in recommendation_context for term in ("玻尿酸", "填充", "注射", "补打", "塑形", "海派", "海妹", "弹性材料")
+        ):
+            changed = _agent_append_result_catalog_indication(
+                updated,
+                name="塑美",
+                body="唇部",
+                evidence="正式推荐方案出现唇部玻尿酸/弹性材料注射补打或塑形，按本系统字典映射为塑美-唇部（D）",
+            ) or changed
 
-    if "下巴" in recommendation_context and any(
-        term in recommendation_context for term in ("玻尿酸", "填充", "注射", "支撑", "塑形", "翘", "拉出来", "兜住")
-    ):
-        changed = _agent_append_result_catalog_indication(
-            updated,
-            name="塑美",
-            body="下颌轮廓线（大O）",
-            evidence="正式推荐方案出现下巴注射/填充/支撑塑形，按本系统字典映射为塑美-下颌轮廓线（大O）",
-        ) or changed
+        if "下巴" in recommendation_context and any(
+            term in recommendation_context for term in ("玻尿酸", "填充", "注射", "支撑", "塑形", "翘", "拉出来", "兜住")
+        ):
+            changed = _agent_append_result_catalog_indication(
+                updated,
+                name="塑美",
+                body="下颌轮廓线（大O）",
+                evidence="正式推荐方案出现下巴注射/填充/支撑塑形，按本系统字典映射为塑美-下颌轮廓线（大O）",
+            ) or changed
 
-    if _agent_has_face_fill_support_context(recommendation_context):
-        changed = _agent_append_result_catalog_indication(
-            updated,
-            name="面部填充",
-            body="面部",
-            evidence="正式推荐方案出现面颊/颊区凹陷玻尿酸填充或注射支撑，按字典映射为面部填充-面部",
-        ) or changed
+        explicit_surgical_face_fill = any(
+            term in recommendation_context
+            for term in ("脂肪填充", "自体脂肪", "脂肪胶", "脂肪移植", "自体脂肪移植")
+        )
+        if explicit_surgical_face_fill and _agent_has_face_fill_support_context(recommendation_context):
+            changed = _agent_append_result_catalog_indication(
+                updated,
+                name="面部填充",
+                body="面部",
+                evidence="正式推荐方案出现面颊/颊区自体脂肪填充，按字典映射为面部填充-面部",
+            ) or changed
 
     seed_block = _as_dict(updated.get("staff_seed_recommendations"))
     seed_items = [dict(item) for item in _as_list(seed_block.get("items")) if isinstance(item, dict)]
@@ -3419,11 +4368,64 @@ def _agent_finalize_analysis_result(result: dict[str, Any], *, context: str = ""
         ) or changed
 
     changed = _agent_prune_result_profile_tags(updated) or changed
+    changed = _agent_dedupe_result_recommendation_block(updated, "staff_recommendations") or changed
+    changed = _agent_dedupe_result_recommendation_block(updated, "staff_seed_recommendations") or changed
+    changed = _agent_sync_final_display_sections(updated) or changed
     if changed:
         debug = updated.setdefault("staged_pipeline_debug", {})
         if isinstance(debug, dict):
             debug["agent_final_result_safety_patch"] = True
     _agent_clear_resolved_quality_flags(updated)
+    return updated
+
+
+def _agent_restore_missing_display_recommendations(
+    result: dict[str, Any],
+    *,
+    fact_graph: dict[str, Any],
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore rendered recommendations when participant/display filtering drops them."""
+
+    if _as_list(_as_dict(result.get("staff_recommendations")).get("items")):
+        return result
+    if not _as_list(fact_graph.get("recommendations")):
+        return result
+
+    fallback = _build_analysis_result_from_fact_graph(fact_graph, raw, allow_raw_augmentation=False)
+    source_block = _as_dict(fallback.get("staff_recommendations"))
+    source_items = _as_list(source_block.get("items"))
+    source_consultation = _as_dict(fallback.get("consultation_result"))
+
+    if not source_items:
+        for participant_result in _as_list(result.get("participant_analysis_results")):
+            if not isinstance(participant_result, dict):
+                continue
+            participant_payload = _as_dict(participant_result.get("analysis_result"))
+            participant_block = _as_dict(participant_payload.get("staff_recommendations"))
+            participant_items = _as_list(participant_block.get("items"))
+            if participant_items:
+                source_block = participant_block
+                source_items = participant_items
+                source_consultation = _as_dict(participant_payload.get("consultation_result"))
+                break
+
+    if not source_items:
+        return result
+
+    updated = dict(result)
+    updated["staff_recommendations"] = source_block
+    consultation_result = dict(_as_dict(updated.get("consultation_result")))
+    recommended_plan = _as_dict(source_consultation.get("recommended_plan"))
+    if recommended_plan:
+        consultation_result["recommended_plan"] = recommended_plan
+        updated["consultation_result"] = consultation_result
+    if fallback.get("sap_summary_materials"):
+        updated["sap_summary_materials"] = fallback.get("sap_summary_materials")
+    debug = updated.setdefault("staged_pipeline_debug", {})
+    if isinstance(debug, dict):
+        debug["agent_display_recommendations_restored"] = True
+    _agent_sync_final_display_sections(updated)
     return updated
 
 
@@ -3614,8 +4616,9 @@ def _agent_ensure_common_indications(fact_graph: dict[str, Any]) -> dict[str, An
         fact_graph.get("doctor_diagnoses"),
         fact_graph.get("recommendations"),
         fact_graph.get("seed_recommendations"),
+        fact_graph.get("deal_outcome"),
     )
-    recommendation_context = _agent_join_text(fact_graph.get("recommendations"))
+    recommendation_context = _agent_join_text(fact_graph.get("recommendations"), fact_graph.get("deal_outcome"))
     updated = dict(fact_graph)
     candidates = [dict(item) for item in _as_list(updated.get("indication_candidates")) if isinstance(item, dict)]
 
@@ -3745,6 +4748,30 @@ def _agent_ensure_common_indications(fact_graph: dict[str, Any]) -> dict[str, An
             evidence="正式推荐方案出现下颌线/下颌角拐点/耳前耳后韧带注射支撑或轮廓提升，按字典映射为塑美-下颌轮廓线（大O）",
             confidence=0.84,
         ) or changed
+    if any(term in recommendation_context for term in ("内颊", "中面部", "面中部", "苹果肌", "面颊", "脸颊", "法令纹", "鼻唇沟")) and any(
+        term in recommendation_context
+        for term in (
+            "玻尿酸",
+            "瑞德喜",
+            "濡白天使",
+            "童颜针",
+            "胶原",
+            "胶原蛋白",
+            "芭比针",
+            "注射",
+            "支撑",
+            "填充",
+            "塑形",
+        )
+    ):
+        changed = _agent_add_catalog_indication(
+            candidates,
+            name="塑美",
+            body="内颊",
+            evidence="正式推荐方案出现中面部/苹果肌/面颊/法令纹等注射填充或支撑，按字典映射为塑美-内颊（小O）",
+            confidence=0.84,
+            force_include=True,
+        ) or changed
     if explicit_surgical_face_fill:
         changed = _agent_add_catalog_indication(
             candidates,
@@ -3855,6 +4882,18 @@ def _agent_ensure_common_indications(fact_graph: dict[str, Any]) -> dict[str, An
             name="塑美",
             body="唇部",
             evidence="正式推荐方案出现唇部玻尿酸/弹性材料注射补打或塑形，按本系统字典映射为塑美-唇部（D）",
+            confidence=0.82,
+            force_include=True,
+        ) or changed
+
+    if any(term in recommendation_context for term in ("卧蚕", "泪沟", "眼下", "眼周", "眶下")) and any(
+        term in recommendation_context for term in ("玻尿酸", "胶原", "胶原蛋白", "双美", "嗨体", "福曼", "填充", "注射", "打", "支")
+    ):
+        changed = _agent_add_catalog_indication(
+            candidates,
+            name="塑美",
+            body="眼部",
+            evidence="正式推荐方案出现卧蚕/泪沟/眼下注射填充，按本系统字典映射为塑美-眼部（D）",
             confidence=0.82,
             force_include=True,
         ) or changed
@@ -4161,9 +5200,74 @@ def _agent_repair_fact_graph(
     repaired = _agent_normalize_demands(repaired)
     repaired = _agent_filter_non_deal_factors(repaired)
     repaired = _agent_normalize_non_deal_outcome(repaired)
+    repaired = _agent_repair_deal_participant_scope_from_evidence(repaired, evidence_graph)
     for list_key in ("budget_facts", "deal_factors", "concerns", "medical_history", "profile_facts"):
         repaired = _agent_dedupe_fact_items_by_content(repaired, list_key)
     return repaired
+
+
+def _agent_repair_deal_participant_scope_from_evidence(
+    fact_graph: dict[str, Any],
+    evidence_graph: dict[str, Any],
+) -> dict[str, Any]:
+    deal_outcome = _as_dict(fact_graph.get("deal_outcome"))
+    deal_items = [dict(item) for item in _as_list(deal_outcome.get("deal_items")) if isinstance(item, dict)]
+    if not deal_items:
+        return fact_graph
+
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    for evidence in _as_list(evidence_graph.get("deal_evidence")):
+        if not isinstance(evidence, dict):
+            continue
+        evidence_ids = _event_evidence_ids(evidence)
+        if not evidence_ids:
+            raw_id = _clean_text(evidence.get("id"))
+            if raw_id:
+                evidence_ids = {raw_id}
+        for evidence_id in evidence_ids:
+            evidence_by_id[evidence_id] = evidence
+    if not evidence_by_id:
+        return fact_graph
+
+    changed = False
+    repaired_items: list[dict[str, Any]] = []
+    for item in deal_items:
+        copied = dict(item)
+        matching = [
+            evidence_by_id[evidence_id]
+            for evidence_id in _event_evidence_ids(copied)
+            if evidence_id in evidence_by_id
+        ]
+        if matching:
+            scopes = {
+                _clean_text(evidence.get("participant_scope") or evidence.get("customer_scope"))
+                for evidence in matching
+                if _clean_text(evidence.get("participant_scope") or evidence.get("customer_scope"))
+            }
+            participants = {
+                _clean_text(evidence.get("participant") or evidence.get("participant_label"))
+                for evidence in matching
+                if _clean_text(evidence.get("participant") or evidence.get("participant_label"))
+            }
+            if len(scopes) == 1:
+                scope = next(iter(scopes))
+                if scope and _clean_text(copied.get("participant_scope")) != scope:
+                    copied["participant_scope"] = scope
+                    changed = True
+            if len(participants) == 1:
+                participant = next(iter(participants))
+                if participant and _clean_text(copied.get("participant")) != participant:
+                    copied["participant"] = participant
+                    changed = True
+        repaired_items.append(copied)
+
+    if not changed:
+        return fact_graph
+    updated_deal = dict(deal_outcome)
+    updated_deal["deal_items"] = repaired_items
+    updated = dict(fact_graph)
+    updated["deal_outcome"] = updated_deal
+    return updated
 
 
 _EVIDENCE_LIST_SECTIONS = (
@@ -4894,6 +5998,16 @@ def _audit_needed(
     recommendations = _as_list(fact_graph.get("recommendations"))
     seed_recommendations = _as_list(fact_graph.get("seed_recommendations"))
     indications = _as_list(fact_graph.get("indication_candidates"))
+    if len(demands) >= 5:
+        reasons.append("many_fact_demands_need_consistency_check")
+    kept_demands: list[dict[str, Any]] = []
+    for item in demands:
+        if not isinstance(item, dict):
+            continue
+        if _agent_demand_is_duplicate(item, kept_demands):
+            reasons.append("duplicate_or_near_duplicate_fact_demands")
+            break
+        kept_demands.append(item)
     if _as_list(evidence_graph.get("customer_demand_evidence")) and not demands:
         reasons.append("demand_evidence_without_fact")
     if (demands or recommendations or seed_recommendations) and not indications:
@@ -4902,10 +6016,27 @@ def _audit_needed(
         reasons.append("recommendation_evidence_without_fact")
     if recommendations and not any(_as_list(item.get("related_demand_ids")) for item in recommendations if isinstance(item, dict)):
         reasons.append("recommendations_without_demand_links")
+    recommendation_text = _agent_join_text(recommendations, seed_recommendations)
+    if not _as_list(fact_graph.get("concerns")) and any(
+        term in recommendation_text
+        for term in ("担心", "害怕", "怕", "后遗症", "安全", "风险", "移位", "凹陷加重", "疤痕", "失败")
+    ):
+        reasons.append("worry_in_fact_recommendation_response_without_concern")
+    if len(demands) >= 2:
+        for section, items in (
+            ("recommendations", recommendations),
+            ("seed_recommendations", seed_recommendations),
+        ):
+            if any(isinstance(item, dict) and not _as_list(item.get("related_demand_ids")) for item in items):
+                reasons.append(f"{section}_partially_without_demand_links")
+                break
     if _as_list(evidence_graph.get("profile_evidence")) and not _as_list(fact_graph.get("profile_facts")):
         reasons.append("profile_evidence_without_profile_facts")
     if _as_list(evidence_graph.get("budget_evidence")) and not _as_list(fact_graph.get("budget_facts")):
         reasons.append("budget_evidence_without_budget_facts")
+    budget_text = _agent_join_text(fact_graph.get("budget_facts"))
+    if budget_text and (re.search(r"\[?\d{1,2}:\d{2}\]?", budget_text) or len(budget_text) > 700):
+        reasons.append("raw_quote_or_overlong_fact_budget")
     for item in recommendations:
         if not isinstance(item, dict):
             continue
@@ -5074,6 +6205,8 @@ _EVENT_PLAN_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ear_support", ("\u8033\u6735", "\u8033\u5782")),
     ("mole_removal", ("\u70b9\u75e3", "\u795b\u75e3", "\u53bb\u75e3")),
     ("eye_bag_tear_trough", ("\u773c\u888b", "\u6cea\u6c9f", "\u7736\u9694", "\u7736\u5916c")),
+    ("double_eyelid", ("\u53cc\u773c\u76ae", "\u5168\u5207", "\u5207\u5f00", "\u91cd\u7751", "\u57fa\u7840\u6b3e")),
+    ("eyelid_addon", ("\u63d0\u808c", "\u53bb\u76ae", "\u53bb\u8102", "\u5f00\u773c\u89d2", "\u52a0\u9879")),
     ("jawline_chin", ("\u4e0b\u988c\u7f18", "\u4e0b\u5df4", "\u4e0b\u989a")),
     ("whitening", ("\u7f8e\u767d", "\u5149\u5b50", "\u8272\u6c89", "\u9ec4\u6c14")),
 )
@@ -5232,6 +6365,65 @@ def _agent_add_optional_seed_recommendations_from_events(
     return updated
 
 
+def _agent_is_question_only_addon_recommendation(item: dict[str, Any]) -> bool:
+    plan_text = _agent_plan_text(item)
+    text = _agent_join_text(plan_text, item.get("customer_response"), item.get("evidence"))
+    if not text or not any(term in text for term in ("提肌", "去皮", "去脂", "开眼角", "加项", "升级项")):
+        return False
+    addon_is_core_plan = any(term in plan_text for term in ("提肌", "开眼角", "加项", "升级项")) or (
+        any(term in plan_text for term in ("去皮", "去脂")) and "包含" not in plan_text
+    )
+    if any(term in plan_text for term in ("双眼皮", "全切", "切开重睑", "重睑")) and not addon_is_core_plan:
+        return False
+    strong_recommend_cues = (
+        "建议加",
+        "需要加",
+        "必须加",
+        "一起做",
+        "一块做",
+        "同时做",
+        "纳入方案",
+        "方案包含",
+        "开单",
+        "下单",
+        "付款",
+        "成交",
+    )
+    if any(term in text for term in strong_recommend_cues):
+        return False
+    question_cues = (
+        "要不要",
+        "需不需要",
+        "需要不需要",
+        "多少钱",
+        "加多少",
+        "怎么收费",
+        "费用",
+        "价格",
+        "如果加",
+        "如果做",
+        "问",
+        "询问",
+    )
+    uncertain_or_explanation_cues = (
+        "看医生",
+        "医生评估",
+        "面诊评估",
+        "评估后",
+        "如果需要",
+        "不一定",
+        "看情况",
+        "到时候",
+        "可能",
+        "只是解释",
+        "解释",
+    )
+    return any(term in text for term in question_cues) and (
+        any(term in text for term in uncertain_or_explanation_cues)
+        or not any(term in text for term in ("建议", "推荐", "可以做", "做的话", "方案"))
+    )
+
+
 def _agent_demote_orphan_optional_recommendations(fact_graph: dict[str, Any]) -> dict[str, Any]:
     recommendations = [dict(item) for item in _as_list(fact_graph.get("recommendations")) if isinstance(item, dict)]
     if not recommendations:
@@ -5269,7 +6461,7 @@ def _agent_demote_orphan_optional_recommendations(fact_graph: dict[str, Any]) ->
             and body_terms
             and not has_demand_body_support
             and any(term in text for term in optional_markers)
-        )
+        ) or _agent_is_question_only_addon_recommendation(item)
         if should_demote:
             copied = dict(item)
             copied["source"] = _clean_text(copied.get("source")) or "demoted_orphan_optional_recommendation"
@@ -5301,7 +6493,7 @@ _INDICATION_CURRENT_SUPPORT_TERMS: dict[str, tuple[str, ...]] = {
     "松弛下垂": ("松弛", "下垂", "紧致", "提升", "抗衰", "热玛吉", "超声炮"),
     "紧致淡纹": ("细纹", "干纹", "淡纹", "皱纹", "紧致", "抗衰"),
     "纹路": ("法令纹", "纹路", "皱纹", "细纹", "干纹", "淡纹"),
-    "塑美": ("塑形", "支撑", "提升", "鼻", "下颌", "下巴", "轮廓", "英伦", "大O", "耳", "眉弓", "双C", "唇", "嘴"),
+    "塑美": ("塑形", "支撑", "提升", "鼻", "下颌", "下巴", "轮廓", "英伦", "大O", "耳", "眉弓", "双C", "唇", "嘴", "内颊", "中面部", "面中部", "苹果肌", "面颊"),
     "面部填充": ("填充", "凹陷", "轮廓", "苹果肌", "太阳穴", "额颞", "泪沟", "口基底", "鼻基底"),
     "双眼皮": ("双眼皮", "开扇", "平扇", "眼尾", "去皮", "去脂", "提肌", "开眼角"),
 }
@@ -5336,6 +6528,7 @@ def _agent_indication_body_specific_terms(item: dict[str, Any]) -> list[str]:
         "眉": ("眉弓", "眉尾", "眉眼"),
         "双C": ("双C", "眶外C", "C线"),
         "唇": ("唇", "唇部", "嘴唇", "嘴巴", "口周"),
+        "内颊": ("内颊", "中面部", "面中部", "苹果肌", "面颊", "脸颊", "法令纹", "鼻唇沟"),
     }
     for key, values in body_synonyms.items():
         if key in body:
@@ -5361,6 +6554,9 @@ def _agent_prune_seed_only_indications(fact_graph: dict[str, Any]) -> dict[str, 
     kept: list[dict[str, Any]] = []
     changed = False
     for item in candidates:
+        if _clean_text(item.get("adjudication_reason")):
+            kept.append(item)
+            continue
         body_terms = _agent_indication_body_specific_terms(item)
         if body_terms:
             has_body_current_support = any(term in current_context for term in body_terms)
@@ -5542,6 +6738,7 @@ def _apply_event_graph_constraints(fact_graph: dict[str, Any], event_graph: dict
         return fact_graph
 
     updated = dict(fact_graph)
+    has_plan_adjudication = isinstance(updated.get("_recommendation_adjudication"), dict)
     allowed_keys = _event_plan_keys_by_type(event_graph, _EVENT_CURRENT_PLAN_TYPES | _EVENT_DEAL_TYPES)
     seed_keys = _event_plan_keys_by_type(event_graph, _EVENT_SEED_PLAN_TYPES)
     optional_seed_keys = _optional_seed_plan_keys(event_graph)
@@ -5549,37 +6746,71 @@ def _apply_event_graph_constraints(fact_graph: dict[str, Any], event_graph: dict
     blocked_keys = _event_plan_keys_by_type(event_graph, _EVENT_BLOCKED_PLAN_TYPES)
     blocked_keys -= optional_seed_keys
 
-    recommendations: list[dict[str, Any]] = []
-    demoted_seeds: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
-    for item in _normalize_fact_item_list(updated.get("recommendations")):
-        keys = _event_item_keys(item)
-        if _event_key_sets_match(keys, blocked_keys) and not _event_key_sets_match(keys, allowed_keys):
-            rejected.append({"source_id": item.get("id") or item.get("source_id") or "", "reason": "blocked_by_event_graph"})
-            continue
-        if _event_key_sets_match(keys, seed_keys) and not _event_key_sets_match(keys, allowed_keys):
-            copied = dict(item)
-            copied["event_graph_demoted"] = True
-            demoted_seeds.append(copied)
-            continue
-        recommendations.append(item)
+    if not has_plan_adjudication:
+        recommendations: list[dict[str, Any]] = []
+        demoted_seeds: list[dict[str, Any]] = []
+        for item in _normalize_fact_item_list(updated.get("recommendations")):
+            keys = _event_item_keys(item)
+            if _event_key_sets_match(keys, blocked_keys) and not _event_key_sets_match(keys, allowed_keys):
+                rejected.append({"source_id": item.get("id") or item.get("source_id") or "", "reason": "blocked_by_event_graph"})
+                continue
+            if _event_key_sets_match(keys, seed_keys) and not _event_key_sets_match(keys, allowed_keys):
+                copied = dict(item)
+                copied["event_graph_demoted"] = True
+                demoted_seeds.append(copied)
+                continue
+            recommendations.append(item)
 
-    seed_recommendations: list[dict[str, Any]] = []
-    seen_seed_keys: set[str] = set()
-    for item in [*_normalize_fact_item_list(updated.get("seed_recommendations")), *demoted_seeds]:
-        keys = _event_item_keys(item)
-        if _event_key_sets_match(keys, blocked_keys) and not _event_key_sets_match(keys, seed_keys | allowed_keys):
-            rejected.append({"source_id": item.get("id") or item.get("source_id") or "", "reason": "blocked_by_event_graph"})
-            continue
-        key = "|".join(sorted(keys))
-        if key and key in seen_seed_keys:
-            continue
-        if key:
-            seen_seed_keys.add(key)
-        seed_recommendations.append(item)
+        seed_recommendations: list[dict[str, Any]] = []
+        seen_seed_keys: set[str] = set()
+        for item in [*_normalize_fact_item_list(updated.get("seed_recommendations")), *demoted_seeds]:
+            keys = _event_item_keys(item)
+            if _event_key_sets_match(keys, blocked_keys) and not _event_key_sets_match(keys, seed_keys | allowed_keys):
+                rejected.append({"source_id": item.get("id") or item.get("source_id") or "", "reason": "blocked_by_event_graph"})
+                continue
+            key = "|".join(sorted(keys))
+            if key and key in seen_seed_keys:
+                continue
+            if key:
+                seen_seed_keys.add(key)
+            seed_recommendations.append(item)
 
-    updated["recommendations"] = recommendations
-    updated["seed_recommendations"] = seed_recommendations
+        updated["recommendations"] = recommendations
+        updated["seed_recommendations"] = seed_recommendations
+    else:
+        # The dedicated plan adjudication agent is usually stronger than the
+        # event graph, but it can occasionally promote customer question /
+        # explanation events (for example eyelid add-on price questions) into
+        # current recommendations.  Keep the adjudication output, while still
+        # honoring event-level hard negatives when the same plan has no current
+        # or deal event support.
+        recommendations = []
+        demoted_seeds = []
+        for item in _normalize_fact_item_list(updated.get("recommendations")):
+            keys = _event_item_keys(item)
+            if _event_key_sets_match(keys, blocked_keys) and not _event_key_sets_match(keys, allowed_keys):
+                copied = dict(item)
+                copied["event_graph_demoted"] = True
+                copied["source"] = _clean_text(copied.get("source")) or "demoted_blocked_event_after_plan_adjudication"
+                if not _clean_text(copied.get("customer_response")):
+                    copied["customer_response"] = "未明确回应"
+                demoted_seeds.append(copied)
+                rejected.append({"source_id": item.get("id") or item.get("source_id") or "", "reason": "blocked_by_event_graph_after_plan_adjudication"})
+                continue
+            recommendations.append(item)
+        if demoted_seeds:
+            seed_recommendations = _normalize_fact_item_list(updated.get("seed_recommendations"))
+            seen_seed_keys = {_compact_key_text(_agent_item_content(item)) for item in seed_recommendations if _agent_item_content(item)}
+            for item in demoted_seeds:
+                key = _compact_key_text(_agent_item_content(item))
+                if key and key in seen_seed_keys:
+                    continue
+                seed_recommendations.append(item)
+                if key:
+                    seen_seed_keys.add(key)
+            updated["recommendations"] = recommendations
+            updated["seed_recommendations"] = seed_recommendations
     if rejected:
         adjudication = _as_dict(updated.get("_recommendation_adjudication"))
         existing = _as_list(adjudication.get("rejected_recommendations"))
@@ -5626,9 +6857,85 @@ def _extract_final_result_audit(parsed: dict[str, Any]) -> tuple[dict[str, Any],
     return audit, patch if isinstance(patch, dict) else None
 
 
-def _apply_final_result_audit_patch(result: dict[str, Any], patch: dict[str, Any] | None) -> dict[str, Any]:
+def _agent_remove_result_concerns_flagged_by_final_audit(result: dict[str, Any], audit: dict[str, Any] | None) -> bool:
+    if not isinstance(audit, dict):
+        return False
+    issue_texts: list[str] = []
+    for issue in _as_list(audit.get("issues")):
+        if not isinstance(issue, dict):
+            continue
+        issue_type = _clean_text(issue.get("type"))
+        issue_blob = _agent_join_text(issue_type, issue.get("description"), issue.get("evidence"))
+        if not issue_blob:
+            continue
+        if (
+            "unsupported_concern" in issue_type
+            or "无证据顾虑" in issue_blob
+            or ("顾虑" in issue_blob and any(term in issue_blob for term in ("无证据", "缺乏证据", "未找到", "无法找到")))
+        ):
+            issue_texts.append(issue_blob)
+    if not issue_texts:
+        return False
+    combined_issue_text = _agent_join_text(issue_texts)
+    combined_issue_key = _compact_key_text(combined_issue_text)
+    changed = False
+
+    concern_block = result.get("customer_concerns")
+    if isinstance(concern_block, dict):
+        kept: list[dict[str, Any]] = []
+        for item in [dict(raw) for raw in _as_list(concern_block.get("items")) if isinstance(raw, dict)]:
+            text = _first_text(item, "content", "concern", "text", "summary")
+            key = _compact_key_text(text)
+            if text and (text in combined_issue_text or (key and key in combined_issue_key)):
+                changed = True
+                continue
+            kept.append(item)
+        if changed:
+            concern_block["items"] = kept
+            concern_block["summary"] = "；".join(
+                _first_text(item, "content", "concern", "text", "summary")
+                for item in kept
+                if _first_text(item, "content", "concern", "text", "summary")
+            )
+
+    consultation_result = result.get("consultation_result")
+    deal_factors = consultation_result.get("deal_factors") if isinstance(consultation_result, dict) else None
+    if isinstance(deal_factors, dict):
+        kept_concerns: list[Any] = []
+        for raw in _as_list(deal_factors.get("concerns")):
+            text = _first_text(raw, "content", "concern", "text", "summary") if isinstance(raw, dict) else _clean_text(raw)
+            key = _compact_key_text(text)
+            if text and (text in combined_issue_text or (key and key in combined_issue_key)):
+                changed = True
+                continue
+            kept_concerns.append(raw)
+        if len(kept_concerns) != len(_as_list(deal_factors.get("concerns"))):
+            deal_factors["concerns"] = kept_concerns
+
+    return changed
+
+
+def _apply_final_result_audit_patch(
+    result: dict[str, Any], patch: dict[str, Any] | None, audit: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not patch:
-        return result
+        updated = dict(result)
+        changed = _agent_remove_result_concerns_flagged_by_final_audit(updated, audit)
+        if changed:
+            debug = updated.setdefault("staged_pipeline_debug", {})
+            if isinstance(debug, dict):
+                debug["agent_final_result_audit_repaired"] = True
+        return updated
+
+    def merge_dicts(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in incoming.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = merge_dicts(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
     updated = dict(result)
     replaceable_sections = {
         "customer_primary_demands",
@@ -5643,7 +6950,9 @@ def _apply_final_result_audit_patch(result: dict[str, Any], patch: dict[str, Any
     for section in replaceable_sections:
         value = patch.get(section)
         if isinstance(value, dict):
-            updated[section] = value
+            existing = updated.get(section)
+            updated[section] = merge_dicts(existing, value) if isinstance(existing, dict) else value
+    _agent_remove_result_concerns_flagged_by_final_audit(updated, audit)
     debug = updated.setdefault("staged_pipeline_debug", {})
     if isinstance(debug, dict):
         debug["agent_final_result_audit_repaired"] = True
@@ -5676,9 +6985,24 @@ def _final_result_audit_needed(
 
     concern_items = _as_list(_as_dict(analysis_result.get("customer_concerns")).get("items"))
     recommendation_items = [dict(item) for item in _as_list(_as_dict(analysis_result.get("staff_recommendations")).get("items")) if isinstance(item, dict)]
+    seed_recommendation_items = [
+        dict(item)
+        for item in _as_list(_as_dict(analysis_result.get("staff_seed_recommendations")).get("items"))
+        if isinstance(item, dict)
+    ]
     recommendation_text = _agent_join_text(recommendation_items)
     if not concern_items and any(term in recommendation_text for term in ("担心", "害怕", "怕", "后遗症", "安全", "风险", "移位", "凹陷加重", "疤痕")):
         reasons.append("worry_in_recommendation_response_without_concern")
+
+    deal_outcome = _as_dict(_as_dict(analysis_result.get("consultation_result")).get("deal_outcome"))
+    deal_items = _as_list(deal_outcome.get("deal_items"))
+    deal_status = _clean_text(deal_outcome.get("status"))
+    if (deal_status == "已成交" or deal_items) and not recommendation_items:
+        reasons.append("deal_outcome_without_displayed_recommendations")
+    if _as_list(fact_graph.get("recommendations")) and not recommendation_items:
+        reasons.append("fact_recommendations_lost_in_rendered_result")
+    if _as_list(fact_graph.get("seed_recommendations")) and not seed_recommendation_items:
+        reasons.append("fact_seed_recommendations_lost_in_rendered_result")
 
     valid_priorities = {
         int(item.get("priority") or 0)
@@ -6182,6 +7506,7 @@ def analyze_transcript_agent(
     fact_graph = _merge_profile_facts_from_evidence_graph(fact_graph, evidence_graph)
     fact_graph = _agent_repair_fact_graph(fact_graph, evidence_graph)
     fact_graph = _apply_event_graph_constraints(fact_graph, event_graph)
+    candidate_indications = _agent_merge_candidate_indications_from_fact_graph(candidate_indications, fact_graph)
 
     plan_call_count = 0
     if _as_list(evidence_graph.get("recommendation_evidence")) or _as_list(fact_graph.get("recommendations")) or _as_list(fact_graph.get("seed_recommendations")):
@@ -6209,14 +7534,14 @@ def analyze_transcript_agent(
     else:
         plan_adjudication = {"skipped": True, "reason": "no recommendation evidence or recommendation facts"}
 
-    indication_user_prompt = _INDICATION_ADJUDICATION_USER_TEMPLATE.format(
+    indication_user_prompt = _AGENT_INDICATION_ADJUDICATION_USER_TEMPLATE.format(
         fact_graph=_compact_for_prompt(_compact_fact_graph_for_indications(fact_graph), max_chars=14000),
         candidate_indications=_compact_for_prompt(candidate_indications, max_chars=12000),
     )
     try:
         indication_parsed = _call_agent(
             "indication_adjudication",
-            _INDICATION_ADJUDICATION_SYSTEM_PROMPT,
+            _AGENT_INDICATION_ADJUDICATION_SYSTEM_PROMPT,
             indication_user_prompt,
             max_tokens=8000,
         )
@@ -6260,16 +7585,17 @@ def analyze_transcript_agent(
                 fact_graph = _apply_audit_repair(fact_graph, corrected_fact_graph)
                 fact_graph = _agent_repair_fact_graph(fact_graph, evidence_graph)
                 fact_graph = _apply_event_graph_constraints(fact_graph, event_graph)
+                candidate_indications = _agent_merge_candidate_indications_from_fact_graph(candidate_indications, fact_graph)
                 # Re-run indication adjudication after fact repair so SAP indications
                 # match the final fact graph.
-                repaired_indication_user_prompt = _INDICATION_ADJUDICATION_USER_TEMPLATE.format(
+                repaired_indication_user_prompt = _AGENT_INDICATION_ADJUDICATION_USER_TEMPLATE.format(
                     fact_graph=_compact_for_prompt(_compact_fact_graph_for_indications(fact_graph), max_chars=14000),
                     candidate_indications=_compact_for_prompt(candidate_indications, max_chars=12000),
                 )
                 indication_after_audit_count = 1
                 repaired_indication = _call_agent(
                     "indication_adjudication_after_audit",
-                    _INDICATION_ADJUDICATION_SYSTEM_PROMPT,
+                    _AGENT_INDICATION_ADJUDICATION_SYSTEM_PROMPT,
                     repaired_indication_user_prompt,
                     max_tokens=8000,
                 )
@@ -6295,7 +7621,16 @@ def analyze_transcript_agent(
     fact_graph = _agent_fill_missing_fact_evidence_from_events(fact_graph, event_graph)
     fact_graph = _agent_prune_seed_only_indications(fact_graph)
     analysis_result = _build_analysis_result_from_fact_graph(fact_graph, raw, allow_raw_augmentation=False)
-    analysis_result = _agent_finalize_analysis_result(analysis_result, context=f"{corrected_dialogue}\n{dialogue}")
+    analysis_result = _agent_finalize_analysis_result(
+        analysis_result,
+        context=f"{corrected_dialogue}\n{dialogue}",
+        allow_indication_backfill=False,
+    )
+    analysis_result = _agent_restore_missing_display_recommendations(
+        analysis_result,
+        fact_graph=fact_graph,
+        raw=raw,
+    )
     final_audit_call_count = 0
     final_audit_required, final_audit_reasons = _final_result_audit_needed(
         analysis_result,
@@ -6323,9 +7658,18 @@ def analyze_transcript_agent(
             )
             final_audit, analysis_result_patch = _extract_final_result_audit(final_audit_parsed)
             final_audit["trigger_reasons"] = final_audit_reasons
-            if final_audit.get("revision_required") and analysis_result_patch:
-                analysis_result = _apply_final_result_audit_patch(analysis_result, analysis_result_patch)
-                analysis_result = _agent_finalize_analysis_result(analysis_result, context=f"{corrected_dialogue}\n{dialogue}")
+            if final_audit.get("revision_required"):
+                analysis_result = _apply_final_result_audit_patch(analysis_result, analysis_result_patch, audit=final_audit)
+                analysis_result = _agent_finalize_analysis_result(
+                    analysis_result,
+                    context=f"{corrected_dialogue}\n{dialogue}",
+                    allow_indication_backfill=False,
+                )
+                analysis_result = _agent_restore_missing_display_recommendations(
+                    analysis_result,
+                    fact_graph=fact_graph,
+                    raw=raw,
+                )
         except Exception as exc:
             logger.warning("agent final result audit failed, using pre-audit analysis_result: %s", exc)
             final_audit = {"error": str(exc), "revision_required": False, "issues": [], "trigger_reasons": final_audit_reasons}

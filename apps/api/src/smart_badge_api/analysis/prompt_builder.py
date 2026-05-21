@@ -106,6 +106,72 @@ def _build_hotword_list(groups: list[HotwordGroup]) -> str:
     return "\n".join(lines)
 
 
+def _hotword_group_is_asr_correction_enabled(group: HotwordGroup) -> bool:
+    if _is_auto_mined_hotword_group(group):
+        return False
+    descriptor = f"{group.group_type or ''} {group.name or ''} {group.source_label or ''}".casefold()
+    markers = (
+        "材料",
+        "品牌",
+        "项目",
+        "治疗",
+        "医疗",
+        "部位",
+        "竞品",
+        "brand",
+        "material",
+        "project",
+        "treatment",
+        "medical",
+        "body",
+        "competitor",
+    )
+    return any(marker.casefold() in descriptor for marker in markers)
+
+
+def _build_asr_correction_hotwords(groups: list[HotwordGroup], *, max_terms: int = 3000) -> list[dict[str, object]]:
+    """Build full hotword payload for local ASR correction candidate recall.
+
+    This is not sent directly to the LLM. The Agent pipeline selects a compact
+    per-recording candidate subset from this payload.
+    """
+
+    entries: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for group in sorted(groups, key=lambda item: (str(item.group_type or ""), item.name or "")):
+        if not _hotword_group_is_asr_correction_enabled(group):
+            continue
+        active_words = sorted(
+            (word for word in group.words if word.is_active),
+            key=lambda item: (-int(item.weight or 0), item.word),
+        )
+        for word in active_words:
+            term = _clean_text(word.word)
+            if not term:
+                continue
+            key = term.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(
+                {
+                    "term": term,
+                    "weight": int(word.weight or 0),
+                    "group_name": group.name or "",
+                    "group_type": group.group_type or "",
+                    "source_label": group.source_label or "",
+                }
+            )
+            if len(entries) >= max_terms:
+                return entries
+    return entries
+
+
+async def build_asr_correction_hotwords(db: AsyncSession) -> list[dict[str, object]]:
+    groups = await _load_hotword_groups(db)
+    return _build_asr_correction_hotwords(groups)
+
+
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
 

@@ -20,6 +20,7 @@ from smart_badge_api.analysis.consultation_evaluation import (
     rebuild_consultation_process_evaluation,
 )
 from smart_badge_api.analysis.extraction_prompts import SYSTEM_PROMPT as FALLBACK_SYSTEM_PROMPT
+from smart_badge_api.analysis.hotword_correction import select_asr_correction_hotword_candidates
 from smart_badge_api.analysis.llm_client import chat_completion, parse_json_response
 from smart_badge_api.analysis.pipeline import sanitize_analysis_result_with_raw
 from smart_badge_api.analysis.reference_data import load_analysis_reference_data
@@ -1328,8 +1329,12 @@ def _has_jawline_injection_support_context(text: str) -> bool:
 def _has_lip_current_context(text: str) -> bool:
     has_lip = _has_any_text(text, ("唇", "嘴唇", "嘴巴"))
     has_plan = _has_any_text(text, ("填充", "塑形", "调整", "打", "玻尿酸", "丰唇"))
+    has_current_confirmation = _has_any_text(
+        text,
+        ("本次", "今天", "这次", "我打胶没问题", "可以给你安排", "马上给你安排", "马上安排", "已成交", "付款", "缴费"),
+    )
     has_defer = _has_any_text(text, ("不建议", "先不要", "现在不", "以后", "后续", "过一个多月", "一两个月", "再看", "暂缓"))
-    return has_lip and has_plan and not has_defer
+    return has_lip and has_plan and (has_current_confirmation or not has_defer)
 
 
 def _is_concern_like_text(text: str) -> bool:
@@ -1600,6 +1605,10 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
         "鼻基底" in text and not _has_nose_axis_injection_context(text)
     ):
         add("面部填充", "面部")
+    if any(term in text for term in ("卧蚕", "泪沟", "眼下", "眼周", "眶下", "胶原蛋白", "双美", "嗨体", "福曼")) and any(
+        term in text for term in ("填充", "玻尿酸", "胶原", "嗨体", "福曼", "双美", "注射", "打", "支")
+    ):
+        add("塑美", "眼部")
     if any(term in text for term in ("泪沟", "下巴", "颏部", "太阳穴填充", "胶原蛋白", "双美")) and any(
         term in text for term in ("填充", "玻尿酸", "胶原", "瑞德喜", "支")
     ):
@@ -1617,13 +1626,17 @@ def _map_common_indication_from_text(text: str) -> list[dict[str, str]]:
     if any(term in text for term in ("额区", "上庭窄", "上庭偏窄")):
         add("塑美", "额区")
     if any(term in text for term in ("点痣", "祛痣", "色素痣")) or ("痣" in text and any(term in text for term in ("点", "去除", "祛", "包干", "复发"))):
-        if "眼" in text:
+        matched_mole_body = False
+        if any(term in text for term in ("眼睑", "眼周", "眼角", "眼皮", "眼下", "下眼睑", "上眼睑")):
             add("祛痣/祛疣", "眼部")
-        elif "颈" in text:
+            matched_mole_body = True
+        if any(term in text for term in ("颈部", "脖子", "颈纹")):
             add("祛痣/祛疣", "颈部")
-        elif "身体" in text:
+            matched_mole_body = True
+        if any(term in text for term in ("身体", "躯干", "后背", "背部", "腹部", "胸部", "手臂", "腿部")):
             add("祛痣/祛疣", "身体")
-        else:
+            matched_mole_body = True
+        if any(term in text for term in ("面部", "脸上", "脸部", "面颊", "鼻", "额头", "下巴", "嘴边", "唇周")) or not matched_mole_body:
             add("祛痣/祛疣", "面部")
     if any(term in text for term in ("鼻基底", "鼻头", "鼻翼", "鼻尖", "鼻小柱", "鼻中下段", "鼻中段", "鼻下段", "鼻中轴", "鼻中轴线", "三角结构")) and any(
         term in text for term in ("玻尿酸", "定彩", "注射", "支撑", "填充", "塑形", "抬高", "拉高", "纵深")
@@ -1754,6 +1767,7 @@ def _indication_supported_by_context(row: dict[str, str], context: str) -> bool:
                 "外颊": ("外颊", "颧弓", "颧骨外侧", "外轮廓线"),
                 "下颌轮廓线": ("下颌轮廓", "下颌缘", "下颌角", "下颌线", "下划线", "下颌角拐点", "耳前", "耳后", "韧带", "外轮廓", "颈阔肌", "轮廓线"),
                 "眉弓线": ("眉弓", "眉弓线", "眉尾"),
+                "眼部": ("卧蚕", "泪沟", "眼下", "眼周", "眶下", "下眼睑", "眼部"),
                 "鼻额衔接线": ("鼻额", "山根", "鼻额衔接"),
                 "鼻中轴线": ("鼻基底", "鼻头", "鼻翼", "鼻尖", "鼻中轴", "鼻中轴线", "鼻小柱", "鼻中下段", "鼻中段", "鼻下段", "鼻梁", "鼻背", "山根", "三角结构"),
                 "耳部": ("耳部", "耳朵", "耳垂", "耳基底"),
@@ -1931,6 +1945,14 @@ def _resolve_indications(fact_graph: dict[str, Any]) -> list[dict[str, str]]:
         if _should_drop_indication(row, item_context):
             continue
         append(row, item_evidence, item_context, bool(item.get("force_include")))
+
+    if adjudicated and not selected:
+        try:
+            selected_count = int(adjudication.get("selected_count") or 0)
+        except (TypeError, ValueError):
+            selected_count = 0
+        if selected_count > 0:
+            return selected
 
     fallback_rows = _map_common_indication_from_text(current_context)
     if not adjudicated:
@@ -3887,6 +3909,8 @@ def _item_matches_participant(item: dict[str, Any], participant: dict[str, str],
         return include_shared
     if scope != participant["scope"]:
         return False
+    if scope == "primary_customer":
+        return True
     if not label:
         return True
     return _participant_key(scope, label) == participant["key"]
@@ -4526,6 +4550,7 @@ def _apply_correction_patch(
 
 def _build_preprocess_context(dialogue: str, staff_context: dict[str, Any] | None) -> dict[str, Any]:
     candidate_rows = _candidate_indications_from_text(dialogue, max_items=25)
+    staff_context = staff_context or {}
     term_hints: list[str] = []
     for term in (
         "眶外C线",
@@ -4553,12 +4578,24 @@ def _build_preprocess_context(dialogue: str, staff_context: dict[str, Any] | Non
     ):
         if term in dialogue:
             term_hints.append(term)
-    return {
-        "staff_context": staff_context or {},
+    context = {
+        "staff_context": staff_context,
         "dialogue_chars": len(dialogue),
         "term_hints": term_hints,
         "candidate_indication_hints": _format_candidate_indications(candidate_rows[:12]),
     }
+    hotword_candidates = select_asr_correction_hotword_candidates(
+        dialogue,
+        staff_context.get("asr_correction_hotwords"),
+        max_candidates=60,
+    )
+    if hotword_candidates:
+        context["asr_hotword_correction_candidates"] = hotword_candidates
+        context["asr_hotword_correction_note"] = (
+            "候选来自系统热词库的本录音召回结果，仅用于 ASR 局部纠错参考；"
+            "必须结合上下文和置信度判断，不能因为候选存在就强行替换。"
+        )
+    return context
 
 
 def _estimate_payload_chars(value: object) -> int:

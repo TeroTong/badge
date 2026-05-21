@@ -1,6 +1,8 @@
 from smart_badge_api.analysis.agent_pipeline import (
     _PLAN_AGENT_SYSTEM_PROMPT,
     _PLAN_AGENT_USER_TEMPLATE,
+    _agent_preserve_deferred_seed_recommendations,
+    _apply_event_graph_constraints,
 )
 
 
@@ -53,3 +55,49 @@ def test_plan_prompt_avoids_over_specific_body_part_exceptions() -> None:
     assert "结构支撑、注射填充、光电、皮肤管理、手术等不同项目按同一原则裁决" in _PLAN_AGENT_SYSTEM_PROMPT
     assert "下颌角拐点 structural support" not in _PLAN_AGENT_SYSTEM_PROMPT
     assert "current nasal-axis structural recommendations" not in _PLAN_AGENT_SYSTEM_PROMPT
+
+
+def test_plan_adjudication_prevents_old_deferred_seed_from_being_reintroduced() -> None:
+    fact_graph = {
+        "recommendations": [],
+        "seed_recommendations": [{"content": "隐痕精雕眼周收紧"}],
+        "_recommendation_adjudication": {"notes": ["plan agent already adjudicated"]},
+    }
+    evidence_graph = {
+        "recommendation_evidence": [
+            {
+                "content": "玻尿酸或胶原填充泪沟作为后期补充方案",
+                "implementation_notes": "后期仍有凹陷可考虑再做",
+                "participant_scope": "primary_customer",
+            }
+        ]
+    }
+    repaired = _agent_preserve_deferred_seed_recommendations(fact_graph, evidence_graph)
+    assert [item["content"] for item in repaired["seed_recommendations"]] == ["隐痕精雕眼周收紧"]
+
+
+def test_plan_adjudicated_recommendations_are_not_reclassified_by_event_constraints() -> None:
+    fact_graph = {
+        "recommendations": [
+            {
+                "id": "R1",
+                "content": "眶外C线注射调整作为第一步优化脸型",
+                "body_part": "眶外C线",
+            }
+        ],
+        "seed_recommendations": [],
+        "_recommendation_adjudication": {"notes": ["plan agent kept this as current recommendation"]},
+    }
+    event_graph = {
+        "plan_events": [
+            {
+                "id": "EV_P1",
+                "event_type": "seed_recommendation",
+                "plan": "眶外C线注射调整",
+                "body_part": "眶外C线",
+            }
+        ]
+    }
+    constrained = _apply_event_graph_constraints(fact_graph, event_graph)
+    assert constrained["recommendations"] == fact_graph["recommendations"]
+    assert constrained["seed_recommendations"] == []

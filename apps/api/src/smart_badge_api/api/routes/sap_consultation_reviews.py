@@ -11,7 +11,7 @@ from sqlalchemy import String, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from smart_badge_api.analysis.reference_data import resolve_indication_reference_item
+from smart_badge_api.analysis.reference_data import load_analysis_reference_data, resolve_indication_reference_item
 from smart_badge_api.api.deps import get_current_user, get_db
 from smart_badge_api.core.config import get_settings
 from smart_badge_api.db.models import (
@@ -102,6 +102,32 @@ class SapReviewBlockUpdateIn(BaseModel):
     editable_text: str
 
 
+class SapReviewIndicationOptionOut(BaseModel):
+    department_code: str
+    department_name: str
+    indication_code: str
+    indication_name: str
+    body_part_code: str
+    body_part_name: str
+    indication_note: str = ""
+
+
+class SapReviewIndicationUpdateItemIn(BaseModel):
+    CCKS: str | None = None
+    CCSYZ: str | None = None
+    CCBW: str | None = None
+    department_code: str | None = None
+    department_name: str | None = None
+    indication_code: str | None = None
+    indication_name: str | None = None
+    body_part_code: str | None = None
+    body_part_name: str | None = None
+
+
+class SapReviewIndicationsUpdateIn(BaseModel):
+    items: list[SapReviewIndicationUpdateItemIn] = []
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -174,10 +200,28 @@ async def _ensure_staff_has_visit_recording(db: AsyncSession, visit_id: str, sta
         raise HTTPException(404, "SAP 回写记录不存在或当前账号无权查看")
 
 
+def _payload_snapshot_has_manual_indications(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    snapshots = review.payload_snapshot if isinstance(review.payload_snapshot, list) else []
+    return any(isinstance(item, dict) and bool(item.get("_manual_indications")) for item in snapshots)
+
+
+def _review_has_user_indication_edits(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    if _payload_snapshot_has_manual_indications(review):
+        return True
+    return any(
+        isinstance(item, dict) and bool(item.get("_manual"))
+        for item in (review.indication_payload if isinstance(review.indication_payload, list) else [])
+    )
+
+
 def _review_has_user_edits(review: SapConsultationReview | None) -> bool:
     if review is None:
         return False
-    return any(
+    return _review_has_user_indication_edits(review) or any(
         isinstance(block, dict) and str(block.get("edited_body") or "").strip()
         for block in (review.blocks if isinstance(review.blocks, list) else [])
     )
@@ -338,6 +382,100 @@ def _compose_review_text(blocks: list[dict[str, Any]], *, generated: bool = Fals
             continue
         parts.append("\n".join(part for part in (header, body) if part).strip())
     return "\n\n".join(parts).strip()
+
+
+def _normalize_review_indication_payload(
+    payload: list[dict[str, Any]] | None,
+    *,
+    manual: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in payload or []:
+        if not isinstance(raw, dict):
+            continue
+        matched = resolve_indication_reference_item(
+            department_code=str(raw.get("CCKS") or raw.get("department_code") or "").strip(),
+            department_name=str(raw.get("department_name") or "").strip(),
+            indication_code=str(raw.get("CCSYZ") or raw.get("indication_code") or "").strip(),
+            indication_name=str(raw.get("indication_name") or "").strip(),
+            body_part_code=str(raw.get("CCBW") or raw.get("body_part_code") or "").strip(),
+            body_part_name=str(raw.get("body_part_name") or "").strip(),
+        )
+        if matched is None:
+            continue
+        key = (matched.department_code, matched.indication_code, matched.body_part_code)
+        if key in seen:
+            continue
+        seen.add(key)
+        row = {
+            "CCKS": matched.department_code,
+            "CCSYZ": matched.indication_code,
+            "CCBW": matched.body_part_code,
+            "department_code": matched.department_code,
+            "department_name": matched.department_name,
+            "indication_code": matched.indication_code,
+            "indication_name": matched.indication_name,
+            "body_part_code": matched.body_part_code,
+            "body_part_name": matched.body_part_name,
+        }
+        if manual or bool(raw.get("_manual")):
+            row["_manual"] = True
+        rows.append(row)
+    return rows
+
+
+def _sap_tab_syz_from_indication_payload(payload: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in _normalize_review_indication_payload(payload):
+        key = (
+            str(item.get("CCKS") or item.get("department_code") or "").strip(),
+            str(item.get("CCSYZ") or item.get("indication_code") or "").strip(),
+            str(item.get("CCBW") or item.get("body_part_code") or "").strip(),
+        )
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        rows.append({"CCKS": key[0], "CCSYZ": key[1], "CCBW": key[2]})
+    return rows
+
+
+def _indication_code_keys(payload: list[dict[str, Any]] | None) -> list[tuple[str, str, str]]:
+    return [
+        (
+            str(item.get("CCKS") or item.get("department_code") or "").strip(),
+            str(item.get("CCSYZ") or item.get("indication_code") or "").strip(),
+            str(item.get("CCBW") or item.get("body_part_code") or "").strip(),
+        )
+        for item in _normalize_review_indication_payload(payload)
+    ]
+
+
+def _apply_indications_to_payload_snapshot(
+    payloads: list[dict[str, Any]],
+    indication_payload: list[dict[str, Any]],
+    *,
+    manual: bool,
+) -> list[dict[str, Any]]:
+    if not payloads:
+        return payloads
+    first = payloads[0]
+    if not isinstance(first, dict):
+        return payloads
+    tab_syz = _sap_tab_syz_from_indication_payload(indication_payload)
+    zxxx = first.get("zxxx") if isinstance(first.get("zxxx"), dict) else {}
+    payloads[0] = {
+        **first,
+        "TAB_SYZ": tab_syz,
+        "zxxx": {
+            **zxxx,
+            "FLG_NEW_SYZ": "X" if tab_syz else "",
+        },
+    }
+    if manual:
+        payloads[0]["_manual_indications"] = True
+    return payloads
 
 
 async def _load_latest_push_logs_for_visits(db: AsyncSession, visit_ids: list[str]) -> dict[str, SapPushLog]:
@@ -607,7 +745,20 @@ async def _ensure_review(
     payloads = list(preview.get("payloads") or [])
     if payloads and isinstance(payloads[0], dict):
         payloads[0] = {**payloads[0], "text": effective_text}
-    indication_payload = list((payloads[0] or {}).get("TAB_SYZ") or []) if payloads else []
+    generated_indication_payload = _normalize_review_indication_payload(
+        list((payloads[0] or {}).get("TAB_SYZ") or []) if payloads else []
+    )
+    manual_indications = _review_has_user_indication_edits(existing)
+    indication_payload = (
+        _normalize_review_indication_payload(list(existing.indication_payload or []), manual=True)
+        if existing is not None and manual_indications
+        else generated_indication_payload
+    )
+    payloads = _apply_indications_to_payload_snapshot(
+        payloads,
+        indication_payload,
+        manual=manual_indications,
+    )
 
     now = _utcnow()
     is_new = existing is None
@@ -638,10 +789,10 @@ async def _ensure_review(
             setattr(existing, key, value)
         existing.updated_by_staff_id = current_staff_id
         existing.updated_at = now
-        if any(block.get("edited_body") for block in blocks):
-            existing.status = "modified"
-        elif preserve_status and previous_status:
+        if preserve_status and previous_status:
             existing.status = previous_status
+        elif any(block.get("edited_body") for block in blocks) or manual_indications:
+            existing.status = "modified"
         elif existing.status not in {"modified", "pushed"}:
             existing.status = "pending"
 
@@ -899,6 +1050,35 @@ async def list_sap_consultation_reviews(
     return make_page_response(items, int(total or 0), page, page_size)
 
 
+@router.get("/indication-options", response_model=list[SapReviewIndicationOptionOut])
+async def list_sap_review_indication_options(
+    current_user: User = Depends(get_current_user),
+):
+    _current_staff_id(current_user)
+    reference_data = load_analysis_reference_data()
+    rows = sorted(
+        reference_data.indication_catalog_by_code_triplet.values(),
+        key=lambda item: (
+            item.department_code,
+            item.body_part_code,
+            item.indication_code,
+            item.indication_name,
+        ),
+    )
+    return [
+        SapReviewIndicationOptionOut(
+            department_code=item.department_code,
+            department_name=item.department_name,
+            indication_code=item.indication_code,
+            indication_name=item.indication_name,
+            body_part_code=item.body_part_code,
+            body_part_name=item.body_part_name,
+            indication_note=item.indication_note,
+        )
+        for item in rows
+    ]
+
+
 @router.get("/visits/{visit_id}", response_model=SapReviewDetailOut)
 async def get_sap_consultation_review(
     visit_id: str,
@@ -952,7 +1132,7 @@ async def update_sap_consultation_review_block(
     review.blocks = blocks
     review.effective_text = _compose_review_text(blocks, generated=False)
     latest_log = (await _load_latest_push_logs_for_visits(db, [visit_id])).get(visit_id)
-    if any(isinstance(block, dict) and str(block.get("edited_body") or "").strip() for block in blocks):
+    if any(isinstance(block, dict) and str(block.get("edited_body") or "").strip() for block in blocks) or _review_has_user_indication_edits(review):
         review.status = "modified"
     elif _review_effective_text_matches_push_log(review, latest_log) and str(
         summarize_sap_push_log_result(latest_log).get("effective_status") if latest_log else ""
@@ -965,6 +1145,40 @@ async def update_sap_consultation_review_block(
     review.updated_at = _utcnow()
     await db.commit()
     await db.refresh(review)
+    return _detail_out(review, current_staff_id=staff_id, latest_log=latest_log)
+
+
+@router.patch("/visits/{visit_id}/indications", response_model=SapReviewDetailOut)
+async def update_sap_consultation_review_indications(
+    visit_id: str,
+    body: SapReviewIndicationsUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    staff_id = _current_staff_id(current_user)
+    review = await _ensure_review(db, visit_id, current_staff_id=staff_id)
+    current_payload = _normalize_review_indication_payload(list(review.indication_payload or []))
+    next_payload = _normalize_review_indication_payload(
+        [item.model_dump() for item in body.items],
+        manual=True,
+    )
+    if _indication_code_keys(current_payload) == _indication_code_keys(next_payload) and _review_has_user_indication_edits(review):
+        raise HTTPException(400, "适应症未修改，无需保存")
+    if _indication_code_keys(current_payload) == _indication_code_keys(next_payload) and not _review_has_user_indication_edits(review):
+        raise HTTPException(400, "适应症未修改，无需保存")
+
+    review.indication_payload = next_payload
+    review.payload_snapshot = _apply_indications_to_payload_snapshot(
+        list(review.payload_snapshot or []),
+        next_payload,
+        manual=True,
+    )
+    review.status = "modified"
+    review.updated_by_staff_id = staff_id
+    review.updated_at = _utcnow()
+    await db.commit()
+    await db.refresh(review)
+    latest_log = (await _load_latest_push_logs_for_visits(db, [visit_id])).get(visit_id)
     return _detail_out(review, current_staff_id=staff_id, latest_log=latest_log)
 
 

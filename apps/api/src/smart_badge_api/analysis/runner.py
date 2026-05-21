@@ -8,12 +8,13 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, update
 
 from smart_badge_api.analysis.customer_profile_score_sync import refresh_recording_profile_scores_for_current_context
 from smart_badge_api.analysis.production import analyze_transcript_for_production
-from smart_badge_api.analysis.prompt_builder import build_system_prompt
+from smart_badge_api.analysis.prompt_builder import build_asr_correction_hotwords, build_system_prompt
 from smart_badge_api.analysis.transcript import load_transcript
 from smart_badge_api.api.ws_hub import task_hub
 from smart_badge_api.core.config import get_settings
@@ -29,7 +30,7 @@ _VISIT_SCOPED_ANALYSIS_STEM_PATTERN = re.compile(r"^recording_(?P<recording_id>[
 def _run_analysis_sync(
     file_path: str,
     system_prompt: str | None = None,
-    staff_context: dict[str, str] | None = None,
+    staff_context: dict[str, Any] | None = None,
 ) -> dict:
     return analyze_transcript_for_production(
         file_path,
@@ -57,7 +58,7 @@ async def _resolve_recording_hospital_code(db, recording_id: str | None) -> str 
     ).scalar_one_or_none()
 
 
-async def _resolve_recording_staff_context(db, recording_id: str | None, file_path: str) -> dict[str, str]:
+async def _resolve_recording_staff_context(db, recording_id: str | None, file_path: str) -> dict[str, Any]:
     context = {
         "file_name": Path(file_path).name,
         "staff_name": "",
@@ -206,6 +207,9 @@ async def execute_analysis(task_id: str) -> None:
             hospital_code = await _resolve_recording_hospital_code(db, recording_id)
             system_prompt = await build_system_prompt(db, hospital_code=hospital_code)
             staff_context = await _resolve_recording_staff_context(db, recording_id, resolved_path)
+            asr_correction_hotwords = await build_asr_correction_hotwords(db)
+            if asr_correction_hotwords:
+                staff_context["asr_correction_hotwords"] = asr_correction_hotwords
 
         source_path = Path(resolved_path)
         if not source_path.exists():

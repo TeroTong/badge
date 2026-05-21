@@ -57,6 +57,16 @@ export type SapReviewIndication = {
   [key: string]: unknown
 }
 
+export type SapReviewIndicationOption = {
+  department_code: string
+  department_name: string
+  indication_code: string
+  indication_name: string
+  body_part_code: string
+  body_part_name: string
+  indication_note: string
+}
+
 export type SapReviewDetail = SapReviewListItem & {
   generated_text: string
   effective_text: string
@@ -95,10 +105,22 @@ export function fetchSapConsultationReview(visitId: string) {
   return api.get(`sap-consultation-reviews/visits/${visitId}`).json<SapReviewDetail>()
 }
 
+export function fetchSapReviewIndicationOptions() {
+  return api.get('sap-consultation-reviews/indication-options').json<SapReviewIndicationOption[]>()
+}
+
 export function updateSapConsultationReviewBlock(visitId: string, recordingId: string, editableText: string) {
   return api
     .patch(`sap-consultation-reviews/visits/${visitId}/blocks/${recordingId}`, {
       json: { editable_text: editableText },
+    })
+    .json<SapReviewDetail>()
+}
+
+export function updateSapConsultationReviewIndications(visitId: string, items: SapReviewIndication[]) {
+  return api
+    .patch(`sap-consultation-reviews/visits/${visitId}/indications`, {
+      json: { items },
     })
     .json<SapReviewDetail>()
 }

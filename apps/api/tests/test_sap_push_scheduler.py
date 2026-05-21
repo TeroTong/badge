@@ -665,3 +665,162 @@ def test_auto_push_skips_pending_review_when_newer_success_exists(monkeypatch) -
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_auto_push_skips_review_with_saved_manual_remark(monkeypatch) -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        monkeypatch.setattr("smart_badge_api.sap_push_scheduler._session_factory", session_factory)
+
+        try:
+            stable_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            async with session_factory() as db:
+                customer = Customer(id="cust001", name="customer")
+                visit = Visit(
+                    id="visit001",
+                    customer_id=customer.id,
+                    external_visit_order_no="DZ001",
+                    external_visit_order_seg="110",
+                )
+                recording = Recording(
+                    id="rec001",
+                    visit_id=visit.id,
+                    file_name="demo.mp3",
+                    file_path="/tmp/demo.mp3",
+                    status="analyzed",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                link = RecordingVisitLink(
+                    recording_id=recording.id,
+                    visit_id=visit.id,
+                    is_primary=True,
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                task = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="/tmp/recording_rec001.json",
+                    status="done",
+                    result={"consultation_result": {}},
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                    completed_at=stable_at,
+                )
+                review = SapConsultationReview(
+                    id="review001",
+                    visit_id=visit.id,
+                    visit_order_no="DZ001",
+                    visit_order_seg="110",
+                    recording_ids=[recording.id],
+                    blocks=[
+                        {
+                            "recording_id": recording.id,
+                            "generated_body": "system",
+                            "edited_body": "manual",
+                            "effective_body": "manual",
+                        }
+                    ],
+                    generated_text="system",
+                    effective_text="manual",
+                    payload_snapshot=[{"text": "manual"}],
+                    status="modified",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                db.add_all([customer, visit, recording, link, task, review])
+                await db.commit()
+
+                assert await _find_auto_push_candidate_refs(10) == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_auto_push_skips_review_with_saved_manual_indications(monkeypatch) -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        monkeypatch.setattr("smart_badge_api.sap_push_scheduler._session_factory", session_factory)
+
+        try:
+            stable_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            async with session_factory() as db:
+                customer = Customer(id="cust001", name="customer")
+                visit = Visit(
+                    id="visit001",
+                    customer_id=customer.id,
+                    external_visit_order_no="DZ001",
+                    external_visit_order_seg="110",
+                )
+                recording = Recording(
+                    id="rec001",
+                    visit_id=visit.id,
+                    file_name="demo.mp3",
+                    file_path="/tmp/demo.mp3",
+                    status="analyzed",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                link = RecordingVisitLink(
+                    recording_id=recording.id,
+                    visit_id=visit.id,
+                    is_primary=True,
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                task = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="/tmp/recording_rec001.json",
+                    status="done",
+                    result={"consultation_result": {}},
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                    completed_at=stable_at,
+                )
+                review = SapConsultationReview(
+                    id="review001",
+                    visit_id=visit.id,
+                    visit_order_no="DZ001",
+                    visit_order_seg="110",
+                    recording_ids=[recording.id],
+                    blocks=[
+                        {
+                            "recording_id": recording.id,
+                            "generated_body": "system",
+                            "edited_body": None,
+                            "effective_body": "system",
+                        }
+                    ],
+                    generated_text="system",
+                    effective_text="system",
+                    indication_payload=[
+                        {"CCKS": "Y2", "CCSYZ": "SYZ2001", "CCBW": "BW2005", "_manual": True}
+                    ],
+                    payload_snapshot=[
+                        {"text": "system", "TAB_SYZ": [{"CCKS": "Y2", "CCSYZ": "SYZ2001", "CCBW": "BW2005"}], "_manual_indications": True}
+                    ],
+                    status="modified",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                db.add_all([customer, visit, recording, link, task, review])
+                await db.commit()
+
+                assert await _find_auto_push_candidate_refs(10) == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

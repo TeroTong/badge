@@ -3033,6 +3033,55 @@ async def _load_review_effective_consultation_text(db: AsyncSession, visit_id: s
     return str(review or "").strip()
 
 
+def _review_snapshot_has_manual_indications(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    snapshots = review.payload_snapshot if isinstance(review.payload_snapshot, list) else []
+    return any(isinstance(item, dict) and bool(item.get("_manual_indications")) for item in snapshots)
+
+
+def _review_has_manual_indications(review: SapConsultationReview | None) -> bool:
+    if review is None:
+        return False
+    if _review_snapshot_has_manual_indications(review):
+        return True
+    return any(
+        isinstance(item, dict) and bool(item.get("_manual"))
+        for item in (review.indication_payload if isinstance(review.indication_payload, list) else [])
+    )
+
+
+def _normalize_review_sap_indication_rows(payload: list | None) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in payload or []:
+        if not isinstance(raw, dict):
+            continue
+        department_code = str(raw.get("CCKS") or raw.get("department_code") or "").strip()
+        indication_code = str(raw.get("CCSYZ") or raw.get("indication_code") or "").strip()
+        body_part_code = str(raw.get("CCBW") or raw.get("body_part_code") or "").strip()
+        key = (department_code, indication_code, body_part_code)
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        rows.append({"CCKS": department_code, "CCSYZ": indication_code, "CCBW": body_part_code})
+    return rows
+
+
+async def _load_review_manual_sap_indication_rows(db: AsyncSession, visit_id: str | None) -> list[dict[str, str]] | None:
+    normalized_visit_id = str(visit_id or "").strip()
+    if not normalized_visit_id:
+        return None
+    review = (
+        await db.execute(
+            select(SapConsultationReview).where(SapConsultationReview.visit_id == normalized_visit_id)
+        )
+    ).scalar_one_or_none()
+    if review is None or not _review_has_manual_indications(review):
+        return None
+    return _normalize_review_sap_indication_rows(list(review.indication_payload or []))
+
+
 def _visit_order_lookup_key(dzdh: str | None, dzseg: str | None) -> tuple[str, str | None] | None:
     visit_order_no = str(dzdh or "").strip()
     if not visit_order_no:
@@ -3874,6 +3923,11 @@ async def generate_sap_consultation_payloads(
             sap_summary_config=summary_config,
             consultation_text_override=consultation_text_override,
         )
+        manual_indication_rows = await _load_review_manual_sap_indication_rows(db, visit.id)
+        if manual_indication_rows is not None:
+            payload["TAB_SYZ"] = manual_indication_rows
+            if isinstance(payload.get("zxxx"), dict):
+                payload["zxxx"]["FLG_NEW_SYZ"] = "X" if manual_indication_rows else ""
         payloads.append(payload)
         targets.append(
             {
