@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import String, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,15 +34,18 @@ from smart_badge_api.sap_consultation import (
     generate_sap_consultation_payloads,
 )
 from smart_badge_api.sap_push_service import (
+    EXISTING_CONSULTATION_MANUAL_MESSAGE,
     SapPushPreparationError,
     create_sap_push_log,
     execute_sap_push_log,
+    is_existing_consultation_manual_required_log,
     serialize_sap_push_log,
     summarize_sap_push_log_result,
 )
 from smart_badge_api.task_queue import dispatch_sap_push_log
 
 router = APIRouter(prefix="/sap-consultation-reviews", tags=["sap-consultation-reviews"])
+_IGNORED_PUSH_LOG_STATUSES = {"canceled"}
 
 
 class SapReviewBlockOut(BaseModel):
@@ -128,6 +131,19 @@ class SapReviewIndicationsUpdateIn(BaseModel):
     items: list[SapReviewIndicationUpdateItemIn] = []
 
 
+class SapReviewPushIn(BaseModel):
+    confirm_existing_consultation_overwrite: bool = False
+
+
+def _requires_existing_consultation_overwrite_confirmation(
+    status: str,
+    body: SapReviewPushIn | None,
+) -> bool:
+    if str(status or "").strip() != "existing_consultation":
+        return False
+    return not bool(body.confirm_existing_consultation_overwrite if body is not None else False)
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -152,7 +168,8 @@ def _status_filter_matches(status: str, status_filter: str) -> bool:
         "pending": {"pending", "not_generated"},
         "sending": {"sending", "modified_sending"},
         "succeeded": {"succeeded", "modified_succeeded"},
-        "failed": {"failed", "modified_failed"},
+        "failed": {"failed", "modified_failed", "existing_consultation"},
+        "existing_consultation": {"existing_consultation"},
         "modified_pending": {"modified_pending"},
         "skipped": {"skipped"},
     }
@@ -250,6 +267,8 @@ def _status_from_review_and_log(
             if effective_status == "failed":
                 return "modified_failed", "已修改回传失败", summary.get("effective_reason"), last_activity
         return "modified_pending", "已修改未回传", None, last_activity
+    if is_existing_consultation_manual_required_log(latest_log):
+        return "existing_consultation", "已有咨询单", EXISTING_CONSULTATION_MANUAL_MESSAGE, last_activity
     if effective_status in {"queued", "prepared", "sending"}:
         return "sending", "回传中", None, last_activity
     if review is not None and review.status == "pending" and not latest_log_matches_review:
@@ -332,9 +351,14 @@ def _extract_request_text_from_push_log(push_log: SapPushLog | None) -> str:
     return ""
 
 
+def _normalize_review_text_for_matching(value: str) -> str:
+    lines = [line.strip() for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
 def _review_effective_text_matches_push_log(review: SapConsultationReview | None, push_log: SapPushLog | None) -> bool:
-    review_text = str(getattr(review, "effective_text", "") or "").strip()
-    push_text = _extract_request_text_from_push_log(push_log)
+    review_text = _normalize_review_text_for_matching(str(getattr(review, "effective_text", "") or ""))
+    push_text = _normalize_review_text_for_matching(_extract_request_text_from_push_log(push_log))
     return bool(review_text and push_text and review_text == push_text)
 
 
@@ -452,6 +476,10 @@ def _indication_code_keys(payload: list[dict[str, Any]] | None) -> list[tuple[st
     ]
 
 
+def _indication_code_key_set(payload: list[dict[str, Any]] | None) -> set[tuple[str, str, str]]:
+    return set(_indication_code_keys(payload))
+
+
 def _apply_indications_to_payload_snapshot(
     payloads: list[dict[str, Any]],
     indication_payload: list[dict[str, Any]],
@@ -491,6 +519,8 @@ async def _load_latest_push_logs_for_visits(db: AsyncSession, visit_ids: list[st
     ).scalars().all()
     by_visit: dict[str, SapPushLog] = {}
     for log in logs:
+        if str(log.status or "").strip() in _IGNORED_PUSH_LOG_STATUSES:
+            continue
         if log.visit_id and log.visit_id not in by_visit:
             by_visit[log.visit_id] = log
     return by_visit
@@ -629,6 +659,8 @@ async def _load_next_auto_push_times_for_visits(
         latest_log_status = str(
             summarize_sap_push_log_result(latest_log).get("effective_status") if latest_log is not None else ""
         ).strip() or str(getattr(latest_log, "status", "") or "").strip()
+        if is_existing_consultation_manual_required_log(latest_log):
+            continue
         if has_user_edits and (
             latest_log is None
             or not _review_effective_text_matches_push_log(review, latest_log)
@@ -666,12 +698,37 @@ async def _load_push_log_for_serialization(db: AsyncSession, push_log_id: str | 
     ).scalar_one_or_none()
 
 
+def _effective_push_log_status(push_log: SapPushLog | None) -> str:
+    if push_log is None:
+        return ""
+    summary = summarize_sap_push_log_result(push_log)
+    return str(summary.get("effective_status") or push_log.status or "").strip()
+
+
+async def _status_for_readonly_review_refresh(
+    db: AsyncSession,
+    visit_id: str,
+    *,
+    previous_status: str,
+) -> str:
+    normalized_previous_status = str(previous_status or "").strip()
+    if normalized_previous_status:
+        return normalized_previous_status
+
+    latest_log = (await _load_latest_push_logs_for_visits(db, [visit_id])).get(visit_id)
+    latest_status = _effective_push_log_status(latest_log)
+    if latest_status:
+        return str(getattr(latest_log, "status", "") or latest_status).strip() or latest_status
+    return "pending"
+
+
 async def _ensure_review(
     db: AsyncSession,
     visit_id: str,
     *,
     current_staff_id: str,
     preserve_status: bool = False,
+    mark_pending_on_system_change: bool = True,
 ) -> SapConsultationReview:
     await _ensure_staff_has_visit_recording(db, visit_id, current_staff_id)
     visit = await db.get(Visit, visit_id)
@@ -789,11 +846,15 @@ async def _ensure_review(
             setattr(existing, key, value)
         existing.updated_by_staff_id = current_staff_id
         existing.updated_at = now
-        if preserve_status and previous_status:
-            existing.status = previous_status
+        if preserve_status:
+            existing.status = await _status_for_readonly_review_refresh(
+                db,
+                visit_id,
+                previous_status=previous_status,
+            )
         elif any(block.get("edited_body") for block in blocks) or manual_indications:
             existing.status = "modified"
-        elif existing.status not in {"modified", "pushed"}:
+        elif mark_pending_on_system_change and existing.status not in {"modified", "pushed"}:
             existing.status = "pending"
 
     await db.commit()
@@ -1086,7 +1147,13 @@ async def get_sap_consultation_review(
     current_user: User = Depends(get_current_user),
 ):
     staff_id = _current_staff_id(current_user)
-    review = await _ensure_review(db, visit_id, current_staff_id=staff_id, preserve_status=True)
+    review = await _ensure_review(
+        db,
+        visit_id,
+        current_staff_id=staff_id,
+        preserve_status=True,
+        mark_pending_on_system_change=False,
+    )
     latest_log = (await _load_latest_push_logs_for_visits(db, [visit_id])).get(visit_id)
     return _detail_out(review, current_staff_id=staff_id, latest_log=latest_log)
 
@@ -1100,7 +1167,13 @@ async def update_sap_consultation_review_block(
     current_user: User = Depends(get_current_user),
 ):
     staff_id = _current_staff_id(current_user)
-    review = await _ensure_review(db, visit_id, current_staff_id=staff_id)
+    review = await _ensure_review(
+        db,
+        visit_id,
+        current_staff_id=staff_id,
+        preserve_status=True,
+        mark_pending_on_system_change=False,
+    )
     blocks = list(review.blocks or [])
     updated = False
     for block in blocks:
@@ -1156,15 +1229,19 @@ async def update_sap_consultation_review_indications(
     current_user: User = Depends(get_current_user),
 ):
     staff_id = _current_staff_id(current_user)
-    review = await _ensure_review(db, visit_id, current_staff_id=staff_id)
+    review = await _ensure_review(
+        db,
+        visit_id,
+        current_staff_id=staff_id,
+        preserve_status=True,
+        mark_pending_on_system_change=False,
+    )
     current_payload = _normalize_review_indication_payload(list(review.indication_payload or []))
     next_payload = _normalize_review_indication_payload(
         [item.model_dump() for item in body.items],
         manual=True,
     )
-    if _indication_code_keys(current_payload) == _indication_code_keys(next_payload) and _review_has_user_indication_edits(review):
-        raise HTTPException(400, "适应症未修改，无需保存")
-    if _indication_code_keys(current_payload) == _indication_code_keys(next_payload) and not _review_has_user_indication_edits(review):
+    if _indication_code_key_set(current_payload) == _indication_code_key_set(next_payload):
         raise HTTPException(400, "适应症未修改，无需保存")
 
     review.indication_payload = next_payload
@@ -1185,15 +1262,24 @@ async def update_sap_consultation_review_indications(
 @router.post("/visits/{visit_id}/push")
 async def push_sap_consultation_review(
     visit_id: str,
+    body: SapReviewPushIn | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     staff_id = _current_staff_id(current_user)
-    review = await _ensure_review(db, visit_id, current_staff_id=staff_id)
+    review = await _ensure_review(
+        db,
+        visit_id,
+        current_staff_id=staff_id,
+        preserve_status=True,
+        mark_pending_on_system_change=False,
+    )
     latest_log = (await _load_latest_push_logs_for_visits(db, [visit_id])).get(visit_id)
     status, _status_label, _error, _last_push_at = _status_from_review_and_log(review, latest_log)
-    if status not in {"modified_pending", "modified_failed"}:
+    if status not in {"modified_pending", "modified_failed", "existing_consultation"}:
         raise HTTPException(422, "咨询备注未修改，无需手动提交回传")
+    if _requires_existing_consultation_overwrite_confirmation(status, body):
+        raise HTTPException(409, "SAP 已存在咨询单，手动回传可能覆盖原 SAP 咨询备注，请二次确认后再提交")
     recording_id = next((str(block.get("recording_id") or "") for block in review.blocks or [] if isinstance(block, dict)), "")
     if not recording_id:
         raise HTTPException(422, "缺少可用于回传的录音")

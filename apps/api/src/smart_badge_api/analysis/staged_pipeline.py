@@ -142,6 +142,9 @@ Fact graph rules:
    clearly makes them today's main demand.
 6. Extract concrete details when present: brand, material, dosage, price, course,
    treatment steps, implementation notes, and customer response.
+   Keep the recommendation text itself concise: write the core plan/conclusion in
+   recommendation/product_or_solution, and put brand, material, dosage, price,
+   course, steps, and execution notes into their structured fields.
 7. concerns and deal_factors must be concrete. Avoid vague labels like
    "treatment condition limitation" without the actual limitation.
 8. budget_facts are only the main customer's explicit budget, acceptable amount,
@@ -165,7 +168,7 @@ Fact graph rules:
     瑞德喜, 艾维岚, 艾拉斯提, 贝丽菲尔, 双美胶原蛋白.
 12. If a plan contains dosage, brand, material, price, course, or sequence, put
     those details into the structured fields instead of leaving the recommendation
-    as a short generic phrase.
+    as a short generic phrase or an overloaded long sentence.
 13. For recommendations vs seed_recommendations, judge by relation to the
     customer's current demand. A staged sequence that completes the current goal
     remains a recommendation even if it says "later/afterwards"; a plan belongs
@@ -285,10 +288,12 @@ Hard rules:
 3. Do not correct normal filler words or everyday chat.
 4. If unsure, put the item in uncertain_notes instead of correcting it.
 5. First infer a stable role for each ASR speaker id in speaker_role_map.
-   The same asr_speaker should normally keep one business role across the
-   transcript. Use line-level speaker_corrections only for true exceptions
-   such as diarization errors, mixed speakers, or a different person taking
-   over the same ASR speaker id.
+   Current role, speaker label, badge-owner label, and local heuristics are
+   weak priors only. Badge recordings may mark a doctor near the badge as the
+   badge owner, or may merge the real badge wearer/consultant with the customer
+   side. If one asr_speaker contains mixed real speakers, do not force one
+   stable role for all of its lines; use line-level speaker_corrections for the
+   clearly staff/doctor/customer lines.
 6. Also infer a stable participant label and customer_scope for each ASR
    speaker id. This is critical when two or more customers/companions are
    present. Use:
@@ -306,10 +311,18 @@ Hard rules:
 8. A professional explanation about anatomy, treatment steps, dosage, risks,
    case photos, or recommended plans is usually consultant/doctor/staff, not
    customer, unless surrounding turns clearly show the customer is speaking.
+   If a speaker continuously gives doctor-style diagnosis, mechanism,
+   injection level/point/material/dosage, risk and treatment-path decisions,
+   while another staff-side speaker confirms, records, guides, or asks follow-up
+   questions, prefer doctor for the first speaker even if it is currently
+   labeled as badge owner/consultant.
 9. A person self-identifying as expert assistant / doctor assistant / dean
    assistant should not be labeled doctor.
 10. Customer speech usually contains personal goals, feelings, hesitation,
-   budget/price questions, consent/refusal, or follow-up questions.
+    budget/price questions, consent/refusal, or follow-up questions.
+    A customer-labeled line that refers to the current customer in third person
+    ("姐姐/妹妹/顾客刚刚做了..."), says "我们都记了", asks "还有什么想问我的吗",
+    or says "我们去看看/带您去看" is usually staff/consultant, not customer.
 11. Term corrections must be local string replacements within one line. Correct
    only when the replacement is strongly supported by nearby context.
 
@@ -3145,6 +3158,11 @@ def _is_treatment_project_without_prior_history_context(value: str, evidence: st
         "填过",
         "治疗过",
         "做了",
+        "做的",
+        "做完",
+        "刚做",
+        "刚刚做",
+        "才做",
         "打了",
         "割过",
         "隆过",
@@ -3457,7 +3475,13 @@ def _append_profile_tags_from_raw(tags: list[dict[str, Any]], raw: dict[str, Any
         value = "长沙艺星" if "艺星" in comparison_evidence else comparison_evidence
         _append_profile_tag(tags, "对比机构", value, comparison_evidence)
 
-    history_evidence = _first_raw_evidence_matching(raw, (r"(做过|打过|填过|治疗过|维养).{0,20}(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电)", r"(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电).{0,20}(做过|打过|填过|治疗过|维养)"))
+    history_evidence = _first_raw_evidence_matching(
+        raw,
+        (
+            r"(?:刚刚|刚|才|最近|之前|以前|上次|去年|今年|已经)?(?:做过|做了|做的|做完|刚做|刚做的|打过|打了|填过|治疗过|维养).{0,20}(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电)",
+            r"(水光|玻尿酸|胶原|肉毒|热玛吉|超声炮|黄金微针|光电).{0,20}(?:做过|做了|做的|做完|刚做|刚做的|打过|打了|填过|治疗过|维养|不影响)",
+        ),
+    )
     if history_evidence:
         project_type = _classify_history_treatment_project(history_evidence)
         material = _extract_history_material_name(history_evidence)
@@ -4269,12 +4293,12 @@ def _extract_correction_patch(parsed: dict[str, Any]) -> dict[str, Any]:
 
 def _raw_speaker_key_from_segment(segment: dict[str, Any]) -> str:
     for key in (
+        "speaker_id",
+        "speaker",
         "asr_original_speaker_id",
         "asr_original_speaker",
-        "speaker_id",
         "speaker_label",
         "speaker_display_label",
-        "speaker",
         "role",
     ):
         value = _clean_text(segment.get(key))
@@ -4428,6 +4452,155 @@ def _replace_line_speaker_role(line: str, role: str) -> str:
     return f"{match.group(1)}{normalized_role}{match.group(3)}{match.group(4)}"
 
 
+_AUTO_ROLE_CUSTOMER_SIDE_STAFF_CUES = (
+    "姐姐刚刚做",
+    "姐姐刚做",
+    "妹妹刚刚做",
+    "妹妹刚做",
+    "顾客刚刚做",
+    "顾客刚做",
+    "客户刚刚做",
+    "客户刚做",
+    "我们都记了",
+    "想问我的吗",
+    "还有什么想问",
+    "我们就去看看",
+    "那我们去看看",
+    "带您去看",
+    "带你去看",
+)
+_AUTO_ROLE_DOCTOR_EXPLANATION_CUES = (
+    "深层填充",
+    "骨头表面",
+    "骨性",
+    "层次",
+    "注射",
+    "玻尿酸",
+    "童颜针",
+    "内侧苹果肌",
+    "鼻基底",
+    "法令纹",
+    "材料",
+    "不含玻尿酸",
+    "发黄",
+    "馒化",
+    "用量",
+    "每边",
+    "两支",
+    "一支",
+    "固定",
+    "提升",
+    "收紧",
+)
+
+
+def _line_role_and_compact_text(line: str) -> tuple[str, str]:
+    match = re.match(r"^\[[^\]]+\]\s*([^:：\n]+)[:：]\s*(.*)$", line)
+    if not match:
+        return "", re.sub(r"\s+", "", line)
+    return match.group(1).strip(), re.sub(r"\s+", "", match.group(2))
+
+
+def _line_has_customer_side_staff_cue(line: str) -> bool:
+    role, compact_text = _line_role_and_compact_text(line)
+    if not role or not any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")):
+        return False
+    return any(cue in compact_text for cue in _AUTO_ROLE_CUSTOMER_SIDE_STAFF_CUES)
+
+
+def _line_has_doctor_explanation_cue(line: str) -> bool:
+    role, compact_text = _line_role_and_compact_text(line)
+    if not role or not any(term in role for term in ("咨询师", "工牌本人", "专家", "助理", "员工")):
+        return False
+    return sum(cue in compact_text for cue in _AUTO_ROLE_DOCTOR_EXPLANATION_CUES) >= 2
+
+
+def _auto_repair_speaker_roles(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+    explicit_role_map_speakers: set[str],
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Add conservative role repairs for common badge diarization failures.
+
+    This is intentionally narrow: only when another customer-side speaker already
+    contains clear staff/consultant wording do we reinterpret a doctor-like
+    badge-owner speaker as doctor.
+    """
+    repaired = dict(lines)
+    repairs: list[dict[str, Any]] = []
+    has_mixed_customer_staff = any(_line_has_customer_side_staff_cue(line) for line in lines.values())
+    if not has_mixed_customer_staff:
+        return repaired, repairs
+
+    speaker_stats: dict[str, dict[str, Any]] = {}
+    for line_id, line in lines.items():
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if not asr_speaker or asr_speaker in explicit_role_map_speakers:
+            continue
+        role, compact_text = _line_role_and_compact_text(line)
+        label = _clean_text(metadata.get("speaker_label"))
+        if "工牌本人" not in line and "工牌本人" not in label:
+            continue
+        if not any(term in role for term in ("咨询师", "工牌本人", "员工", "专家助理")):
+            continue
+        stat = speaker_stats.setdefault(asr_speaker, {"line_ids": [], "doctor_hits": 0, "chars": 0})
+        stat["line_ids"].append(line_id)
+        stat["chars"] += len(compact_text)
+        if _line_has_doctor_explanation_cue(line):
+            stat["doctor_hits"] += 1
+
+    doctor_like_speakers = {
+        speaker
+        for speaker, stat in speaker_stats.items()
+        if int(stat.get("doctor_hits") or 0) >= 4 and int(stat.get("chars") or 0) >= 80
+    }
+    for line_id, line in list(repaired.items()):
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if asr_speaker in doctor_like_speakers:
+            before = repaired[line_id]
+            repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
+            if before != repaired[line_id]:
+                repairs.append(
+                    {
+                        "line_id": line_id,
+                        "asr_speaker": asr_speaker,
+                        "display_speaker": "医生",
+                        "reason": "badge_owner_speaker_has_doctor_explanation_and_customer_side_staff_cues",
+                    }
+                )
+            continue
+        if _line_has_customer_side_staff_cue(line):
+            before = repaired[line_id]
+            repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "咨询师")
+            if before != repaired[line_id]:
+                repairs.append(
+                    {
+                        "line_id": line_id,
+                        "asr_speaker": asr_speaker,
+                        "display_speaker": "咨询师",
+                        "reason": "customer_labeled_line_contains_staff_consultant_cue",
+                    }
+                )
+    return repaired, repairs
+
+
+def _customer_side_speakers_with_staff_cues(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+) -> set[str]:
+    speakers: set[str] = set()
+    for line_id, line in lines.items():
+        if not _line_has_customer_side_staff_cue(line):
+            continue
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if asr_speaker:
+            speakers.add(asr_speaker)
+    return speakers
+
+
 def _apply_correction_patch(
     numbered_dialogue: str,
     line_map: dict[str, str],
@@ -4439,6 +4612,7 @@ def _apply_correction_patch(
     applied_speaker: list[dict[str, Any]] = []
     applied_terms: list[dict[str, Any]] = []
     skipped_terms: list[dict[str, Any]] = []
+    skipped_speaker_maps: list[dict[str, Any]] = []
 
     for item in _as_list(patch.get("term_corrections")):
         if not isinstance(item, dict):
@@ -4461,6 +4635,7 @@ def _apply_correction_patch(
         applied_terms.append(item)
 
     role_map: dict[str, dict[str, Any]] = {}
+    mixed_staff_speakers = _customer_side_speakers_with_staff_cues(lines, line_metadata)
     for item in _as_list(patch.get("speaker_role_map")):
         if not isinstance(item, dict):
             continue
@@ -4472,6 +4647,15 @@ def _apply_correction_patch(
         except (TypeError, ValueError):
             confidence_value = 0.0
         if not asr_speaker or not role or confidence_value < 0.65:
+            continue
+        if asr_speaker in mixed_staff_speakers and role in {"customer", "companion"}:
+            skipped_speaker_maps.append(
+                {
+                    **item,
+                    "asr_speaker": asr_speaker,
+                    "skip_reason": "speaker_contains_customer_side_staff_cues; use line-level corrections instead",
+                }
+            )
             continue
         participant_label = _clean_text(item.get("participant_label") or item.get("display_speaker") or item.get("speaker_label"))
         customer_scope = _clean_text(item.get("customer_scope") or item.get("participant_scope"))
@@ -4506,6 +4690,8 @@ def _apply_correction_patch(
                     }
                 )
 
+    lines, auto_speaker_repairs = _auto_repair_speaker_roles(lines, line_metadata, set(role_map))
+
     speaker_notes: dict[str, str] = {}
     for item in _as_list(patch.get("speaker_corrections")):
         if not isinstance(item, dict):
@@ -4538,8 +4724,10 @@ def _apply_correction_patch(
     metadata = {
         "applied_speaker_role_map": applied_speaker_maps,
         "applied_speaker_corrections": applied_speaker,
+        "skipped_speaker_role_maps": skipped_speaker_maps,
         "applied_term_corrections": applied_terms,
         "skipped_term_corrections": skipped_terms,
+        "auto_speaker_role_repairs": auto_speaker_repairs,
         "uncertain_notes": _as_list(patch.get("uncertain_notes")),
         "input_line_count": len(line_map),
         "speaker_role_map": list(role_map.values()),

@@ -1,6 +1,6 @@
 import { CheckCircleOutlined, DeleteOutlined, PlusOutlined, RightOutlined, SearchOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { message } from 'antd'
+import { message, Modal } from 'antd'
 import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -28,8 +28,8 @@ const CONSULTATION_FIELDS = [
   { key: 'chiefComplaint', label: '顾客主诉', rows: 2 },
   { key: 'budget', label: '本次预算', rows: 1 },
   { key: 'concerns', label: '顾客顾虑', rows: 2 },
-  { key: 'recommendedPlan', label: '推荐方案', rows: 5 },
-  { key: 'seedPlan', label: '种草方案', rows: 4 },
+  { key: 'recommendedPlan', label: '推荐方案', rows: 8 },
+  { key: 'seedPlan', label: '种草方案', rows: 6 },
   { key: 'summary', label: '总结信息', rows: 6 },
 ] as const
 const STATUS_FILTER_OPTIONS = [
@@ -38,6 +38,7 @@ const STATUS_FILTER_OPTIONS = [
   { value: 'sending', label: '回传中' },
   { value: 'succeeded', label: '回传成功' },
   { value: 'failed', label: '回传失败' },
+  { value: 'existing_consultation', label: '已有咨询单' },
   { value: 'modified_pending', label: '已修改未回传' },
 ] as const
 
@@ -86,7 +87,7 @@ function formatTranscriptSpeaker(value: string | null | undefined) {
 
 function statusClass(status: string) {
   if (status === 'succeeded' || status === 'modified_succeeded') return 'wc-chip wc-chip--green'
-  if (status === 'failed' || status === 'modified_failed') return 'wc-chip wc-chip--red'
+  if (status === 'failed' || status === 'modified_failed' || status === 'existing_consultation') return 'wc-chip wc-chip--red'
   if (status === 'sending' || status === 'modified_sending') return 'wc-chip wc-chip--blue'
   if (status === 'not_generated') return 'wc-chip wc-chip--blue'
   if (status === 'pending') return 'wc-chip wc-chip--amber'
@@ -115,6 +116,7 @@ function recordingNamesText(item: SapReviewListItem) {
 }
 
 function pushInfoText(item: SapReviewListItem) {
+  if (item.status === 'existing_consultation') return '需手动回传'
   const isCurrentSuccess = item.status === 'succeeded' || item.status === 'modified_succeeded'
   if (isCurrentSuccess && item.last_success_push_at) {
     const suffix = item.last_push_consultation_no ? `｜咨询单 ${item.last_push_consultation_no}` : ''
@@ -182,8 +184,8 @@ function indicationOptionToPayload(option: SapReviewIndicationOption): SapReview
 }
 
 function sameIndicationList(left: SapReviewIndication[], right: SapReviewIndication[]) {
-  const leftKeys = left.map(indicationCodeKey)
-  const rightKeys = right.map(indicationCodeKey)
+  const leftKeys = Array.from(new Set(left.map(indicationCodeKey).filter(Boolean))).sort()
+  const rightKeys = Array.from(new Set(right.map(indicationCodeKey).filter(Boolean))).sort()
   if (leftKeys.length !== rightKeys.length) return false
   return leftKeys.every((key, index) => key === rightKeys[index])
 }
@@ -679,7 +681,7 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
   })
 
   const pushMutation = useMutation({
-    mutationFn: () => pushSapConsultationReview(visitId),
+    mutationFn: (options?: { confirmExistingConsultationOverwrite?: boolean }) => pushSapConsultationReview(visitId, options),
     onSuccess: (result) => {
       message.success(result.message || '已提交回写')
       queryClient.invalidateQueries({ queryKey: ['wecom', 'sap-review', visitId] })
@@ -706,7 +708,19 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
     (drafts[block.recording_id] ?? block.effective_body).trim() !== block.effective_body.trim()
   ))
   const hasUnsavedIndicationChanges = !sameIndicationList(indicationDraft, data.indication_payload ?? [])
-  const canManualPush = data.status === 'modified_pending' || data.status === 'modified_failed'
+  const canManualPush = data.status === 'modified_pending' || data.status === 'modified_failed' || data.status === 'existing_consultation'
+  const handleBackToList = () => {
+    setDrafts(() => {
+      const next: Record<string, string> = {}
+      for (const block of data.blocks) {
+        next[block.recording_id] = block.effective_body
+      }
+      return next
+    })
+    setIndicationDraft(data.indication_payload ?? [])
+    void queryClient.invalidateQueries({ queryKey: ['wecom', 'sap-reviews'] })
+    navigate('/wecom/sap-reviews')
+  }
   const handleManualPush = () => {
     if (hasUnsavedRemarkChanges) {
       message.info('请先保存修改后的咨询备注，再提交回传')
@@ -720,7 +734,21 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
       message.info('咨询备注未修改，无需手动提交回传')
       return
     }
-    pushMutation.mutate()
+    if (data.status === 'existing_consultation') {
+      Modal.confirm({
+        title: '确认覆盖已有咨询备注？',
+        content: 'SAP 已存在咨询单，手动回传会使用修改模式，可能覆盖 SAP 中原有的咨询备注。请确认是否继续回传。',
+        okText: '确认回传',
+        cancelText: '取消',
+        okButtonProps: { danger: true },
+        centered: true,
+        onOk: () => {
+          pushMutation.mutate({ confirmExistingConsultationOverwrite: true })
+        },
+      })
+      return
+    }
+    pushMutation.mutate({})
   }
 
   return (
@@ -744,7 +772,7 @@ function ReviewDetailPage({ visitId }: { visitId: string }) {
           >
             <SendOutlined /> {pushMutation.isPending ? '提交中…' : '提交回传'}
           </button>
-          <button className="wc-btn wc-btn--ghost" onClick={() => navigate('/wecom/sap-reviews')} type="button">
+          <button className="wc-btn wc-btn--ghost" onClick={handleBackToList} type="button">
             返回列表
           </button>
         </div>

@@ -37,6 +37,13 @@ export type StaffRecommendationItem = {
   recommendation: string
   product_or_solution: string | null
   body_part: string | null
+  brand?: string | null
+  material?: string | null
+  dosage?: string | null
+  price?: string | null
+  course_or_frequency?: string | null
+  treatment_steps?: string[]
+  implementation_notes?: string | null
   evidence: string
   customer_response: string
   demand_priority: number[]
@@ -108,6 +115,13 @@ export type ConsultationResult = {
       plan: string
       acceptance: string | null
       evidence: string | null
+      brand?: string | null
+      material?: string | null
+      dosage?: string | null
+      price?: string | null
+      course_or_frequency?: string | null
+      treatment_steps?: string[]
+      implementation_notes?: string | null
     }[]
   }
   seed_plan: {
@@ -116,6 +130,13 @@ export type ConsultationResult = {
       plan: string
       acceptance: string | null
       evidence: string | null
+      brand?: string | null
+      material?: string | null
+      dosage?: string | null
+      price?: string | null
+      course_or_frequency?: string | null
+      treatment_steps?: string[]
+      implementation_notes?: string | null
     }[]
   }
   deal_outcome: {

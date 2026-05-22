@@ -90,6 +90,7 @@ _SAP_FIELD_CONTINUATION_INDENT = " "
 _SAP_ITEM_MARKERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 _SAP_BULLET_FIELD_RE = re.compile(r"^●\s*([^：:\n]+?)\s*[：:]\s*(.*)$")
 _SAP_MULTILINE_FIELD_LABELS = {"顾客主诉", "顾客顾虑", "推荐方案", "种草方案", "未成交原因"}
+_SAP_PLAN_FIELD_LABELS = {"推荐方案", "种草方案"}
 
 
 def _strip_sap_item_separator(value: str) -> str:
@@ -173,6 +174,18 @@ def _format_sap_multiline_field(title: str, values: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _looks_like_structured_sap_plan_block(first_value: str, continuation_lines: list[str]) -> bool:
+    lines = [str(first_value or "").strip(), *[line.strip() for line in continuation_lines]]
+    has_numbered_item = any(re.match(rf"^[{_SAP_ITEM_MARKERS}]|\d+\s*[、.．]", line) for line in lines if line)
+    has_detail_line = any(line.startswith("- ") or line.startswith("－") for line in lines if line)
+    return has_numbered_item and has_detail_line
+
+
+def _format_sap_plan_field_from_strings(title: str, values: list[str]) -> str:
+    structured_items = [_recommendation_structured_item_from_text(value, seed=title == "种草方案") for value in values]
+    return _format_sap_plan_field(title, structured_items)
+
+
 def _format_sap_multiline_fields_in_text(text: str) -> str:
     lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip().splitlines()
     if not lines:
@@ -204,16 +217,30 @@ def _format_sap_multiline_fields_in_text(text: str) -> str:
             index = next_index
             continue
 
-        first_value = _strip_sap_item_separator(match.group(2))
+        raw_first_value = str(match.group(2) or "").strip()
+        first_value = _strip_sap_item_separator(raw_first_value)
         continuation_values: list[str] = []
+        continuation_lines: list[str] = []
         next_index = index + 1
         while next_index < len(lines):
             next_line = lines[next_index].rstrip()
             if _SAP_BULLET_FIELD_RE.match(next_line.strip()):
                 break
             if next_line.strip():
+                continuation_lines.append(next_line)
                 continuation_values.append(_strip_sap_item_separator(next_line))
             next_index += 1
+
+        if title in _SAP_PLAN_FIELD_LABELS:
+            if _looks_like_structured_sap_plan_block(raw_first_value, continuation_lines):
+                block_lines = [f"●{title}：{raw_first_value}" if raw_first_value else f"●{title}："]
+                block_lines.extend(continuation_lines)
+                blocks.append("\n".join(line.rstrip() for line in block_lines).strip())
+            else:
+                values = [first_value, *continuation_values] if continuation_values else _split_top_level_sap_items(first_value)
+                blocks.append(_format_sap_plan_field_from_strings(title, values))
+            index = next_index
+            continue
 
         values = [first_value, *continuation_values] if continuation_values else _split_top_level_sap_items(first_value)
         blocks.append(_format_sap_multiline_field(title, values))
@@ -307,6 +334,8 @@ _RECOMMENDATION_PLAN_METHOD_PATTERNS: tuple[tuple[str, str], ...] = (
     ("胶原蛋白", "胶原"),
     ("胶原", "胶原"),
     ("瑞德喜", "瑞德喜"),
+    ("瑞得喜", "瑞德喜"),
+    ("芮得怡", "瑞德喜"),
     ("嗨体", "嗨体"),
     ("少女针", "少女针"),
     ("童颜针", "童颜针"),
@@ -694,6 +723,29 @@ _RECOMMENDATION_DETAIL_FIELDS: tuple[tuple[str, str], ...] = (
     ("treatment_steps", "步骤"),
     ("implementation_notes", "要点"),
 )
+_RECOMMENDATION_DETAIL_LABELS = tuple(label for _, label in _RECOMMENDATION_DETAIL_FIELDS)
+_RECOMMENDATION_DETAIL_LABEL_ALIASES = {
+    "品牌": "材料/品牌",
+    "材料": "材料/品牌",
+    "材料/品牌": "材料/品牌",
+    "部位": "部位/用量",
+    "用量": "部位/用量",
+    "部位/用量": "部位/用量",
+    "报价": "报价",
+    "疗程": "疗程/频次",
+    "频次": "疗程/频次",
+    "疗程/频次": "疗程/频次",
+    "步骤": "执行步骤",
+    "执行步骤": "执行步骤",
+    "要点": "执行要点",
+    "执行要点": "执行要点",
+    "定位": "定位",
+    "对应主诉": "对应主诉",
+    "顾客反馈": "顾客反馈",
+}
+_RECOMMENDATION_INLINE_DETAIL_RE = re.compile(
+    rf"（([^（）]*(?:{'|'.join(re.escape(label) for label in _RECOMMENDATION_DETAIL_LABELS)})：[^（）]*)）"
+)
 
 
 def _recommendation_detail_value(value: object) -> str:
@@ -702,6 +754,332 @@ def _recommendation_detail_value(value: object) -> str:
     if isinstance(value, tuple):
         return "；".join(str(item or "").strip() for item in value if str(item or "").strip())
     return str(value or "").strip()
+
+
+def _recommendation_detail_key(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def _canonical_recommendation_detail_label(label: str) -> str:
+    cleaned = str(label or "").strip()
+    return _RECOMMENDATION_DETAIL_LABEL_ALIASES.get(cleaned, cleaned)
+
+
+def _recommendation_core_title(item: dict, *keys: str) -> str:
+    candidates: list[str] = []
+    for key in keys:
+        value = str(item.get(key) or "").strip()
+        if value:
+            candidates.append(value)
+    if not candidates:
+        return ""
+    preferred = candidates[0]
+    generic_terms = {"玻尿酸填充塑形", "注射改善", "综合调整", "填充塑形", "面部填充"}
+    for candidate in candidates[1:]:
+        if preferred in generic_terms and len(candidate) > len(preferred):
+            preferred = candidate
+    return _split_recommendation_plan_and_acceptance(preferred)[0].strip()
+
+
+def _recommendation_inline_acceptance(item: dict, *keys: str) -> str:
+    for key in keys:
+        _, acceptance = _split_recommendation_plan_and_acceptance(str(item.get(key) or "").strip())
+        if acceptance:
+            return acceptance
+    return ""
+
+
+def _recommendation_detail_rows_from_text(plan: str) -> tuple[str, list[tuple[str, str]]]:
+    text = str(plan or "").strip()
+    rows: list[tuple[str, str]] = []
+    for match in list(_RECOMMENDATION_INLINE_DETAIL_RE.finditer(text)):
+        detail_text = match.group(1)
+        parsed_any = False
+        for part in re.split(r"[；;]", detail_text):
+            if "：" in part:
+                label, value = part.split("：", 1)
+            elif ":" in part:
+                label, value = part.split(":", 1)
+            else:
+                continue
+            label = label.strip()
+            value = value.strip()
+            if label in _RECOMMENDATION_DETAIL_LABELS and value:
+                rows.append((_canonical_recommendation_detail_label(label), value))
+                parsed_any = True
+        if parsed_any:
+            text = text.replace(match.group(0), "")
+    return text.strip(), rows
+
+
+def _clean_recommendation_detail_value(value: str, *, title: str, seen: set[str]) -> str:
+    text = str(value or "").strip().strip("；;").strip()
+    if not text:
+        return ""
+    compact = _recommendation_detail_key(text)
+    if not compact or compact in seen or compact in _recommendation_detail_key(title):
+        return ""
+    seen.add(compact)
+    return text
+
+
+def _append_recommendation_detail(
+    rows: list[tuple[str, str]],
+    label: str,
+    values: list[str],
+    *,
+    title: str,
+    seen: set[str],
+) -> None:
+    cleaned = [
+        value
+        for value in (_clean_recommendation_detail_value(value, title=title, seen=seen) for value in values)
+        if value
+    ]
+    if cleaned:
+        rows.append((label, "；".join(_dedupe_preserve_order(cleaned))))
+
+
+def _normalize_recommendation_detail_rows(
+    rows: list[tuple[str, str]],
+    *,
+    title: str,
+) -> list[tuple[str, str]]:
+    normalized: list[tuple[str, str]] = []
+    by_label: dict[str, int] = {}
+    title_key = _recommendation_detail_key(title)
+    for raw_label, raw_value in rows:
+        label = _canonical_recommendation_detail_label(raw_label)
+        value = str(raw_value or "").strip()
+        if not label or not value:
+            continue
+        parts: list[str] = []
+        for part in re.split(r"[；;]", value):
+            cleaned = part.strip()
+            if not cleaned:
+                continue
+            key = _recommendation_detail_key(cleaned)
+            if not key or key in title_key:
+                continue
+            parts.append(cleaned)
+        if not parts:
+            continue
+        existing_index = by_label.get(label)
+        if existing_index is None:
+            by_label[label] = len(normalized)
+            normalized.append((label, "；".join(_dedupe_preserve_order(parts))))
+            continue
+        current_label, current_value = normalized[existing_index]
+        merged_values = _dedupe_preserve_order(
+            [part.strip() for part in re.split(r"[；;]", current_value) if part.strip()]
+            + parts
+        )
+        normalized[existing_index] = (current_label, "；".join(merged_values))
+
+    has_informative_detail = any(label != "定位" for label, _ in normalized)
+    if has_informative_detail:
+        normalized = [
+            (label, value)
+            for label, value in normalized
+            if not (label == "定位" and value == "主诉之外的后续/顺带优化建议")
+        ]
+    return normalized
+
+
+def _primary_demand_priority_map(result: dict) -> dict[int, str]:
+    demands = result.get("customer_primary_demands", {})
+    if not isinstance(demands, dict):
+        return {}
+    priority_map: dict[int, str] = {}
+    for item in demands.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            priority = int(item.get("priority") or 0)
+        except (TypeError, ValueError):
+            continue
+        demand = str(item.get("demand") or "").strip()
+        if priority > 0 and demand:
+            priority_map[priority] = demand
+    return priority_map
+
+
+def _recommendation_structured_item_from_dict(
+    item: dict,
+    *,
+    result: dict | None = None,
+    seed: bool = False,
+    title_keys: tuple[str, ...],
+    acceptance: str | None = None,
+) -> dict:
+    raw_title = _recommendation_core_title(item, *title_keys)
+    title, parsed_rows = _recommendation_detail_rows_from_text(raw_title)
+    title = title or raw_title
+    if not title:
+        return {}
+
+    rows: list[tuple[str, str]] = []
+    seen_values: set[str] = set()
+    if seed:
+        body_part = _recommendation_detail_value(item.get("body_part"))
+        seed_position = f"主诉之外的{body_part}后续/顺带优化建议" if body_part else "主诉之外的后续/顺带优化建议"
+        rows.append(("定位", seed_position))
+    else:
+        demand_map = _primary_demand_priority_map(result or {})
+        demand_priorities = []
+        for value in item.get("demand_priority") or []:
+            try:
+                priority = int(value)
+            except (TypeError, ValueError):
+                continue
+            if priority > 0:
+                demand_priorities.append(priority)
+        demand_texts = [f"#{priority} {demand_map[priority]}" for priority in demand_priorities if demand_map.get(priority)]
+        if demand_texts:
+            rows.append(("对应主诉", "；".join(_dedupe_preserve_order(demand_texts))))
+
+    rows.extend(parsed_rows)
+    _append_recommendation_detail(
+        rows,
+        "材料/品牌",
+        [_recommendation_detail_value(item.get("brand")), _recommendation_detail_value(item.get("material"))],
+        title=title,
+        seen=seen_values,
+    )
+    _append_recommendation_detail(
+        rows,
+        "部位/用量",
+        [_recommendation_detail_value(item.get("body_part")), _recommendation_detail_value(item.get("dosage"))],
+        title=title,
+        seen=seen_values,
+    )
+    _append_recommendation_detail(
+        rows,
+        "报价",
+        [_recommendation_detail_value(item.get("price"))],
+        title=title,
+        seen=seen_values,
+    )
+    _append_recommendation_detail(
+        rows,
+        "疗程/频次",
+        [_recommendation_detail_value(item.get("course_or_frequency"))],
+        title=title,
+        seen=seen_values,
+    )
+    _append_recommendation_detail(
+        rows,
+        "执行步骤",
+        [_recommendation_detail_value(item.get("treatment_steps"))],
+        title=title,
+        seen=seen_values,
+    )
+    _append_recommendation_detail(
+        rows,
+        "执行要点",
+        [_recommendation_detail_value(item.get("implementation_notes"))],
+        title=title,
+        seen=seen_values,
+    )
+
+    response = str(
+        acceptance
+        or item.get("customer_response")
+        or item.get("acceptance")
+        or _recommendation_inline_acceptance(item, *title_keys)
+        or ""
+    ).strip()
+    return {"title": title, "details": _normalize_recommendation_detail_rows(rows, title=title), "acceptance": response}
+
+
+def _recommendation_structured_item_from_text(value: str, *, seed: bool = False) -> dict:
+    plan, acceptance = _split_recommendation_plan_and_acceptance(str(value or "").strip())
+    title, rows = _recommendation_detail_rows_from_text(plan)
+    if not title:
+        return {}
+    details = [("定位", "主诉之外的后续/顺带优化建议"), *rows] if seed else rows
+    return {"title": title, "details": _normalize_recommendation_detail_rows(details, title=title), "acceptance": acceptance}
+
+
+def _merge_recommendation_detail_rows(existing: list[tuple[str, str]], incoming: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = list(existing)
+    by_label = {
+        _canonical_recommendation_detail_label(label): index
+        for index, (label, _) in enumerate(rows)
+    }
+    for raw_label, value in incoming:
+        label = _canonical_recommendation_detail_label(raw_label)
+        value = str(value or "").strip()
+        if not label or not value:
+            continue
+        current_index = by_label.get(label)
+        if current_index is None:
+            by_label[label] = len(rows)
+            rows.append((label, value))
+            continue
+        current_label, current_value = rows[current_index]
+        merged_values = _dedupe_preserve_order([*current_value.split("；"), *value.split("；")])
+        rows[current_index] = (current_label, "；".join(merged_values))
+    return rows
+
+
+def _merge_structured_recommendation_items(items: list[dict]) -> list[dict]:
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        key = _recommendation_plan_semantic_key(title)
+        if not key:
+            continue
+        if key not in by_key:
+            order.append(key)
+            by_key[key] = {
+                "title": title,
+                "details": _normalize_recommendation_detail_rows(list(item.get("details") or []), title=title),
+                "acceptance": str(item.get("acceptance") or "").strip(),
+            }
+            continue
+        current = by_key[key]
+        current["title"] = _prefer_recommendation_plan(str(current.get("title") or ""), title)
+        current["details"] = _merge_recommendation_detail_rows(
+            list(current.get("details") or []),
+            list(item.get("details") or []),
+        )
+        current["details"] = _normalize_recommendation_detail_rows(
+            list(current.get("details") or []),
+            title=str(current.get("title") or ""),
+        )
+        current["acceptance"] = _merge_recommendation_acceptance(
+            str(current.get("acceptance") or ""),
+            str(item.get("acceptance") or ""),
+        )
+    return [by_key[key] for key in order if by_key.get(key)]
+
+
+def _format_sap_plan_field(title: str, items: list[dict]) -> str:
+    merged = _merge_structured_recommendation_items(items)
+    if not merged:
+        return f"●{title}：无"
+    lines = [f"●{title}："]
+    for index, item in enumerate(merged, 1):
+        if index > 1:
+            lines.append("")
+        lines.append(f"{_sap_item_marker(index)}{item['title']}")
+        details = _normalize_recommendation_detail_rows(
+            list(item.get("details") or []),
+            title=str(item.get("title") or ""),
+        )
+        for label, value in details:
+            if str(value or "").strip():
+                lines.append(f"- {label}：{value}")
+        acceptance = str(item.get("acceptance") or "").strip()
+        if not _is_uninformative_acceptance(acceptance):
+            lines.append(f"- 顾客反馈：{acceptance}")
+        elif title == "推荐方案":
+            lines.append("- 顾客反馈：未明确回应")
+    return "\n".join(lines).strip()
 
 
 def _format_recommendation_plan_for_sap(item: dict, *keys: str) -> str:
@@ -820,6 +1198,85 @@ def _collect_seed_recommendation_items(result: dict) -> list[str]:
             values = _merge_recommendation_display_items(values)
             if values:
                 return values
+    return []
+
+
+def _collect_recommendation_structured_items(result: dict) -> list[dict]:
+    values: list[dict] = []
+    staff_recommendations = result.get("staff_recommendations", {})
+    if isinstance(staff_recommendations, dict):
+        for item in staff_recommendations.get("items") or []:
+            if isinstance(item, dict):
+                structured = _recommendation_structured_item_from_dict(
+                    item,
+                    result=result,
+                    seed=False,
+                    title_keys=("product_or_solution", "recommendation"),
+                    acceptance=str(item.get("customer_response") or "").strip(),
+                )
+                if structured:
+                    values.append(structured)
+    if values:
+        return _merge_structured_recommendation_items(values)
+
+    consultation_result = result.get("consultation_result", {}) if isinstance(result.get("consultation_result"), dict) else {}
+    recommended_plan = consultation_result.get("recommended_plan", {})
+    if isinstance(recommended_plan, dict):
+        for item in recommended_plan.get("items") or []:
+            if isinstance(item, dict):
+                structured = _recommendation_structured_item_from_dict(
+                    item,
+                    result=result,
+                    seed=False,
+                    title_keys=("plan", "recommendation", "content"),
+                    acceptance=str(item.get("acceptance") or "").strip(),
+                )
+                if structured:
+                    values.append(structured)
+    if values:
+        return _merge_structured_recommendation_items(values)
+
+    return [
+        _recommendation_structured_item_from_text(item, seed=False)
+        for item in _collect_deal_items(result)
+        if item
+    ]
+
+
+def _collect_seed_recommendation_structured_items(result: dict) -> list[dict]:
+    values: list[dict] = []
+    staff_seed_recommendations = result.get("staff_seed_recommendations", {})
+    if isinstance(staff_seed_recommendations, dict):
+        for item in staff_seed_recommendations.get("items") or []:
+            if isinstance(item, dict):
+                structured = _recommendation_structured_item_from_dict(
+                    item,
+                    result=result,
+                    seed=True,
+                    title_keys=("product_or_solution", "recommendation"),
+                    acceptance=str(item.get("customer_response") or "").strip(),
+                )
+                if structured:
+                    values.append(structured)
+    if values:
+        return _merge_structured_recommendation_items(values)
+
+    consultation_result = result.get("consultation_result", {}) if isinstance(result.get("consultation_result"), dict) else {}
+    seed_plan = consultation_result.get("seed_plan", {})
+    if isinstance(seed_plan, dict):
+        for item in seed_plan.get("items") or []:
+            if isinstance(item, dict):
+                structured = _recommendation_structured_item_from_dict(
+                    item,
+                    result=result,
+                    seed=True,
+                    title_keys=("plan", "recommendation", "content"),
+                    acceptance=str(item.get("acceptance") or "").strip(),
+                )
+                if structured:
+                    values.append(structured)
+    if values:
+        return _merge_structured_recommendation_items(values)
     return []
 
 
@@ -2585,14 +3042,18 @@ def build_consultation_text(
     lines.append(_format_sap_multiline_field("顾客主诉", _collect_primary_demand_items(result)))
     lines.append(f"●本次预算：{_text_or_none(_collect_budget_text(result))}")
     lines.append(_format_sap_multiline_field("顾客顾虑", _collect_concern_items(result)))
-    recommendation_items = _collect_recommendation_items(result)
+    recommendation_items = _collect_recommendation_structured_items(result)
     if not recommendation_items:
-        recommendation_items = _collect_transcript_price_quote_recommendation_items(
-            transcript_full_text,
-            transcript_utterances,
-        )
-    lines.append(_format_sap_multiline_field("推荐方案", recommendation_items))
-    lines.append(_format_sap_multiline_field("种草方案", _collect_seed_recommendation_items(result)))
+        recommendation_items = [
+            _recommendation_structured_item_from_text(item, seed=False)
+            for item in _collect_transcript_price_quote_recommendation_items(
+                transcript_full_text,
+                transcript_utterances,
+            )
+            if item
+        ]
+    lines.append(_format_sap_plan_field("推荐方案", recommendation_items))
+    lines.append(_format_sap_plan_field("种草方案", _collect_seed_recommendation_structured_items(result)))
     if _is_visit_order_final_not_deal(visit_order):
         lines.append(_format_sap_multiline_field("未成交原因", _collect_loss_reason_items(result)))
     if _is_sap_summary_section_enabled(visit_order, sap_summary_config):

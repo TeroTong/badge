@@ -8,6 +8,7 @@ import {
   type ConsultationProcessEvaluationSection,
   extractRecordingIdFromAnalysisFileId,
   type AnalysisDetail,
+  type StaffRecommendationItem,
   type StandardizedIndicationItem,
 } from '@/api/analysis'
 import { ANALYSIS_TAG_CATALOG_GROUPS } from '@/constants/tag-catalog'
@@ -51,6 +52,49 @@ function valuesLooselyMatch(a: string | null | undefined, b: string | null | und
   if (!left || !right) return false
   return left === right || left.includes(right) || right.includes(left)
 }
+
+function recommendationDetailValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item ?? '').trim()).filter(Boolean).join('；')
+  return String(value ?? '').trim()
+}
+
+type RecommendationDetailRecord = Partial<StaffRecommendationItem> & Record<string, unknown>
+
+function appendRecommendationDetail(
+  rows: { label: string; value: string }[],
+  label: string,
+  values: unknown[],
+  plan: string,
+) {
+  const planKey = normalizeEvidenceKey(plan)
+  const cleaned = values
+    .map(recommendationDetailValue)
+    .filter((value) => {
+      const key = normalizeEvidenceKey(value)
+      return Boolean(key) && !planKey.includes(key)
+    })
+  const unique = Array.from(new Set(cleaned))
+  if (unique.length > 0) rows.push({ label, value: unique.join('；') })
+}
+
+function buildRecommendationDetailRows(item: RecommendationDetailRecord, plan: string) {
+  const rows: { label: string; value: string }[] = []
+  appendRecommendationDetail(rows, '材料/品牌', [item.brand, item.material], plan)
+  appendRecommendationDetail(rows, '部位/用量', [item.body_part, item.dosage], plan)
+  appendRecommendationDetail(rows, '报价', [item.price], plan)
+  appendRecommendationDetail(rows, '疗程/频次', [item.course_or_frequency], plan)
+  appendRecommendationDetail(rows, '执行步骤', [item.treatment_steps], plan)
+  appendRecommendationDetail(rows, '执行要点', [item.implementation_notes], plan)
+  return rows
+}
+
+const RECOMMENDATION_INLINE_DETAIL_PATTERN =
+  /（[^（）]*(?:品牌|材料|用量|报价|疗程|频次|步骤|要点|执行步骤|执行要点)：[^（）]*）/g
+
+function recommendationDisplayPlan(plan: string, detailRows: { label: string; value: string }[]) {
+  if (detailRows.length === 0) return plan
+  return plan.replace(RECOMMENDATION_INLINE_DETAIL_PATTERN, '').trim() || plan
+}
 const PRIORITY_COLORS = ['blue', 'purple', 'geekblue', 'volcano', 'magenta', 'gold', 'lime'] as const
 
 function buildRecordingDetailLink(recordingLinkBase: string, recordingId: string, from = 'llm') {
@@ -63,6 +107,8 @@ function buildRecordingDetailLink(recordingLinkBase: string, recordingId: string
 const EvidenceUtteranceContext = createContext<TranscriptUtteranceLite[]>([])
 const EVIDENCE_CONTEXT_MAX_LINES = 3
 const EVIDENCE_TIMESTAMP_TOLERANCE_MS = 45_000
+const INTERNAL_EVIDENCE_ID_PATTERN = /^(?:[A-Z]{1,4}\d{1,6}|L\d{3,6})$/i
+const EVIDENCE_LINE_ID_PATTERN = /\bL(\d{3,6})\b/gi
 
 type EvidenceContextLine = TranscriptUtteranceLite & {
   contextIndex: number
@@ -175,6 +221,29 @@ function extractEvidenceAnchors(evidence: string): EvidenceAnchor[] {
     .map((text) => ({ timeMs: null, text }))
 }
 
+function evidenceTokens(value: string): string[] {
+  return value
+    .split(/[\s,，;；、/|]+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+}
+
+function evidenceLooksLikeInternalIdsOnly(value: string): boolean {
+  const tokens = evidenceTokens(value)
+  return tokens.length > 0 && tokens.every((token) => INTERNAL_EVIDENCE_ID_PATTERN.test(token))
+}
+
+function extractEvidenceLineIndexes(evidence: string, utteranceCount: number): number[] {
+  const indexes = new Set<number>()
+  for (const match of evidence.matchAll(EVIDENCE_LINE_ID_PATTERN)) {
+    const lineNumber = Number(match[1])
+    if (!Number.isFinite(lineNumber)) continue
+    const index = lineNumber - 1
+    if (index >= 0 && index < utteranceCount) indexes.add(index)
+  }
+  return Array.from(indexes).sort((a, b) => a - b)
+}
+
 function utteranceBeginMs(utterance: TranscriptUtteranceLite): number | null {
   return typeof utterance.begin_ms === 'number' && Number.isFinite(utterance.begin_ms) ? utterance.begin_ms : null
 }
@@ -263,6 +332,9 @@ function isCompleteEvidenceUtterance(utterance: TranscriptUtteranceLite): boolea
 function buildEvidenceContextLines(evidence: string, utterances: TranscriptUtteranceLite[]): EvidenceContextLine[] {
   if (!evidence || utterances.length === 0) return []
   const hitIndexes = new Set<number>()
+  for (const index of extractEvidenceLineIndexes(evidence, utterances.length)) {
+    hitIndexes.add(index)
+  }
   for (const anchor of extractEvidenceAnchors(evidence)) {
     const textHitIndex = findEvidenceTextHitIndex(utterances, anchor.text, anchor.timeMs)
     const index = textHitIndex >= 0
@@ -439,6 +511,7 @@ function EvidenceToggle({
   )
   const speakerLabelMap = useMemo(() => buildEvidenceSpeakerLabelMap(utterances), [utterances])
   const fallbackEvidenceTime = useMemo(() => extractEvidenceTimesMs(evidence)[0] ?? null, [evidence])
+  const shouldHideRawFallback = evidenceLooksLikeInternalIdsOnly(evidence)
   if (!evidence) return null
 
   return (
@@ -466,9 +539,15 @@ function EvidenceToggle({
               ))}
               {contextLines.length === 0 ? (
                 <span className="ad-evidence-context__item">
-                  <span className="ad-evidence-context__time">{formatEvidenceMs(fallbackEvidenceTime)}</span>
-                  <span className="ad-evidence-context__speaker">原文：</span>
-                  <span className="ad-evidence-context__text">{evidence}</span>
+                  {shouldHideRawFallback ? (
+                    <span className="ad-evidence-context__text">证据编号暂未映射到原文。</span>
+                  ) : (
+                    <>
+                      <span className="ad-evidence-context__time">{formatEvidenceMs(fallbackEvidenceTime)}</span>
+                      <span className="ad-evidence-context__speaker">原文：</span>
+                      <span className="ad-evidence-context__text">{evidence}</span>
+                    </>
+                  )}
                 </span>
               ) : null}
             </div>
@@ -810,6 +889,7 @@ export function AnalysisDetailContent({
     consultationResult.recommended_plan.items.length > 0
       ? consultationResult.recommended_plan.items
       : (recommendations?.items ?? []).map((item) => ({
+          ...item,
           plan: item.product_or_solution || item.recommendation || '',
           acceptance: item.customer_response || null,
           evidence: item.evidence || null,
@@ -838,6 +918,7 @@ export function AnalysisDetailContent({
     consultationSeedPlan.items.length > 0
       ? consultationSeedPlan.items
       : (seedRecommendations?.items ?? []).map((item) => ({
+          ...item,
           plan: item.product_or_solution || item.recommendation || '',
           acceptance: item.customer_response || null,
           evidence: item.evidence || null,
@@ -1297,31 +1378,45 @@ export function AnalysisDetailContent({
                   {(recommendedPlanItemsWithRelations.length > 0
                     ? recommendedPlanItemsWithRelations
                     : [{ plan: '-', acceptance: null, evidence: null, relatedDemandPriorities: [] as number[] }]
-                  ).map((item, index) => (
-                    <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
-                      <div className="ad-demand-item__header">
-                        <Tag color="cyan">方案 #{index + 1}</Tag>
-                        {item.relatedDemandPriorities.length > 0 ? (
-                          <span className="ad-demand-item__header-relation">
-                            对应主诉 {item.relatedDemandPriorities.map((priority) => `#${priority}`).join('/')}
-                          </span>
+                  ).map((item, index) => {
+                    const detailRows = buildRecommendationDetailRows(item as RecommendationDetailRecord, item.plan || '')
+                    const displayPlan = recommendationDisplayPlan(item.plan || '', detailRows)
+                    return (
+                      <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
+                        <div className="ad-demand-item__header">
+                          <Tag color="cyan">方案 #{index + 1}</Tag>
+                          {item.relatedDemandPriorities.length > 0 ? (
+                            <span className="ad-demand-item__header-relation">
+                              对应主诉 {item.relatedDemandPriorities.map((priority) => `#${priority}`).join('/')}
+                            </span>
+                          ) : null}
+                          {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
+                            <span
+                              className={`ad-recommend-item__response ad-recommend-item__response--${
+                                item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
+                              }`}
+                            >
+                              {item.acceptance || '未明确回应'}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="ad-demand-item__text">{displayPlan || '-'}</p>
+                        {detailRows.length > 0 ? (
+                          <dl className="ad-recommend-detail-grid">
+                            {detailRows.map((row) => (
+                              <div key={`${row.label}-${row.value}`} className="ad-recommend-detail-grid__item">
+                                <dt>{row.label}</dt>
+                                <dd>{row.value}</dd>
+                              </div>
+                            ))}
+                          </dl>
                         ) : null}
-                        {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
-                          <span
-                            className={`ad-recommend-item__response ad-recommend-item__response--${
-                              item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
-                            }`}
-                          >
-                            {item.acceptance || '未明确回应'}
-                          </span>
+                        {item.evidence ? (
+                          <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
                         ) : null}
                       </div>
-                      <p className="ad-demand-item__text">{item.plan || '-'}</p>
-                      {item.evidence ? (
-                        <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
-                      ) : null}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
               <div className="ad-recommend-section">
@@ -1332,26 +1427,40 @@ export function AnalysisDetailContent({
                   {(seedPlanItems.length > 0
                     ? seedPlanItems
                     : [{ plan: '-', acceptance: null, evidence: null }]
-                  ).map((item, index) => (
-                    <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
-                      <div className="ad-demand-item__header">
-                        <Tag color="purple">种草 #{index + 1}</Tag>
-                        {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
-                          <span
-                            className={`ad-recommend-item__response ad-recommend-item__response--${
-                              item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
-                            }`}
-                          >
-                            {item.acceptance || '未明确回应'}
-                          </span>
+                  ).map((item, index) => {
+                    const detailRows = buildRecommendationDetailRows(item as RecommendationDetailRecord, item.plan || '')
+                    const displayPlan = recommendationDisplayPlan(item.plan || '', detailRows)
+                    return (
+                      <div key={`${item.plan}-${index}`} className="ad-demand-item ad-demand-item--recommend">
+                        <div className="ad-demand-item__header">
+                          <Tag color="purple">种草 #{index + 1}</Tag>
+                          {(!embeddedSimplified || (item.acceptance && item.acceptance !== '未明确回应')) ? (
+                            <span
+                              className={`ad-recommend-item__response ad-recommend-item__response--${
+                                item.acceptance === '接受' ? 'accept' : item.acceptance === '拒绝' ? 'reject' : 'neutral'
+                              }`}
+                            >
+                              {item.acceptance || '未明确回应'}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="ad-demand-item__text">{displayPlan || '-'}</p>
+                        {detailRows.length > 0 ? (
+                          <dl className="ad-recommend-detail-grid">
+                            {detailRows.map((row) => (
+                              <div key={`${row.label}-${row.value}`} className="ad-recommend-detail-grid__item">
+                                <dt>{row.label}</dt>
+                                <dd>{row.value}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        ) : null}
+                        {item.evidence ? (
+                          <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
                         ) : null}
                       </div>
-                      <p className="ad-demand-item__text">{item.plan || '-'}</p>
-                      {item.evidence ? (
-                        <EvidenceToggle evidence={item.evidence} recordingId={linkedRecordingId} recordingLinkBase={recordingLinkBase} />
-                      ) : null}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             </div>

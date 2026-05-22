@@ -1,7 +1,8 @@
 const SAP_FIELD_CONTINUATION_INDENT = ' '
 const SAP_ITEM_MARKERS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
 const SAP_BULLET_FIELD_RE = /^●\s*([^：:\n]+?)\s*[：:]\s*(.*)$/
-const SAP_MULTILINE_FIELD_LABELS = new Set(['顾客主诉', '顾客顾虑', '推荐方案', '未成交原因'])
+const SAP_MULTILINE_FIELD_LABELS = new Set(['顾客主诉', '顾客顾虑', '推荐方案', '种草方案', '未成交原因'])
+const SAP_PLAN_FIELD_LABELS = new Set(['推荐方案', '种草方案'])
 
 function stripSapItemSeparator(value: string) {
   return String(value || '')
@@ -71,6 +72,13 @@ function formatSapMultilineField(title: string, values: string[]) {
     .join('\n')
 }
 
+function looksLikeStructuredPlanBlock(firstValue: string, continuationLines: string[]) {
+  const lines = [firstValue.trim(), ...continuationLines.map((line) => line.trim())].filter(Boolean)
+  const hasNumberedItem = lines.some((line) => new RegExp(`^[${SAP_ITEM_MARKERS}]|^\\d+\\s*[、.．]`).test(line))
+  const hasDetailLine = lines.some((line) => line.startsWith('- ') || line.startsWith('－'))
+  return hasNumberedItem && hasDetailLine
+}
+
 export function formatSapPreviewText(text: string) {
   const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n')
   if (lines.length === 0) return ''
@@ -103,12 +111,23 @@ export function formatSapPreviewText(text: string) {
 
     const firstValue = stripSapItemSeparator(match[2] || '')
     const continuationValues: string[] = []
+    const continuationLines: string[] = []
     let nextIndex = index + 1
     while (nextIndex < lines.length) {
       const nextLine = lines[nextIndex].replace(/\s+$/g, '')
       if (nextLine.trim().match(SAP_BULLET_FIELD_RE)) break
-      if (nextLine.trim()) continuationValues.push(stripSapItemSeparator(nextLine))
+      if (nextLine.trim()) {
+        continuationLines.push(nextLine)
+        continuationValues.push(stripSapItemSeparator(nextLine))
+      }
       nextIndex += 1
+    }
+
+    if (SAP_PLAN_FIELD_LABELS.has(title) && looksLikeStructuredPlanBlock(match[2] || '', continuationLines)) {
+      const blockLines = [`●${title}：${match[2] || ''}`, ...continuationLines]
+      blocks.push(blockLines.join('\n').trim())
+      index = nextIndex
+      continue
     }
 
     const values = continuationValues.length > 0

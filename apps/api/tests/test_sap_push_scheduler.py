@@ -667,6 +667,101 @@ def test_auto_push_skips_pending_review_when_newer_success_exists(monkeypatch) -
     asyncio.run(scenario())
 
 
+def test_auto_push_skips_when_existing_success_matches_review_text_despite_newer_analysis(monkeypatch) -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        monkeypatch.setattr("smart_badge_api.sap_push_scheduler._session_factory", session_factory)
+
+        try:
+            now = datetime.now(timezone.utc)
+            stable_at = now - timedelta(hours=1)
+            success_at = now - timedelta(minutes=30)
+            newer_analysis_at = now - timedelta(minutes=10)
+            async with session_factory() as db:
+                customer = Customer(id="cust001", name="customer")
+                visit = Visit(
+                    id="visit001",
+                    customer_id=customer.id,
+                    external_visit_order_no="DZ001",
+                    external_visit_order_seg="110",
+                )
+                recording = Recording(
+                    id="rec001",
+                    visit_id=visit.id,
+                    file_name="demo.mp3",
+                    file_path="/tmp/demo.mp3",
+                    status="analyzed",
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                link = RecordingVisitLink(
+                    recording_id=recording.id,
+                    visit_id=visit.id,
+                    is_primary=True,
+                    created_at=stable_at,
+                    updated_at=stable_at,
+                )
+                task = AnalysisTask(
+                    id="task001",
+                    file_name="recording_rec001.json",
+                    file_path="/tmp/recording_rec001.json",
+                    status="done",
+                    result={"consultation_result": {}},
+                    created_at=stable_at,
+                    updated_at=newer_analysis_at,
+                    completed_at=newer_analysis_at,
+                )
+                review_text = "remark\ncomplaint\nplan"
+                review = SapConsultationReview(
+                    id="review001",
+                    visit_id=visit.id,
+                    visit_order_no="DZ001",
+                    visit_order_seg="110",
+                    recording_ids=[recording.id],
+                    blocks=[{"recording_id": recording.id}],
+                    generated_text=review_text,
+                    effective_text=review_text,
+                    payload_snapshot=[{"text": review_text}],
+                    status="pending",
+                    created_at=success_at,
+                    updated_at=newer_analysis_at,
+                )
+                old_success_log = SapPushLog(
+                    id="log001",
+                    recording_id=recording.id,
+                    visit_id=visit.id,
+                    visit_order_no="DZ001",
+                    visit_order_seg="110",
+                    trigger_mode="auto_bind",
+                    status="succeeded",
+                    request_payloads=[
+                        {"text": "remark\n\ncomplaint\n\nplan"}
+                    ],
+                    created_at=success_at,
+                    updated_at=success_at,
+                    sent_at=success_at,
+                )
+                db.add_all([customer, visit, recording, link, task, review, old_success_log])
+                await db.commit()
+
+                assert await _find_auto_push_candidate_refs(10) == []
+
+                refreshed = await db.get(SapConsultationReview, "review001")
+                assert refreshed is not None
+                await db.refresh(refreshed)
+                assert refreshed.last_push_log_id == "log001"
+                assert refreshed.status == "succeeded"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_auto_push_skips_review_with_saved_manual_remark(monkeypatch) -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")

@@ -84,6 +84,10 @@ export type SapReviewPushResult = {
   log: Record<string, unknown>
 }
 
+export type SapReviewPushOptions = {
+  confirmExistingConsultationOverwrite?: boolean
+}
+
 export type FetchSapReviewsParams = {
   page?: number
   page_size?: number
@@ -125,6 +129,12 @@ export function updateSapConsultationReviewIndications(visitId: string, items: S
     .json<SapReviewDetail>()
 }
 
-export function pushSapConsultationReview(visitId: string) {
-  return api.post(`sap-consultation-reviews/visits/${visitId}/push`).json<SapReviewPushResult>()
+export function pushSapConsultationReview(visitId: string, options: SapReviewPushOptions = {}) {
+  return api
+    .post(`sap-consultation-reviews/visits/${visitId}/push`, {
+      json: {
+        confirm_existing_consultation_overwrite: Boolean(options.confirmExistingConsultationOverwrite),
+      },
+    })
+    .json<SapReviewPushResult>()
 }

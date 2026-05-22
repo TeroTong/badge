@@ -47,6 +47,7 @@ def test_judgment_prompt_keeps_fact_categories_distinct() -> None:
 
 def test_judgment_prompt_profile_and_indication_boundaries() -> None:
     assert "既往治疗/材料/仪器标签必须有正向既往史证据" in _JUDGMENT_AGENT_SYSTEM_PROMPT
+    assert "姐姐刚刚做的热玛吉不影响" in _JUDGMENT_AGENT_SYSTEM_PROMPT
     assert "员工/医生自述、产品描述、其他客户案例" in _JUDGMENT_AGENT_SYSTEM_PROMPT
     assert "“皮肤敏感/敏感肌/玫瑰痤疮”不等于“过敏史”" in _JUDGMENT_AGENT_SYSTEM_PROMPT
     assert "只能复制 candidate_indications 中已经给出的" in _JUDGMENT_AGENT_SYSTEM_PROMPT
@@ -210,6 +211,23 @@ def test_agent_finalizer_normalizes_haiwei_brand_from_asr_near_sound() -> None:
 
     assert item["brand"] == "海薇"
     assert "海薇" in item["recommendation"]
+
+
+def test_agent_finalizer_backfills_recent_energy_device_history_from_context() -> None:
+    result = {
+        "customer_profile": {"tags": []},
+        "consultation_result": {"customer_profile_summary": {"tags": []}},
+    }
+
+    finalized = _agent_finalize_analysis_result(
+        result,
+        context="顾问：那姐姐刚刚做的热玛吉不影响啊，一点都没影响。",
+    )
+    tags = finalized["customer_profile"]["tags"]
+
+    assert {"category": "治疗项目", "value": "光电类", "evidence": "顾问：那姐姐刚刚做的热玛吉不影响啊，一点都没影响"} in tags
+    assert {"category": "历史用的设备/原材料名称", "value": "热玛吉", "evidence": "顾问：那姐姐刚刚做的热玛吉不影响啊，一点都没影响"} in tags
+    assert finalized["consultation_result"]["customer_profile_summary"]["tags"] == tags
 
 
 def test_agent_common_indications_remove_jawline_candidate_for_outer_cheek_fill() -> None:

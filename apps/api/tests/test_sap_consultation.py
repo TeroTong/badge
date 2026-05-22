@@ -20,7 +20,11 @@ from smart_badge_api.db.models import (
 )
 from smart_badge_api.api.routes.sap_consultation_reviews import (
     _extract_consultation_no_from_push_log,
+    _indication_code_key_set,
+    _load_latest_push_logs_for_visits,
+    _review_effective_text_matches_push_log,
     _status_from_review_and_log,
+    _status_for_readonly_review_refresh,
 )
 from smart_badge_api.sap_consultation import (
     _extract_sap_preview_text,
@@ -171,6 +175,136 @@ def test_sap_review_status_marks_missing_review_as_pending() -> None:
     assert last_push_at is None
 
 
+def test_sap_review_text_match_ignores_blank_line_formatting() -> None:
+    review = SapConsultationReview(
+        id="review-text-match-001",
+        visit_id="visit-text-match-001",
+        effective_text="●备注人员：李宇晴\n●顾客主诉：内容\n●推荐方案：方案",
+    )
+    push_log = SapPushLog(
+        id="log-text-match-001",
+        visit_id=review.visit_id,
+        request_payloads=[
+            {
+                "text": "●备注人员：李宇晴\n\n●顾客主诉：内容\n  \n●推荐方案：方案",
+            }
+        ],
+    )
+
+    assert _review_effective_text_matches_push_log(review, push_log)
+
+
+def test_sap_review_indication_change_detection_ignores_order_and_manual_flags() -> None:
+    saved_payload = [
+        {"CCKS": "Y2", "CCSYZ": "SYZ2001", "CCBW": "BW2018", "_manual": True},
+        {"CCKS": "Y2", "CCSYZ": "SYZ2001", "CCBW": "BW2003"},
+    ]
+    draft_payload = [
+        {"department_code": "Y2", "indication_code": "SYZ2001", "body_part_code": "BW2003"},
+        {"department_code": "Y2", "indication_code": "SYZ2001", "body_part_code": "BW2018"},
+    ]
+
+    expected = {("Y2", "SYZ2001", "BW2018"), ("Y2", "SYZ2001", "BW2003")}
+    assert _indication_code_key_set(saved_payload) == expected
+    assert _indication_code_key_set(draft_payload) == expected
+
+
+def test_latest_review_push_log_ignores_canceled_attempt() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                db.add_all(
+                    [
+                        SapPushLog(
+                            id="log-latest-001",
+                            visit_id="visit-latest-001",
+                            status="succeeded",
+                            created_at=datetime(2026, 5, 21, 8, 0, 0, tzinfo=timezone.utc),
+                        ),
+                        SapPushLog(
+                            id="log-latest-002",
+                            visit_id="visit-latest-001",
+                            status="canceled",
+                            created_at=datetime(2026, 5, 21, 9, 0, 0, tzinfo=timezone.utc),
+                        ),
+                    ]
+                )
+                await db.commit()
+
+                latest = await _load_latest_push_logs_for_visits(db, ["visit-latest-001"])
+
+                assert latest["visit-latest-001"].id == "log-latest-001"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_readonly_review_refresh_uses_latest_push_status_when_no_previous_review_status() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                pushed_at = datetime(2026, 5, 21, 10, 0, 0, tzinfo=timezone.utc)
+                db.add(
+                    SapPushLog(
+                        id="log-readonly-refresh-001",
+                        visit_id="visit-readonly-refresh-001",
+                        status="succeeded",
+                        created_at=pushed_at,
+                        updated_at=pushed_at,
+                        sent_at=pushed_at,
+                    )
+                )
+                await db.commit()
+
+                status = await _status_for_readonly_review_refresh(
+                    db,
+                    "visit-readonly-refresh-001",
+                    previous_status="",
+                )
+
+                assert status == "succeeded"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_readonly_review_refresh_preserves_existing_status() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        try:
+            async with session_factory() as db:
+                status = await _status_for_readonly_review_refresh(
+                    db,
+                    "visit-readonly-refresh-002",
+                    previous_status="modified",
+                )
+
+                assert status == "modified"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_sap_review_status_distinguishes_system_pending_from_user_edit() -> None:
     pushed_at = datetime(2026, 5, 9, 9, 0, 0, tzinfo=timezone.utc)
     latest_log = SapPushLog(
@@ -311,8 +445,8 @@ def test_build_consultation_text_uses_new_consultation_result_structure() -> Non
     assert "●顾客主诉：①下巴后缩；\n ②希望更立体自然" in text
     assert "●本次预算：5000-8000" in text
     assert "●顾客顾虑：①担心不自然；\n ②担心超预算" in text
-    assert "●推荐方案：①玻尿酸下巴填充（认可程度：犹豫）" in text
-    assert "●种草方案：①水光针维护皮肤状态（认可程度：未明确回应）" in text
+    assert "●推荐方案：\n①玻尿酸下巴填充\n- 顾客反馈：犹豫" in text
+    assert "●种草方案：\n①水光针维护皮肤状态" in text
     assert "●未成交原因：" not in text
     assert "●总结信息：\n1、客户基础信息：" in text
     assert "从消费基础看，既往医美经历相对空白；本次已出现5000-8000的预算或金额线索" in text
@@ -364,11 +498,13 @@ def test_build_consultation_text_wraps_multi_item_sap_fields() -> None:
         " ②改善鼻基底/中面部衔接，希望恢复平整自然"
     ) in text
     assert "●顾客顾虑：①担心风险、副作用或安全性" in text
-    assert (
-        "●推荐方案：①先进行咬肌注射（减法），1.5-2个月后再做玻尿酸面部填充（加法），每侧一次一支，避免移位。"
-        "（用量：每侧1支；疗程：咬肌后1.5-2个月填充；步骤：先注射咬肌；1.5-2个月后再进行填充；要点：控制单侧单支剂量，避免移位）（认可程度：接受）；\n"
-        " ②玻尿酸填充塑形（认可程度：未明确回应）"
-    ) in text
+    assert "●推荐方案：\n①先进行咬肌注射（减法），1.5-2个月后再做玻尿酸面部填充（加法），每侧一次一支，避免移位。" in text
+    assert "- 部位/用量：每侧1支" in text
+    assert "- 疗程/频次：咬肌后1.5-2个月填充" in text
+    assert "- 执行步骤：先注射咬肌；1.5-2个月后再进行填充" in text
+    assert "- 执行要点：控制单侧单支剂量，避免移位" in text
+    assert "- 顾客反馈：接受" in text
+    assert "②玻尿酸填充塑形\n- 顾客反馈：未明确回应" in text
 
 
 def test_extract_existing_sap_preview_text_wraps_multi_item_fields() -> None:
@@ -393,11 +529,10 @@ def test_extract_existing_sap_preview_text_wraps_multi_item_fields() -> None:
 
     assert "●顾客主诉：①调整眶外C线/眉尾轮廓；\n ②改善鼻基底/中面部衔接" in text
     assert "●顾客顾虑：①担心风险；\n ②担心安全性" in text
-    assert (
-        "●推荐方案：①咬肌注射（用量：每侧1支；疗程：1.5-2个月）（认可程度：接受）；\n"
-        " ②玻尿酸填充塑形（认可程度：未明确回应）"
-    ) in text
-    assert "●种草方案：①水光针维护；\n ②光子嫩肤提亮" in text
+    assert "●推荐方案：\n①咬肌注射\n- 部位/用量：每侧1支\n- 疗程/频次：1.5-2个月\n- 顾客反馈：接受" in text
+    assert "②玻尿酸填充塑形\n- 顾客反馈：未明确回应" in text
+    assert "●种草方案：\n①水光针维护" in text
+    assert "②光子嫩肤提亮" in text
 
 
 def test_build_consultation_text_prefers_model_sap_summary_materials() -> None:
@@ -790,8 +925,7 @@ def test_build_consultation_text_dedupes_recommendation_names_in_sap_summary() -
 
     text = build_consultation_text("胡倩雯", result)
 
-    recommendation_line = next(line for line in text.splitlines() if line.startswith("●推荐方案："))
-    assert recommendation_line == "●推荐方案：①深层支撑+肉毒提升方案（认可程度：未接受，当下未选择）"
+    assert "●推荐方案：\n①深层支撑+肉毒提升方案\n- 顾客反馈：未接受，当下未选择" in text
     assert "后续可补充肉毒或深层支撑加强效果" not in text
     assert "深层支撑+肉毒提升方案（认可程度：" not in text.split("●总结信息：", 1)[1]
 
@@ -1115,7 +1249,7 @@ def test_build_consultation_text_uses_empty_demand_and_price_quote_fallback() ->
 
     assert "\u25cf\u987e\u5ba2\u4e3b\u8bc9\uff1a\u65e0" in text
     assert "\u5bf9\u8bdd\u4e2d\u672a\u8bc6\u522b\u51fa\u53ef\u6807\u51c6\u5316\u7684\u9002\u5e94\u75c7" not in text
-    assert "\u25cf\u63a8\u8350\u65b9\u6848\uff1a\u2460\u80f8\u5047\u4f53/\u9686\u80f8\u65b9\u6848\u62a5\u4ef7" in text
+    assert "\u25cf\u63a8\u8350\u65b9\u6848\uff1a\n\u2460\u80f8\u5047\u4f53/\u9686\u80f8\u65b9\u6848\u62a5\u4ef7" in text
     assert "69800" in text
     assert "46800" in text
     assert "5\u4e07" in text

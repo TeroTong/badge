@@ -26,6 +26,8 @@ logger = logging.getLogger("smart_badge.sap_push")
 SAP_FUNCTION_NAME = "ZMC_FM_INT_YMC_SET"
 SAP_IM_TYPE = "YMC_2013"
 SAP_RESULT_FIELD = "RE_DATA"
+EXISTING_CONSULTATION_BUSINESS_STATUS = "EXISTING"
+EXISTING_CONSULTATION_MANUAL_MESSAGE = "已有咨询单，自动回传已停止，请在 SAP Tab 手动提交回传。"
 
 
 def _new_sap_push_client() -> httpx.AsyncClient:
@@ -175,6 +177,27 @@ def _extract_existing_consultation_no(message: str | None) -> str | None:
     return str(matches[-1]).strip() or None
 
 
+def _is_automatic_trigger_mode(trigger_mode: str | None) -> bool:
+    normalized = str(trigger_mode or "").strip().lower()
+    return bool(normalized and normalized != "manual")
+
+
+def _force_create_mode_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    forced_payloads: list[dict[str, Any]] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        cloned = json.loads(json.dumps(payload, ensure_ascii=False))
+        zxxx = cloned.get("zxxx")
+        if not isinstance(zxxx, dict):
+            zxxx = {}
+            cloned["zxxx"] = zxxx
+        zxxx["mode"] = "C"
+        zxxx["zxdh"] = ""
+        forced_payloads.append(cloned)
+    return forced_payloads
+
+
 def _build_update_retry_payload(payload: dict[str, Any], consultation_no: str) -> dict[str, Any]:
     cloned = json.loads(json.dumps(payload, ensure_ascii=False))
     zxxx = cloned.get("zxxx")
@@ -184,6 +207,32 @@ def _build_update_retry_payload(payload: dict[str, Any], consultation_no: str) -
     zxxx["mode"] = "U"
     zxxx["zxdh"] = consultation_no
     return cloned
+
+
+def is_existing_consultation_manual_required_log(log: SapPushLog | dict[str, Any] | None) -> bool:
+    if log is None:
+        return False
+    business_status = str(
+        getattr(log, "business_status", None) if not isinstance(log, dict) else log.get("business_status")
+    ).strip().upper()
+    if business_status == EXISTING_CONSULTATION_BUSINESS_STATUS:
+        return True
+
+    response_items = (
+        getattr(log, "response_items", None)
+        if not isinstance(log, dict)
+        else log.get("response_items")
+    ) or []
+    for item in response_items:
+        if not isinstance(item, dict):
+            continue
+        if bool(item.get("manual_required")):
+            return True
+        retry_reason = str(item.get("retry_reason") or "").strip()
+        business_message = str(item.get("business_message") or "").strip()
+        if "已有咨询单" in business_message and "自动回传" in retry_reason and "手动" in retry_reason:
+            return True
+    return False
 
 
 def _coerce_response_item(item: dict[str, Any], default_request_index: int) -> dict[str, Any]:
@@ -204,6 +253,9 @@ def _coerce_response_item(item: dict[str, Any], default_request_index: int) -> d
     built["payload_mode"] = str(item.get("payload_mode") or "").strip() or None
     built["retry_reason"] = str(item.get("retry_reason") or "").strip() or None
     built["superseded_by_retry"] = bool(item.get("superseded_by_retry"))
+    built["manual_required"] = bool(item.get("manual_required"))
+    if item.get("existing_consultation_no"):
+        built["existing_consultation_no"] = str(item.get("existing_consultation_no") or "").strip()
     return built
 
 
@@ -273,6 +325,13 @@ def summarize_sap_push_log_result(log: SapPushLog | dict[str, Any]) -> dict[str,
     response_items = list(getattr(log, "response_items", None) or (log.get("response_items") if isinstance(log, dict) else []) or [])
     stored_status = str(getattr(log, "status", None) or (log.get("status") if isinstance(log, dict) else "") or "").strip() or "prepared"
     error_message = str(getattr(log, "error_message", None) or (log.get("error_message") if isinstance(log, dict) else "") or "").strip() or None
+
+    if is_existing_consultation_manual_required_log(log):
+        return {
+            "effective_status": "failed",
+            "effective_business_status": EXISTING_CONSULTATION_BUSINESS_STATUS,
+            "effective_reason": EXISTING_CONSULTATION_MANUAL_MESSAGE,
+        }
 
     if error_message:
         return {
@@ -347,6 +406,9 @@ async def create_sap_push_log(
             )
 
     settings = get_settings()
+    request_payloads = list(preview["payloads"])
+    if _is_automatic_trigger_mode(trigger_mode):
+        request_payloads = _force_create_mode_payloads(request_payloads)
     recording = await db.get(Recording, recording_id)
     dispatch_mode = settings.sap_rfc_dispatch_mode
     if not settings.sap_rfc_send_enabled:
@@ -372,7 +434,7 @@ async def create_sap_push_log(
         send_enabled=bool(settings.sap_rfc_send_enabled),
         initiated_by=(initiated_by or "").strip() or None,
         request_url=settings.sap_rfc_gateway_url,
-        request_payloads=preview["payloads"],
+        request_payloads=request_payloads,
         gateway_requests=[],
         response_items=[],
         error_message=error_message,
@@ -477,6 +539,13 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
                     )
                     if not existing_consultation_no:
                         continue
+                    if _is_automatic_trigger_mode(push_log.trigger_mode):
+                        created_item["manual_required"] = True
+                        created_item["existing_consultation_no"] = existing_consultation_no
+                        created_item["retry_reason"] = (
+                            f"已有咨询单 {existing_consultation_no}，自动回传已停止，等待使用者手动回传"
+                        )
+                        continue
 
                     retry_payload = _build_update_retry_payload(request_payloads[index - 1], existing_consultation_no)
                     retry_body = build_sap_gateway_request(retry_payload)
@@ -510,9 +579,18 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
         push_log.response_items = response_items
         logical_results, final_item = _collapse_response_attempts(response_items)
         push_log.http_status_code = final_item["http_status_code"] if final_item else None
-        if final_item:
+        manual_required = is_existing_consultation_manual_required_log(
+            {
+                "business_status": push_log.business_status,
+                "response_items": response_items,
+            }
+        )
+        if manual_required:
+            push_log.business_status = EXISTING_CONSULTATION_BUSINESS_STATUS
+            push_log.business_message = EXISTING_CONSULTATION_MANUAL_MESSAGE
+        elif final_item:
             push_log.business_status = final_item.get("business_status")
-        push_log.business_message = final_item.get("business_message")
+            push_log.business_message = final_item.get("business_message")
         push_log.status = "succeeded" if logical_results and all(item["success"] for item in logical_results) else "failed"
         push_log.sent_at = _utcnow()
         push_log.updated_at = _utcnow()

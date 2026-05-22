@@ -2984,7 +2984,7 @@ def _is_mislabeled_customer_candidate(segment: dict[str, Any], segments: list[di
     role = _normalized_segment_role(segment)
     business_role = _normalized_segment_business_role(segment)
     label = _normalized_segment_label(segment)
-    if "工牌本人" in {role, business_role, label}:
+    if "工牌本人" in {role, business_role, label} and not _looks_like_customer_answer_after_elicitation(segment, segments):
         return False
     is_doctor_role = bool({role, business_role, label} & {"医生", "doctor"})
     if not ({role, business_role, label} & _MISLABELED_CUSTOMER_CANDIDATE_ROLES) and not is_doctor_role:
@@ -3503,8 +3503,10 @@ def _infer_surgical_history_cluster_evidence(segments: list[dict[str, Any]]) -> 
         if not any(keyword in compact_window for keyword in ("双眼皮", "眼袋手术", "鼻综合", "隆鼻", "提眉", "手术", "假体", "膨体", "做过鼻子", "动过鼻子")):
             continue
         if not any(
-            _is_customer_side_segment(item)
-            and _segment_has_staff_signature(item)
+            (
+                (_is_customer_side_segment(item) and _segment_has_staff_signature(item))
+                or _is_staff_side_segment(item)
+            )
             and _looks_like_customer_elicitation_question(_clean_text(item.get("text")))
             for item in window_segments
         ):

@@ -17,9 +17,11 @@ from smart_badge_api.db.models import (
 )
 from smart_badge_api.db.session import _session_factory
 from smart_badge_api.sap_push_service import (
+    EXISTING_CONSULTATION_BUSINESS_STATUS,
     SapPushPreparationError,
     create_sap_push_log,
     execute_sap_push_log,
+    is_existing_consultation_manual_required_log,
     summarize_sap_push_log_result,
 )
 from smart_badge_api.task_queue import dispatch_sap_push_log
@@ -76,6 +78,10 @@ def _blocking_push_log_condition(*, changed_at, retry_after: datetime, stale_bef
         or_(
             status.in_(_AUTO_PUSH_FINAL_BLOCKING_STATUSES),
             and_(
+                status == "failed",
+                func.coalesce(SapPushLog.business_status, "") == EXISTING_CONSULTATION_BUSINESS_STATUS,
+            ),
+            and_(
                 status.in_(_AUTO_PUSH_IN_PROGRESS_STATUSES),
                 activity_at >= stale_before,
             ),
@@ -93,6 +99,8 @@ def _is_push_log_blocking(log: SapPushLog | None, *, retry_after: datetime, stal
 
     status = log.status or ""
     activity_at = _as_utc_aware(log.updated_at or log.sent_at or log.created_at)
+    if is_existing_consultation_manual_required_log(log):
+        return True
     if status in _AUTO_PUSH_FINAL_BLOCKING_STATUSES:
         return True
     if status in _AUTO_PUSH_IN_PROGRESS_STATUSES:
@@ -114,9 +122,14 @@ def _extract_request_text_from_push_log(log: SapPushLog | None) -> str:
     return ""
 
 
+def _normalize_review_text_for_matching(value: str) -> str:
+    lines = [line.strip() for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
 def _review_effective_text_matches_push_log(review: SapConsultationReview, log: SapPushLog | None) -> bool:
-    review_text = str(review.effective_text or "").strip()
-    log_text = _extract_request_text_from_push_log(log)
+    review_text = _normalize_review_text_for_matching(str(review.effective_text or ""))
+    log_text = _normalize_review_text_for_matching(_extract_request_text_from_push_log(log))
     return bool(review_text and log_text and review_text == log_text)
 
 
@@ -160,6 +173,28 @@ def _is_effective_success_push_log(log: SapPushLog | None) -> bool:
         return False
     summary = summarize_sap_push_log_result(log)
     return str(summary.get("effective_status") or log.status or "").strip() == "succeeded"
+
+
+async def _find_matching_success_push_log_for_review(
+    db,
+    review: SapConsultationReview | None,
+) -> SapPushLog | None:
+    if review is None:
+        return None
+    visit_id = str(review.visit_id or "").strip()
+    if not visit_id or not str(review.effective_text or "").strip():
+        return None
+    logs = (
+        await db.execute(
+            select(SapPushLog)
+            .where(SapPushLog.visit_id == visit_id)
+            .order_by(SapPushLog.created_at.desc())
+        )
+    ).scalars().all()
+    for log in logs:
+        if _is_effective_success_push_log(log) and _review_effective_text_matches_push_log(review, log):
+            return log
+    return None
 
 
 async def _has_newer_push_log_for_same_scope(db, push_log: SapPushLog) -> bool:
@@ -284,6 +319,22 @@ async def _has_current_auto_push_log(
         return True
 
     effective_visit_id = target_visit_id or recording.visit_id
+    if effective_visit_id:
+        existing_manual_required_log = (
+            await db.execute(
+                select(SapPushLog)
+                .where(
+                    SapPushLog.visit_id == effective_visit_id,
+                    SapPushLog.status == "failed",
+                    SapPushLog.business_status == EXISTING_CONSULTATION_BUSINESS_STATUS,
+                )
+                .order_by(SapPushLog.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if is_existing_consultation_manual_required_log(existing_manual_required_log):
+            return True
+
     link_change_stmt = select(func.max(func.coalesce(RecordingVisitLink.updated_at, RecordingVisitLink.created_at))).where(
         RecordingVisitLink.recording_id == recording_id
     )
@@ -298,6 +349,12 @@ async def _has_current_auto_push_log(
             )
         ).scalar_one_or_none()
         if _review_has_manual_edits(review):
+            return True
+        matching_success_log = await _find_matching_success_push_log_for_review(db, review)
+        if matching_success_log is not None:
+            review.last_push_log_id = matching_success_log.id
+            review.status = matching_success_log.status or "succeeded"
+            await db.flush()
             return True
         review_changed_at = (
             await db.execute(
@@ -430,20 +487,25 @@ async def _find_pending_review_candidate_refs(
         if ignore_before and recording.created_at and _as_utc_aware(recording.created_at) < ignore_before:
             continue
 
-        latest_any_review_push = (
+        existing_manual_required_log = (
             await db.execute(
                 select(SapPushLog)
-                .where(SapPushLog.visit_id == visit_id)
+                .where(
+                    SapPushLog.visit_id == visit_id,
+                    SapPushLog.status == "failed",
+                    SapPushLog.business_status == EXISTING_CONSULTATION_BUSINESS_STATUS,
+                )
                 .order_by(SapPushLog.created_at.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if (
-            _is_effective_success_push_log(latest_any_review_push)
-            and _review_effective_text_matches_push_log(review, latest_any_review_push)
-        ):
-            review.last_push_log_id = latest_any_review_push.id
-            review.status = latest_any_review_push.status or "succeeded"
+        if is_existing_consultation_manual_required_log(existing_manual_required_log):
+            continue
+
+        matching_success_log = await _find_matching_success_push_log_for_review(db, review)
+        if matching_success_log is not None:
+            review.last_push_log_id = matching_success_log.id
+            review.status = matching_success_log.status or "succeeded"
             await db.commit()
             continue
 
@@ -509,6 +571,16 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
             ),
         )
     )
+    has_existing_consultation_manual_required_log = exists(
+        select(SapPushLog.id).where(
+            or_(
+                SapPushLog.recording_id == Recording.id,
+                SapPushLog.visit_id == Recording.visit_id,
+            ),
+            SapPushLog.status == "failed",
+            SapPushLog.business_status == EXISTING_CONSULTATION_BUSINESS_STATUS,
+        )
+    )
     has_completed_analysis = exists(
         select(AnalysisTask.id).where(
             AnalysisTask.file_name == (literal("recording_") + Recording.id + literal(".json")),
@@ -569,6 +641,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
                 link_count_subquery <= 1,
                 has_completed_analysis,
                 ~has_blocking_push_log,
+                ~has_existing_consultation_manual_required_log,
                 or_(
                     latest_link_change_subquery.is_(None),
                     latest_link_change_subquery <= stable_before,
@@ -638,6 +711,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
                 *([Recording.created_at >= ignore_before] if ignore_before else []),
                 link_count_subquery > 1,
                 has_completed_analysis,
+                ~has_existing_consultation_manual_required_log,
                 or_(
                     latest_link_change_subquery.is_(None),
                     latest_link_change_subquery <= stable_before,
@@ -709,6 +783,13 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
                 ),
             )
         )
+        has_existing_consultation_visit_analysis_log = exists(
+            select(SapPushLog.id).where(
+                SapPushLog.visit_id == RecordingVisitAnalysis.visit_id,
+                SapPushLog.status == "failed",
+                SapPushLog.business_status == EXISTING_CONSULTATION_BUSINESS_STATUS,
+            )
+        )
         multi_stmt = (
             select(RecordingVisitAnalysis.recording_id, RecordingVisitAnalysis.visit_id)
             .join(Recording, Recording.id == RecordingVisitAnalysis.recording_id)
@@ -723,6 +804,7 @@ async def _find_auto_push_candidate_refs(limit: int) -> list[tuple[str, str | No
                 RecordingVisitAnalysis.sap_ready_at <= stable_before,
                 multi_latest_link_change <= stable_before,
                 ~has_blocking_visit_push_log,
+                ~has_existing_consultation_visit_analysis_log,
             )
             .order_by(Recording.created_at.asc(), RecordingVisitAnalysis.visit_id.asc())
             .limit(remaining_limit)

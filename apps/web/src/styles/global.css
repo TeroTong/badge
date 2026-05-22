@@ -1930,6 +1930,38 @@ a {
   background: rgba(255, 255, 255, 0.78);
 }
 
+.ad-recommend-detail-grid {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+.ad-recommend-detail-grid__item {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.ad-recommend-detail-grid__item dt {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ad-recommend-detail-grid__item dd {
+  margin: 0;
+  color: #1f2937;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .ad-demand-item__relation {
   display: grid;
   gap: 6px;
@@ -16847,6 +16879,21 @@ a {
 .wc-analysis-detail-shell .ad-demand-item__header,
 .wc-analysis-detail-shell .ad-recommend-item__header {
   gap: 6px;
+}
+
+.wc-analysis-detail-shell .ad-recommend-detail-grid {
+  padding: 7px 8px;
+  gap: 5px;
+}
+
+.wc-analysis-detail-shell .ad-recommend-detail-grid__item {
+  grid-template-columns: 58px 1fr;
+  gap: 6px;
+}
+
+.wc-analysis-detail-shell .ad-recommend-detail-grid__item dt,
+.wc-analysis-detail-shell .ad-recommend-detail-grid__item dd {
+  font-size: 0.74rem;
 }
 
 .wc-analysis-detail-shell .ad-indications__title {

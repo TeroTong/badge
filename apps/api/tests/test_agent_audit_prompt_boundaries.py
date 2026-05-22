@@ -70,6 +70,8 @@ def test_final_result_audit_prompt_uses_generic_display_rules() -> None:
     assert "付款/定金金额不等于客户预算" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
     assert "不能把同行客户成交归到主咨询客户" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
     assert "客户画像只保留客户本人的事实" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
+    assert "结构支撑与提升塑形方案" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
+    assert "姐姐刚刚做的热玛吉不影响" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
     assert "不要把既往项目花费、外院价格" in _FINAL_RESULT_AUDIT_SYSTEM_PROMPT
 
 
@@ -189,6 +191,34 @@ def test_final_result_audit_triggers_when_deal_has_no_displayed_recommendations(
     assert "deal_outcome_without_displayed_recommendations" in reasons
     assert "fact_recommendations_lost_in_rendered_result" in reasons
     assert "fact_seed_recommendations_lost_in_rendered_result" in reasons
+
+
+def test_final_result_audit_triggers_for_overwritten_recommendation_titles() -> None:
+    analysis_result = {
+        "customer_primary_demands": {"items": [{"priority": 1, "demand": "改善法令纹"}]},
+        "customer_concerns": {"items": []},
+        "staff_recommendations": {
+            "items": [
+                {
+                    "recommendation": "中面部深层瑞德喜填充联合后期浅层童颜针分阶段抗衰提升方案",
+                    "brand": "瑞德喜",
+                    "dosage": "一支",
+                    "implementation_notes": "先深层支撑，后续再考虑童颜针",
+                    "demand_priority": [1],
+                }
+            ]
+        },
+    }
+
+    needed, reasons = _final_result_audit_needed(
+        analysis_result,
+        corrected_dialogue="先做一支瑞德喜，后面再考虑童颜针",
+        fact_graph={"recommendations": [{"content": "中面部瑞德喜支撑"}]},
+        event_graph={},
+    )
+
+    assert needed is True
+    assert "overwritten_recommendation_titles_need_naturalization" in reasons
 
 
 def test_final_result_audit_patch_deep_merges_without_dropping_deal_outcome() -> None:

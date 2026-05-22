@@ -48,6 +48,8 @@ def test_plan_prompt_preserves_details_and_participant_boundaries() -> None:
     assert "必须使用 content 字段" in _PLAN_AGENT_SYSTEM_PROMPT
     assert "不要用 plan、plan_summary、title" in _PLAN_AGENT_SYSTEM_PROMPT
     assert "备选、对比、替代材料放入" in _PLAN_AGENT_SYSTEM_PROMPT
+    assert "不要为了显得专业而改写成营销式或论文式标题" in _PLAN_AGENT_SYSTEM_PROMPT
+    assert "中面部/内侧苹果肌先做一支瑞德喜支撑" in _PLAN_AGENT_SYSTEM_PROMPT
 
 
 def test_plan_prompt_avoids_over_specific_body_part_exceptions() -> None:
