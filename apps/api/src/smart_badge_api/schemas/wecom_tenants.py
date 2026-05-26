@@ -21,6 +21,7 @@ class WecomTenantCreate(BaseModel):
     sap_summary_template: str | None = None
     sap_summary_prompt: str | None = None
     sap_summary_enabled: bool = True
+    sap_auto_update_existing_consultation: bool = False
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool = False
     is_active: bool = True
@@ -42,6 +43,7 @@ class WecomTenantUpdate(BaseModel):
     sap_summary_template: str | None = None
     sap_summary_prompt: str | None = None
     sap_summary_enabled: bool | None = None
+    sap_auto_update_existing_consultation: bool | None = None
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool | None = None
     is_active: bool | None = None
@@ -62,6 +64,7 @@ class WecomTenantOut(BaseModel):
     sap_summary_template: str | None
     sap_summary_prompt: str | None
     sap_summary_enabled: bool
+    sap_auto_update_existing_consultation: bool
     department_assistant_match_config: dict[str, Any] | None = None
     is_default: bool
     is_active: bool

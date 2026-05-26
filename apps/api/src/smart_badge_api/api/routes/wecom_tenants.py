@@ -139,6 +139,9 @@ def _to_out(row: WecomTenant) -> WecomTenantOut:
         sap_summary_template=row.sap_summary_template,
         sap_summary_prompt=row.sap_summary_prompt,
         sap_summary_enabled=bool(getattr(row, "sap_summary_enabled", True)),
+        sap_auto_update_existing_consultation=bool(
+            getattr(row, "sap_auto_update_existing_consultation", False)
+        ),
         department_assistant_match_config=row.department_assistant_match_config,
         is_default=bool(row.is_default),
         is_active=bool(row.is_active),
@@ -287,6 +290,7 @@ async def create_wecom_tenant(
         sap_summary_template=_clean(body.sap_summary_template),
         sap_summary_prompt=_clean(body.sap_summary_prompt),
         sap_summary_enabled=bool(body.sap_summary_enabled),
+        sap_auto_update_existing_consultation=bool(body.sap_auto_update_existing_consultation),
         department_assistant_match_config=_normalize_department_assistant_match_config(
             body.department_assistant_match_config
         ),

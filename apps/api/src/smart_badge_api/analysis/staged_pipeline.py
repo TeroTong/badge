@@ -4468,29 +4468,111 @@ _AUTO_ROLE_CUSTOMER_SIDE_STAFF_CUES = (
     "那我们去看看",
     "带您去看",
     "带你去看",
+    "我会跟你讲",
+    "我给你讲",
+    "老师会跟你讲",
+    "我已经说完",
+    "后期我会跟你讲",
+    "先得把额头",
+    "有没有必要",
+    "能消多少看",
+    "交给腾讯",
 )
 _AUTO_ROLE_DOCTOR_EXPLANATION_CUES = (
+    "首先",
+    "建议你",
+    "我建议",
+    "你这个",
+    "你的情况",
+    "解决",
+    "改善",
+    "需要",
+    "可以通过",
+    "不建议",
+    "风险",
+    "恢复",
     "深层填充",
     "骨头表面",
     "骨性",
     "层次",
+    "点位",
     "注射",
+    "填充",
     "玻尿酸",
+    "胶原",
+    "瑞德喜",
     "童颜针",
     "内侧苹果肌",
     "鼻基底",
     "法令纹",
+    "双眼皮",
+    "眼袋",
+    "泪沟",
+    "苹果肌",
+    "眼窝",
+    "凹陷",
+    "下垂",
+    "皮肤",
+    "脂肪",
+    "自体脂肪",
+    "手术方式",
+    "治疗路径",
     "材料",
+    "支撑",
+    "衔接",
+    "比例",
+    "效果",
+    "不协调",
+    "移位",
+    "硬质",
+    "软材料",
+    "骨头表面",
+    "颞区",
+    "太阳穴",
+    "额颞",
+    "内轮廓线",
+    "外C线",
+    "外轮廓线",
+    "耳前韧带",
+    "翘度",
+    "幼态",
+    "发育",
+    "底层逻辑",
+    "受不了",
+    "剂量",
+    "先打一只",
+    "一只肉毒",
     "不含玻尿酸",
     "发黄",
     "馒化",
     "用量",
     "每边",
     "两支",
+    "两只",
     "一支",
+    "一只",
     "固定",
     "提升",
     "收紧",
+)
+_AUTO_ROLE_NON_DOCTOR_IDENTITY_CUES = (
+    "我是今天接待",
+    "专家助理",
+    "医生助理",
+    "院长助理",
+    "我去看一下",
+    "手术进展",
+    "先让他看",
+    "让他给您看",
+    "帮我面诊",
+    "带顾客来",
+    "我带顾客",
+    "我带您",
+    "带您到",
+    "先跟他面诊",
+    "喊他面诊",
+    "约了我们",
+    "王院长",
 )
 
 
@@ -4510,15 +4592,272 @@ def _line_has_customer_side_staff_cue(line: str) -> bool:
 
 def _line_has_doctor_explanation_cue(line: str) -> bool:
     role, compact_text = _line_role_and_compact_text(line)
-    if not role or not any(term in role for term in ("咨询师", "工牌本人", "专家", "助理", "员工")):
+    if not role or not any(term in role for term in ("医生", "咨询师", "工牌本人", "专家", "助理", "员工")):
         return False
-    return sum(cue in compact_text for cue in _AUTO_ROLE_DOCTOR_EXPLANATION_CUES) >= 2
+    hit_count = sum(cue in compact_text for cue in _AUTO_ROLE_DOCTOR_EXPLANATION_CUES)
+    if hit_count >= 3 and len(compact_text) >= 24:
+        return True
+    technical_anchors = (
+        "颞区",
+        "太阳穴",
+        "外C线",
+        "外轮廓线",
+        "内轮廓线",
+        "耳前韧带",
+        "玻尿酸",
+        "肉毒",
+        "剂量",
+        "骨头表面",
+        "材料",
+        "支撑",
+        "衔接",
+        "翘度",
+        "幼态",
+    )
+    if hit_count >= 2 and len(compact_text) >= 18 and any(anchor in compact_text for anchor in technical_anchors):
+        return True
+    return hit_count >= 2 and any(anchor in compact_text for anchor in ("建议你", "我建议", "首先", "你这个", "你的情况", "不建议"))
+
+
+def _line_has_customer_labeled_doctor_explanation_cue(line: str) -> bool:
+    role, compact_text = _line_role_and_compact_text(line)
+    if not role or not any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")):
+        return False
+    hit_count = sum(cue in compact_text for cue in _AUTO_ROLE_DOCTOR_EXPLANATION_CUES)
+    if hit_count >= 4 and len(compact_text) >= 28:
+        return True
+    return hit_count >= 3 and any(anchor in compact_text for anchor in ("建议你", "我建议", "首先", "你这个", "你的情况", "不建议", "手术方式"))
+
+
+def _line_has_customer_self_or_question_cue(line: str) -> bool:
+    role, compact_text = _line_role_and_compact_text(line)
+    if not role or not any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")):
+        return False
+    return any(
+        cue in compact_text
+        for cue in (
+            "我想",
+            "我觉得",
+            "我担心",
+            "我怕",
+            "我做过",
+            "我打过",
+            "我填过",
+            "我这个",
+            "我这种",
+            "我的",
+            "多少钱",
+            "贵",
+            "能不能做",
+            "可不可以",
+            "要不要",
+            "为什么",
+            "可以吗",
+            "能做吗",
+        )
+    )
+
+
+_AUTO_ROLE_CUSTOMER_SELF_CUES = (
+    "我觉得",
+    "我感觉",
+    "我想",
+    "我担心",
+    "我怕",
+    "我之前",
+    "我以前",
+    "我上次",
+    "我现在",
+    "我本来",
+    "我太阳穴",
+    "我看来",
+    "我做过",
+    "我打过",
+    "我填过",
+    "我这个",
+    "我的",
+    "我最近",
+    "我后面",
+    "我从侧面",
+    "我在那",
+    "多少钱",
+    "价格",
+    "贵",
+    "能不能",
+    "可不可以",
+    "要不要",
+    "加几只",
+    "加几支",
+    "几只",
+    "几支",
+)
+_AUTO_ROLE_STAFF_FIRST_PERSON_CUES = (
+    "我建议",
+    "我倾向",
+    "我来给你",
+    "我给你打",
+    "我可以给你",
+    "我会给你讲",
+    "我给你讲",
+    "我已经说完",
+    "我不好去做",
+    "我知道有没有空间",
+    "我带你",
+    "我带您",
+    "我去看",
+    "我的客户",
+)
+
+
+def _line_has_customer_self_or_question_cue_any_role(line: str) -> bool:
+    role, compact_text = _line_role_and_compact_text(line)
+    if not compact_text:
+        return False
+    if any(cue in compact_text for cue in _AUTO_ROLE_STAFF_FIRST_PERSON_CUES):
+        return False
+    role_looks_staff = any(term in role for term in ("医生", "咨询师", "工牌本人", "专家", "助理", "员工", "前台"))
+    price_only = any(term in compact_text for term in ("价格", "多少钱", "贵", "预算", "优惠"))
+    has_customer_self_anchor = any(
+        term in compact_text
+        for term in ("我觉得", "我感觉", "我想", "我担心", "我怕", "我之前", "我以前", "我上次", "我做过", "我打过", "我填过", "我这个", "我的", "我最近", "我后面", "我从侧面", "能不能", "可不可以", "要不要", "加几只", "加几支", "几只", "几支")
+    )
+    if role_looks_staff and price_only and not has_customer_self_anchor:
+        return False
+    if any(cue in compact_text for cue in _AUTO_ROLE_CUSTOMER_SELF_CUES):
+        if _line_has_doctor_explanation_cue(line) and not any(term in compact_text for term in ("我觉得", "我感觉", "我想", "我担心", "我怕", "我这个", "我之前", "我从侧面", "多少钱", "价格")):
+            return False
+        return True
+    return False
+
+
+def _customer_labeled_doctor_like_speakers(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+) -> set[str]:
+    by_speaker: dict[str, dict[str, int]] = {}
+    for line_id, line in lines.items():
+        role, compact_text = _line_role_and_compact_text(line)
+        if not any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")):
+            continue
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if not asr_speaker:
+            continue
+        stat = by_speaker.setdefault(asr_speaker, {"doctor_hits": 0, "chars": 0})
+        stat["chars"] += len(compact_text)
+        if _line_has_customer_labeled_doctor_explanation_cue(line):
+            stat["doctor_hits"] += 1
+    return {
+        speaker
+        for speaker, stat in by_speaker.items()
+        if stat["doctor_hits"] >= 3 and stat["chars"] >= 120
+    }
+
+
+def _doctor_role_rich_speakers(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+) -> set[str]:
+    by_speaker: dict[str, dict[str, int]] = {}
+    for line_id, line in lines.items():
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if not asr_speaker:
+            continue
+        role, compact_text = _line_role_and_compact_text(line)
+        stat = by_speaker.setdefault(asr_speaker, {"doctor_lines": 0, "professional_hits": 0, "chars": 0})
+        stat["chars"] += len(compact_text)
+        if "医生" in role:
+            stat["doctor_lines"] += 1
+        if _line_has_doctor_explanation_cue(line):
+            stat["professional_hits"] += 1
+    conflicted = _speaker_has_non_doctor_identity_conflict(lines, line_metadata)
+    return {
+        speaker
+        for speaker, stat in by_speaker.items()
+        if speaker not in conflicted and stat["doctor_lines"] >= 3 and stat["professional_hits"] >= 3 and stat["chars"] >= 120
+    }
+
+
+def _line_is_consultant_transfer_or_customer_question(line: str) -> bool:
+    _role, compact_text = _line_role_and_compact_text(line)
+    return any(
+        cue in compact_text
+        for cue in (
+            "我听他",
+            "我听医生",
+            "他的意思",
+            "他说",
+            "他好像",
+            "医生说",
+            "转述",
+            "等于说我",
+            "那是因为我",
+            "所以为什么",
+        )
+    )
+
+
+def _speaker_has_non_doctor_identity_conflict(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+) -> set[str]:
+    """Find ASR speakers that should not be globally mapped to doctor.
+
+    ASR sometimes puts an expert assistant / consultant and a doctor into the
+    same speaker bucket. A global doctor map then corrupts reception and handoff
+    lines, so those cases should use line-level corrections instead.
+    """
+    by_speaker: dict[str, dict[str, int]] = {}
+    for line_id, line in lines.items():
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if not asr_speaker:
+            continue
+        _role, compact_text = _line_role_and_compact_text(line)
+        stat = by_speaker.setdefault(asr_speaker, {"non_doctor": 0, "doctor_like": 0})
+        if any(cue in compact_text for cue in _AUTO_ROLE_NON_DOCTOR_IDENTITY_CUES):
+            stat["non_doctor"] += 1
+        if _line_has_customer_self_or_question_cue_any_role(line):
+            stat["non_doctor"] += 1
+        if _line_has_doctor_explanation_cue(line) or _line_has_customer_labeled_doctor_explanation_cue(line):
+            stat["doctor_like"] += 1
+    return {
+        speaker
+        for speaker, stat in by_speaker.items()
+        if stat["non_doctor"] >= 1 and stat["doctor_like"] >= 1
+    }
+
+
+def _speakers_mixing_customer_self_and_professional_explanation(
+    lines: dict[str, str],
+    line_metadata: dict[str, dict[str, str]] | None,
+) -> set[str]:
+    by_speaker: dict[str, dict[str, int]] = {}
+    for line_id, line in lines.items():
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        if not asr_speaker:
+            continue
+        stat = by_speaker.setdefault(asr_speaker, {"customer_self": 0, "professional": 0, "chars": 0})
+        _role, compact_text = _line_role_and_compact_text(line)
+        stat["chars"] += len(compact_text)
+        if _line_has_customer_self_or_question_cue_any_role(line):
+            stat["customer_self"] += 1
+        if _line_has_doctor_explanation_cue(line) or _line_has_customer_labeled_doctor_explanation_cue(line):
+            stat["professional"] += 1
+    return {
+        speaker
+        for speaker, stat in by_speaker.items()
+        if stat["customer_self"] >= 1 and stat["professional"] >= 3 and stat["chars"] >= 120
+    }
 
 
 def _auto_repair_speaker_roles(
     lines: dict[str, str],
     line_metadata: dict[str, dict[str, str]] | None,
     explicit_role_map_speakers: set[str],
+    mixed_customer_staff_speakers: set[str] | None = None,
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Add conservative role repairs for common badge diarization failures.
 
@@ -4528,27 +4867,31 @@ def _auto_repair_speaker_roles(
     """
     repaired = dict(lines)
     repairs: list[dict[str, Any]] = []
-    has_mixed_customer_staff = any(_line_has_customer_side_staff_cue(line) for line in lines.values())
-    if not has_mixed_customer_staff:
-        return repaired, repairs
+    has_mixed_customer_staff = bool(mixed_customer_staff_speakers) or any(
+        _line_has_customer_side_staff_cue(line) for line in lines.values()
+    )
+    customer_doctor_like_speakers = _customer_labeled_doctor_like_speakers(lines, line_metadata)
+    doctor_role_speakers = _doctor_role_rich_speakers(lines, line_metadata)
+    mixed_customer_professional_speakers = _speakers_mixing_customer_self_and_professional_explanation(lines, line_metadata)
 
     speaker_stats: dict[str, dict[str, Any]] = {}
-    for line_id, line in lines.items():
-        metadata = (line_metadata or {}).get(line_id) or {}
-        asr_speaker = _clean_text(metadata.get("asr_speaker"))
-        if not asr_speaker or asr_speaker in explicit_role_map_speakers:
-            continue
-        role, compact_text = _line_role_and_compact_text(line)
-        label = _clean_text(metadata.get("speaker_label"))
-        if "工牌本人" not in line and "工牌本人" not in label:
-            continue
-        if not any(term in role for term in ("咨询师", "工牌本人", "员工", "专家助理")):
-            continue
-        stat = speaker_stats.setdefault(asr_speaker, {"line_ids": [], "doctor_hits": 0, "chars": 0})
-        stat["line_ids"].append(line_id)
-        stat["chars"] += len(compact_text)
-        if _line_has_doctor_explanation_cue(line):
-            stat["doctor_hits"] += 1
+    if has_mixed_customer_staff:
+        for line_id, line in lines.items():
+            metadata = (line_metadata or {}).get(line_id) or {}
+            asr_speaker = _clean_text(metadata.get("asr_speaker"))
+            if not asr_speaker or asr_speaker in explicit_role_map_speakers:
+                continue
+            role, compact_text = _line_role_and_compact_text(line)
+            label = _clean_text(metadata.get("speaker_label"))
+            if "工牌本人" not in line and "工牌本人" not in label:
+                continue
+            if not any(term in role for term in ("咨询师", "工牌本人", "员工", "专家助理")):
+                continue
+            stat = speaker_stats.setdefault(asr_speaker, {"line_ids": [], "doctor_hits": 0, "chars": 0})
+            stat["line_ids"].append(line_id)
+            stat["chars"] += len(compact_text)
+            if _line_has_doctor_explanation_cue(line):
+                stat["doctor_hits"] += 1
 
     doctor_like_speakers = {
         speaker
@@ -4558,7 +4901,20 @@ def _auto_repair_speaker_roles(
     for line_id, line in list(repaired.items()):
         metadata = (line_metadata or {}).get(line_id) or {}
         asr_speaker = _clean_text(metadata.get("asr_speaker"))
-        if asr_speaker in doctor_like_speakers:
+        if asr_speaker in mixed_customer_professional_speakers and _line_has_doctor_explanation_cue(line) and not _line_has_customer_self_or_question_cue_any_role(line):
+            before = repaired[line_id]
+            repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
+            if before != repaired[line_id]:
+                repairs.append(
+                    {
+                        "line_id": line_id,
+                        "asr_speaker": asr_speaker,
+                        "display_speaker": "医生",
+                        "reason": "mixed_speaker_professional_line_repaired_to_doctor",
+                    }
+                )
+            continue
+        if asr_speaker in doctor_like_speakers and asr_speaker not in mixed_customer_professional_speakers:
             before = repaired[line_id]
             repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
             if before != repaired[line_id]:
@@ -4568,6 +4924,53 @@ def _auto_repair_speaker_roles(
                         "asr_speaker": asr_speaker,
                         "display_speaker": "医生",
                         "reason": "badge_owner_speaker_has_doctor_explanation_and_customer_side_staff_cues",
+                    }
+                )
+            continue
+        if asr_speaker in customer_doctor_like_speakers:
+            role, _compact_text = _line_role_and_compact_text(line)
+            if any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")) and not _line_has_customer_self_or_question_cue(line):
+                before = repaired[line_id]
+                repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
+                if before != repaired[line_id]:
+                    repairs.append(
+                        {
+                            "line_id": line_id,
+                            "asr_speaker": asr_speaker,
+                            "display_speaker": "医生",
+                            "reason": "customer_labeled_speaker_is_doctor_explanation_block",
+                        }
+                )
+                continue
+        if asr_speaker in doctor_role_speakers:
+            role, _compact_text = _line_role_and_compact_text(line)
+            if (
+                any(term in role for term in ("咨询师", "专家助理", "员工", "工牌本人"))
+                and _line_has_doctor_explanation_cue(line)
+                and not _line_is_consultant_transfer_or_customer_question(line)
+            ):
+                before = repaired[line_id]
+                repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
+                if before != repaired[line_id]:
+                    repairs.append(
+                        {
+                            "line_id": line_id,
+                            "asr_speaker": asr_speaker,
+                            "display_speaker": "医生",
+                            "reason": "professional_explanation_inside_doctor_speaker_block",
+                        }
+                    )
+                continue
+        if _line_has_customer_labeled_doctor_explanation_cue(line):
+            before = repaired[line_id]
+            repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "医生")
+            if before != repaired[line_id]:
+                repairs.append(
+                    {
+                        "line_id": line_id,
+                        "asr_speaker": asr_speaker,
+                        "display_speaker": "医生",
+                        "reason": "customer_labeled_line_contains_doctor_explanation_cue",
                     }
                 )
             continue
@@ -4583,6 +4986,21 @@ def _auto_repair_speaker_roles(
                         "reason": "customer_labeled_line_contains_staff_consultant_cue",
                     }
                 )
+            continue
+        if _line_has_customer_self_or_question_cue_any_role(line):
+            role, _compact_text = _line_role_and_compact_text(line)
+            if not any(term in role for term in ("客户", "主客户", "同行人", "访客", "陪同人员")):
+                before = repaired[line_id]
+                repaired[line_id] = _replace_line_speaker_role(repaired[line_id], "主咨询客户")
+                if before != repaired[line_id]:
+                    repairs.append(
+                        {
+                            "line_id": line_id,
+                            "asr_speaker": asr_speaker,
+                            "display_speaker": "主咨询客户",
+                            "reason": "staff_labeled_line_contains_customer_self_or_price_cue",
+                        }
+                    )
     return repaired, repairs
 
 
@@ -4636,6 +5054,8 @@ def _apply_correction_patch(
 
     role_map: dict[str, dict[str, Any]] = {}
     mixed_staff_speakers = _customer_side_speakers_with_staff_cues(lines, line_metadata)
+    customer_doctor_like_speakers = _customer_labeled_doctor_like_speakers(lines, line_metadata)
+    non_doctor_identity_speakers = _speaker_has_non_doctor_identity_conflict(lines, line_metadata)
     for item in _as_list(patch.get("speaker_role_map")):
         if not isinstance(item, dict):
             continue
@@ -4654,6 +5074,15 @@ def _apply_correction_patch(
                     **item,
                     "asr_speaker": asr_speaker,
                     "skip_reason": "speaker_contains_customer_side_staff_cues; use line-level corrections instead",
+                }
+            )
+            continue
+        if asr_speaker in non_doctor_identity_speakers and role == "doctor":
+            skipped_speaker_maps.append(
+                {
+                    **item,
+                    "asr_speaker": asr_speaker,
+                    "skip_reason": "speaker_mixes_non_doctor_identity_with_doctor_like_lines; use line-level corrections instead",
                 }
             )
             continue
@@ -4690,9 +5119,16 @@ def _apply_correction_patch(
                     }
                 )
 
-    lines, auto_speaker_repairs = _auto_repair_speaker_roles(lines, line_metadata, set(role_map))
+    lines, auto_speaker_repairs = _auto_repair_speaker_roles(
+        lines,
+        line_metadata,
+        set(role_map),
+        mixed_customer_staff_speakers=mixed_staff_speakers,
+    )
+    repaired_doctor_role_speakers = _doctor_role_rich_speakers(lines, line_metadata)
 
     speaker_notes: dict[str, str] = {}
+    skipped_speaker_corrections: list[dict[str, Any]] = []
     for item in _as_list(patch.get("speaker_corrections")):
         if not isinstance(item, dict):
             continue
@@ -4707,6 +5143,36 @@ def _apply_correction_patch(
             continue
         reason = _clean_text(item.get("reason"))
         display_speaker = _display_speaker_from_mapping({**item, "role": speaker})
+        metadata = (line_metadata or {}).get(line_id) or {}
+        asr_speaker = _clean_text(metadata.get("asr_speaker"))
+        current_role, _current_text = _line_role_and_compact_text(lines[line_id])
+        if (
+            _line_has_customer_side_staff_cue(lines[line_id])
+            and "咨询师" in current_role
+            and display_speaker in {"主咨询客户", "客户", "同行客户", "同行客户A", "同行客户B", "陪同人员"}
+        ):
+            skipped_speaker_corrections.append(
+                {
+                    **item,
+                    "line_id": line_id,
+                    "skip_reason": "customer_side_staff_cue_auto_repair_takes_precedence",
+                }
+            )
+            continue
+        if (
+            (asr_speaker in customer_doctor_like_speakers or asr_speaker in repaired_doctor_role_speakers)
+            and "医生" in current_role
+            and display_speaker in {"咨询师", "专家助理"}
+            and _line_has_doctor_explanation_cue(lines[line_id])
+        ):
+            skipped_speaker_corrections.append(
+                {
+                    **item,
+                    "line_id": line_id,
+                    "skip_reason": "doctor_explanation_block_auto_repair_takes_precedence",
+                }
+            )
+            continue
         lines[line_id] = _replace_line_speaker_role(lines[line_id], display_speaker)
         scope = _clean_text(item.get("customer_scope") or item.get("participant_scope"))
         note_parts = [f"speaker_correction={display_speaker}"]
@@ -4725,6 +5191,7 @@ def _apply_correction_patch(
         "applied_speaker_role_map": applied_speaker_maps,
         "applied_speaker_corrections": applied_speaker,
         "skipped_speaker_role_maps": skipped_speaker_maps,
+        "skipped_speaker_corrections": skipped_speaker_corrections,
         "applied_term_corrections": applied_terms,
         "skipped_term_corrections": skipped_terms,
         "auto_speaker_role_repairs": auto_speaker_repairs,

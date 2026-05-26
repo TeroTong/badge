@@ -298,6 +298,7 @@ class WecomTenant(Base):
     sap_summary_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     sap_summary_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     sap_summary_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    sap_auto_update_existing_consultation: Mapped[bool] = mapped_column(Boolean, default=False)
     department_assistant_match_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

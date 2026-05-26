@@ -58,7 +58,7 @@ _CORRECTION_AGENT_SYSTEM_PROMPT = """\
 核心原则：
 1. 保守修改。
    - 只有当上下文强支持时，才写入 term_corrections；不确定时不要改，写入 uncertain_notes。
-   - 不要整句重写。稳定的整段说话人角色用 speaker_role_map；只有明确串音、分离错误或局部例外时，才用 speaker_corrections。
+   - 不要整句重写。只有同一个 asr_speaker 在本次录音中角色稳定时，才用 speaker_role_map；一旦同一个 asr_speaker 混有客户、咨询师、医生或助理，必须改用 speaker_corrections 逐句修正，不能用全局映射掩盖混说话人的情况。
    - 不要为了让中文更通顺而改口语、语病或普通错词；只有会影响医美事实、角色判断或后续抽取的错误才修改。
 
 2. 输出枚举必须保持英文，不能自造枚举。
@@ -76,7 +76,10 @@ _CORRECTION_AGENT_SYSTEM_PROMPT = """\
    - 员工内部沟通：排班、领导/同事、成本利润、订单/成交/收款、其他客户案例、客户归属，如“我的客户”“挂我名下”“我在接”“谁接”。这类 customer_scope=staff。
    - 面诊前准备：叫名字、查预约、带路进房间、签到签字、等待医生、测试/倒计时；在真实客户诉求出现前，通常是 frontdesk/staff_peer/consultant，不要误判成客户主诉。
    - 专业讲解不等于医生。咨询师、专家助理也会讲解解剖、方案、用量、风险和价格。自称“专家助理/医生助理/院长助理”的，标为 expert_assistant，不标为 doctor。
-   - 但如果某个 speaker 连续给出医生式诊断、解剖机制、注射层次/点位/材料/用量/风险，并直接决定治疗路径，而另一个员工侧话语在旁边确认、记录、引导或提问，则优先把前者判为 doctor，即使它被标成“工牌本人/咨询师”。
+   - 但如果某个 speaker 连续给出医生式诊断、解剖机制、治疗路径、注射层次/点位/材料/用量/风险，或围绕“你这个问题怎么解决”直接作出医学/方案判断，而另一个员工侧话语在旁边确认、记录、引导或提问，则优先把前者判为 doctor，即使它被标成“工牌本人/咨询师”。
+   - 如果客户标签下出现连续的专业讲解、案例对比、术式/材料/用量/风险说明，且语气是在向“你/您”解释而不是客户自述或提问，不要保留为 customer；应逐句修正为 doctor、consultant 或 expert_assistant。
+   - 如果同一个 asr_speaker 里既有“我是专家助理/医生助理/院长助理”“我去看医生/院长进展”“我带您去让医生看”“帮我面诊”等接待或助理话术，又有医生式专业讲解，不要把整个 asr_speaker 用 speaker_role_map 统一成 doctor；必须用 speaker_corrections 分别修正具体行。
+   - 如果同一个 asr_speaker 内同时出现客户个人诉求/追问（如“我之前做过/打过”“我觉得/我感觉”“我想/我担心”“我这个要加几支/多少钱/价格待会看”）和医生/咨询师讲解，不要把整个 speaker_role_map 统一成 doctor、consultant 或 customer；必须逐句修正，客户自述行保留为主咨询客户，专业解释行标为医生/咨询师。
    - 如果同一个 asr_speaker 内同时出现客户个人诉求/追问，以及员工话术（如第三人称称呼当前客户“姐姐/妹妹/顾客”、说“我们都记了”“还有什么想问我的吗”“我们去看看/带您去看”），不要把整个 speaker_role_map 统一成客户；应保留稳定部分，用 speaker_corrections 逐句修正明显的咨询师/员工/医生行。
    - 不要把客户引用家人、朋友、医生、其他机构的话，误改成员工发言。
 
@@ -101,7 +104,12 @@ _CORRECTION_AGENT_SYSTEM_PROMPT = """\
    不要做大跨度改写或语义补全，例如把整段不通顺的话改成一整句新话。term_corrections 只修正最小必要片段。
    不确定的术语保留原文并写 uncertain_notes。
 
-7. 置信度和输出。
+7. 输出前自检。
+   - 检查所有被标为 customer/主咨询客户/同行客户的行：如果内容是“首先/建议/你这个/解决/需要/可以通过/不建议/风险/恢复/用量/材料/点位/层次/手术方式/脂肪填充/玻尿酸填充”等专业解释，且不是客户提问或自述，必须输出 speaker_corrections。
+   - 检查所有被标为 工牌本人/咨询师 的长段专业诊断：如果它更像医生直接面诊判断，而真实工牌佩戴者在旁边记录、确认、转述或提问，必须输出 speaker_corrections 或 speaker_role_map 将其改为 doctor；但如果该 asr_speaker 同时有客户自述、价格追问或既往史，不能用全局 speaker_role_map，必须逐句修正。
+   - 如果无法确定是 doctor 还是 consultant/expert_assistant，优先按说话人自称和上下文判断；不能确定时至少不要误标为 customer。
+
+8. 置信度和输出。
    speaker_role_map / speaker_corrections 的 confidence >= 0.65 才输出。
    term_corrections 的 confidence >= 0.75 才输出。
    只返回下面 schema 的 JSON，不要返回 Markdown、解释文字或额外字段。
@@ -260,7 +268,7 @@ _EVIDENCE_AGENT_SYSTEM_PROMPT = """\
 9. recommendation_evidence 只抽员工/医生给当前客户或同行咨询客户提出的项目/产品/材料/手术/注射/护理方案。保留品牌、材料、用量、价格、疗程、步骤、操作要点、恢复/风险说明和 customer_response。多个材料或产品选择要全部保留：主方案写在 content，备选/比较方案写入 implementation_notes，并用 relation_to_current_demand 标明主推、种草、备选、拒绝或不适合。
 10. 独立的术前检查、术后用药、伤口护理、疤痕膏、换药、医用面膜、耗材、核销、支付方式等不是治疗方案；除非它们是某个治疗方案不可缺少的实施步骤，否则不要单独抽成 recommendation_evidence。售后领取、赠送、家用护理建议可放入 deal_evidence、profile_evidence 或 quality_notes。
 11. concern_evidence 必须来自客户/陪同的真实担心、追问、拒绝、犹豫或明确确认；员工单方面安抚不是顾虑。若 customer_response 中出现安全、风险、副作用、后遗症、移位、变差、疼痛、恢复、医生资质、效果不确定等担忧，同一问题也要抽到 concern_evidence，不要只留在 customer_response。明确否定或接受的表达不是顾虑，例如“不担心、无所谓、可以接受、习惯了、没关系”不能单独抽为 concern_evidence；可作为对应方案的 customer_response。
-12. budget_evidence 只抽客户的明确预算、可接受价格区间、支付能力限制、定金/尾款/付款金额、对具体报价的价格敏感、砍价/优惠诉求或反复核算。员工单纯报价、算价、解释优惠、项目价格字段仍放在 recommendation_evidence 或 deal_evidence；客户普通询价、询问价格差异、问“多少钱/贵不贵/价格差不多吗”但没有承受度、还价、预算上限或反复核算时，也不要进 budget_evidence。只有客户对价格作出承受度反应时才进 budget_evidence。
+12. budget_evidence 只抽客户的明确预算、可接受价格区间、支付能力限制、定金/尾款/付款金额、对具体报价的价格敏感、砍价/优惠诉求或反复核算。员工单纯报价、算价、解释优惠、项目价格字段仍放在 recommendation_evidence 或 deal_evidence；客户普通询价、询问价格差异、问“多少钱/贵不贵/价格差不多吗”但没有承受度、还价、预算上限或反复核算时，也不要进 budget_evidence。若客户把“需要几支/加几支/一支还是两支”与“价格待会看/再讲价格/先看价格”放在同一决策链路里，视为中等价格敏感度或待价格决策，应进入 budget_evidence/profile_evidence。
 13. profile_evidence 用于客户标签：既往医美/材料/仪器/手术史、当前预算与价格敏感、疼痛耐受、家庭/职业/特殊身份、竞品机构、决策人、恢复/时间限制、项目或产品偏好等。员工自述、缺席第三方案例、其他客户案例不能变成当前客户标签；否定史（如“没打过/没做过”）和当前可做性（如“可以打/能做”）不能变成既往史标签。
 14. deal_evidence 抽成交、未成交、预约、定金、开单、支付、核销、改约、复诊和未成交原因。支付/账户/银行卡/转账等如果属于当前客户成交过程，要保留。
 
@@ -748,7 +756,9 @@ _JUDGMENT_AGENT_SYSTEM_PROMPT = """\
    当前推荐方案明确解决该问题时，才可转为 demand。客户明确提出但本次转科、下次再做或暂缓的
    问题也要保留，便于 SAP 备注和后续跟进；但除非当前方案支持，不要据此生成最终 SAP 适应症。
 5. demands 要归并成最少的具体目标，单个客户通常 3-6 条。合并同义/重复表达，例如
-   面颊/颊区/夹区/脸颊凹陷 + 填充/玻尿酸 归为一个凹陷改善目标。不要把仪器版本、发数、
+   面颊/颊区/夹区/脸颊凹陷 + 填充/玻尿酸 归为一个凹陷改善目标；
+   幼态/少女感/显年轻/更年轻/减龄/年轻化 归为一个整体年轻化或幼态目标，不要一条写“整体面部更幼态”、一条写“面部更幼态”。
+   不要把仪器版本、发数、
    医生、验真、恢复、切口、排期、付款、优惠、单纯询价、治疗顺序或设计风格当作 demand；
    它们应进入 concerns、budget_facts、deal_factors 或 recommendation implementation_notes。
    “几月做一次”“做完A多久做B”“先做A再做B”等排期/顺序只记录为方案步骤或跟进信息；
@@ -759,6 +769,8 @@ _JUDGMENT_AGENT_SYSTEM_PROMPT = """\
    才可成为 demand；如果员工/医生说暂时不管、先不处理或无方案支持，应留在诊断/备注中。
    同一问题的不同说法必须合并，例如“印第安纹下移/印第安纹有一点下垂/面中印第安纹显现”
    只能输出一条主诉。
+   主诉不能同时保留“泛化目标 + 同义泛化目标”，例如“侧面更立体”和“整体幼态”可分开，
+   但“整体面部更幼态”和“面部更幼态”只能保留一条。
 6. doctor_diagnoses 保留医生/咨询师对当前客户的观察、诊断和结构分析；不要因为诊断提到某问题
    就自动生成客户主诉。
 7. recommendations 是为解决当前 demands 的当前方案，也可包含解决当前诊断问题且已被明确建议执行的方案；
@@ -785,6 +797,8 @@ _JUDGMENT_AGENT_SYSTEM_PROMPT = """\
     已经出现在 recommendation_evidence 中就丢掉。员工单纯报价不算预算事实；客户对报价敏感、
     还价、要求优惠、反复核算、表达支付压力时，要输出类似“对26800元方案价格敏感，要求优惠”
     或“预算上限约7000-8000元”的简洁事实。
+    客户反复确认方案支数/加几支，并明确说“待会再讲价格/先看价格/看完价格再决定”时，也要输出
+    “对方案支数和价格较关注，需看价格后决策”这类预算事实，但不要虚构具体预算金额。
     客户普通询价、询问分步做总价、比较一次做和分开做的费用、或说“先做基础方案看看效果”，
     只表示方案决策与价格比较；除非同时明确太贵、承受不了、预算上限、要优惠/分期/降价，
     不要推断成“预算低于某金额”或“价格敏感”。
@@ -1175,6 +1189,8 @@ _FINAL_RESULT_AUDIT_SYSTEM_PROMPT = """\
    “有点/一点点/轻度/自觉”等弱观察，如果没有当前推荐方案支持，或同段/后文明确说暂时不管、
    先不处理、不要处理，应从主诉中删除；同一问题的近义表达如“印第安纹下移/印第安纹有一点下垂”
    必须合并为一条。
+   对整体审美目标也必须合并：幼态、少女感、显年轻、更年轻、减龄、年轻化属于同一类目标；
+   不要同时保留“整体面部更幼态”和“面部更幼态”。
    如果客户先提出宽泛目标、后续又明确否定或收窄（例如不要整脸/全脸、只做某个
    部位），最终展示必须按最后确认的范围重写或删除宽泛主诉，并同步
    consultation_result.chief_complaint_and_indications。
@@ -1207,6 +1223,8 @@ _FINAL_RESULT_AUDIT_SYSTEM_PROMPT = """\
    “本次消费预算/价格敏感度”只能来自本次方案的预算上限、承受区间、压价、打折、
    分期、反复核算、拒绝总价等当前消费证据；不要把既往项目花费、外院价格、
    员工报价说明或单纯问价写成本次预算或价格敏感。
+   若客户围绕“几支/加几支/一支够不够”反复追问，并把决定推迟到“讲价格/看价格”之后，应标记为
+   中等价格敏感或待价格决策，但不要写成“低预算”或虚构上限金额。
 10. 如果发现某个展示项无证据、误归因或与事实图冲突，revision_required=true 时必须
     在 analysis_result_patch 中返回删除/修正后的完整模块列表，不能只在 issues 中说明。
     例如顾虑、主诉、画像标签、推荐方案被判定无证据时，应从对应 items 中移除，并让
@@ -1435,6 +1453,12 @@ def _agent_has_affordability_reaction(text: str) -> bool:
             "反复核算",
             "反复算",
             "核算",
+            "看价格",
+            "讲价格",
+            "再讲价格",
+            "价格待会",
+            "待会再讲价格",
+            "看完价格",
             "少一点",
             "差别有点大",
         )
@@ -2026,6 +2050,9 @@ _AGENT_DEMAND_KEY_TERMS = (
     "不对称",
     "眼袋",
     "泪沟",
+    "黑眼圈",
+    "眼窝",
+    "上眼窝",
     "卧蚕",
     "细纹",
     "干纹",
@@ -2075,6 +2102,12 @@ _AGENT_DEMAND_KEY_TERMS = (
     "眼尾",
     "眼修复",
     "修复",
+    "幼态",
+    "少女感",
+    "年轻",
+    "年轻化",
+    "显年轻",
+    "减龄",
 )
 
 
@@ -2092,6 +2125,81 @@ def _agent_demand_core_text(item: dict[str, Any]) -> str:
         _first_text(item, "content", "demand_content", "demand", "text", "summary"),
         _first_text(item, "body_part", "body_part_name"),
     )
+
+
+_AGENT_BODY_LIPO_REGION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "waist_abdomen",
+        (
+            "腰腹",
+            "腰部",
+            "腹部",
+            "肚子",
+            "小腹",
+            "后腰",
+            "侧腰",
+            "腰上",
+            "肚皮",
+            "腰线",
+            "妈妈臀",
+            "马鞍区",
+            "臀下",
+            "腰腹环吸",
+        ),
+    ),
+    ("arm", ("手臂", "大臂", "拜拜肉")),
+    ("thigh", ("大腿", "腿部")),
+    ("back", ("背部", "后背", "背上")),
+    ("double_chin", ("双下巴", "颏下", "下颌下")),
+    ("rich_neck", ("富贵包",)),
+)
+
+_AGENT_BODY_LIPO_INTENT_TERMS = (
+    "吸脂",
+    "抽脂",
+    "环吸",
+    "脂肪",
+    "肥胖",
+    "胖",
+    "赘肉",
+    "肉多",
+    "减肥",
+    "减重",
+    "瘦",
+    "堆积",
+    "线条",
+    "难减",
+    "不好减",
+    "减不掉",
+    "塑形",
+)
+
+
+def _agent_body_liposuction_region(text: str) -> str:
+    compact = _clean_text(text)
+    if not compact:
+        return ""
+    for region, terms in _AGENT_BODY_LIPO_REGION_TERMS:
+        if not any(term in compact for term in terms):
+            continue
+        if region in {"waist_abdomen", "rich_neck"} and any(term in compact for term in terms):
+            # 腰腹/妈妈臀/富贵包在体雕场景里经常不重复说“吸脂”，
+            # 但“产后堆脂、难减、线条”也是同一吸脂主诉的表达。
+            if any(term in compact for term in _AGENT_BODY_LIPO_INTENT_TERMS) or region == "rich_neck":
+                return region
+        elif any(term in compact for term in _AGENT_BODY_LIPO_INTENT_TERMS):
+            return region
+    return ""
+
+
+def _agent_body_liposuction_cluster_key(text: str) -> str:
+    region = _agent_body_liposuction_region(text)
+    return f"body_liposuction_{region}" if region else ""
+
+
+def _agent_body_liposuction_family_key(text: str) -> str:
+    region = _agent_body_liposuction_region(text)
+    return f"body.liposuction.{region}" if region else ""
 
 
 def _agent_has_prior_eyelid_surgery_context(text: str) -> bool:
@@ -2159,6 +2267,10 @@ def _agent_is_non_business_demand(item: dict[str, Any]) -> bool:
     if not text:
         return True
     if "具体问题未说明" in text:
+        return True
+    if any(term in text for term in ("担心", "顾虑", "害怕", "怕")) and not any(
+        term in text for term in ("希望", "想改善", "想要", "要求", "目标", "变小", "变高", "变年轻", "更年轻")
+    ):
         return True
     if _agent_is_vague_skin_request(text):
         return True
@@ -2231,6 +2343,50 @@ def _agent_is_non_business_demand(item: dict[str, Any]) -> bool:
 
 def _agent_demand_cluster(item: dict[str, Any]) -> str:
     text = _agent_demand_core_text(item) or _agent_demand_text(item)
+    if _agent_is_skin_current_abnormality_text(text):
+        return "skin_current_abnormality"
+    if _agent_is_mole_pit_repair_text(text):
+        return "mole_pit_repair"
+    if _agent_is_eye_tail_shape_text(text):
+        return "eye_tail_shape_lift"
+    if _agent_is_face_overall_improvement_text(text):
+        return "face_overall_improvement"
+    if any(term in text for term in ("疲惫", "疲态", "精神", "憔悴")) and any(term in text for term in ("眼", "眼周", "眼下", "泪沟", "眼袋", "面部", "脸")):
+        return "eye_fatigue"
+    if any(term in text for term in ("压睫毛", "睫毛压", "睫毛被压")):
+        return "eyelash_pressure"
+    if "中庭" in text and any(term in text for term in ("偏长", "变窄", "缩短", "改善", "调整")):
+        return "midface_length_visual"
+    if any(term in text for term in ("下颌线", "下颌缘")) and any(term in text for term in ("不清晰", "清晰", "轮廓", "线条")):
+        return "jawline_definition"
+    if any(term in text for term in ("不对称", "有点歪", "歪斜", "两边")) and any(
+        term in text for term in ("面部", "脸", "鼻翼", "五官", "整体")
+    ):
+        return "face_asymmetry_overall"
+    if any(term in text for term in ("下半张脸", "下半脸", "下面部", "口周", "嘴部", "嘴角", "唇突", "嘴凸", "笑起来")) and any(
+        term in text for term in ("钝感", "动感", "精致", "自然", "不好看", "突出", "明显", "轻松", "下巴", "轮廓")
+    ):
+        return "lower_face_mouth_contour"
+    if any(term in text for term in ("眼睛", "眼皮", "上睑", "瞳孔", "睁不开")) and any(
+        term in text for term in ("变大", "大一点", "有神", "上提", "下垂", "小一点", "对称", "肌无力", "暴露")
+    ):
+        return "eye_opening_lift"
+    if any(term in text for term in ("大小眼", "不对称", "一侧眼睛", "高低差")) and any(
+        term in text for term in ("眼", "瞳孔", "上睑", "下睑")
+    ):
+        return "eye_asymmetry_size"
+    if any(term in text for term in ("断层", "不对称", "脸型", "外轮廓", "轮廓线")) and any(
+        term in text for term in ("面", "脸", "面颊", "颊", "外轮廓", "注射")
+    ):
+        return "face_injection_contour_asymmetry"
+    if any(term in text for term in ("融", "溶解", "溶解酶")) and any(
+        term in text for term in ("一坨", "鼓", "材料", "注射", "少女针", "玻尿酸", "胶原")
+    ):
+        return "filler_dissolve_lump"
+    if any(term in text for term in ("幼态", "少女感", "年轻化", "显年轻", "更年轻", "减龄", "年轻感")) and any(
+        term in text for term in ("整体", "面部", "脸", "脸部", "五官", "轮廓")
+    ):
+        return "face_youthful_overall"
     if any(term in text for term in ("整体改善面部状态", "面部整体状态", "面部看着更好看", "面部看着好看", "稍微面部看着好看")):
         return "face_overall_improvement"
     if "侧面" in text and any(term in text for term in ("轮廓", "线条", "侧颜", "明显", "眶外", "颧弓")):
@@ -2318,6 +2474,12 @@ def _agent_demand_cluster(item: dict[str, Any]) -> str:
         return "calf_slimming"
     if _agent_has_prior_eyelid_surgery_context(text):
         return "eye_repair"
+    if any(term in text for term in ("双眼皮", "重睑", "全切", "埋线")) and any(
+        term in text for term in ("自然", "自然款", "5.5", "6mm", "6毫米", "宽度", "加宽", "偏窄", "太窄", "过窄", "去皮", "全切", "埋线")
+    ):
+        return "double_eyelid_style"
+    if any(term in text for term in ("眼窝", "上眼窝")) and any(term in text for term in ("凹", "凹陷", "填充", "脂肪", "显老")):
+        return "eye_socket_hollow"
     if "外切眼袋" in text or "眼袋" in text:
         return "eye_bag"
     if "泪沟" in text:
@@ -2333,6 +2495,8 @@ def _agent_demand_cluster(item: dict[str, Any]) -> str:
     if any(term in text for term in ("眼尾上扬", "眼尾下调", "眼尾走势", "眼尾走向", "眼尾形态", "眼尾设计")):
         return "eye_tail_design"
     if any(term in text for term in ("双眼皮", "重睑", "内双", "肿眼泡", "肿泡眼", "眼睛肿", "上睑臃肿", "太窄", "过窄", "变宽", "加宽")):
+        if "埋线" in text and any(term in text for term in ("双眼皮", "重睑", "内双")):
+            return "double_eyelid_style"
         if any(term in text for term in ("太窄", "过窄", "偏窄", "变宽", "加宽", "宽度", "平扇", "开扇", "形态", "上妆")):
             return "double_eyelid_style"
         if any(term in text for term in ("松弛", "下垂", "耷拉", "去皮", "遮挡", "上睑臃肿")):
@@ -2346,6 +2510,8 @@ def _agent_demand_cluster(item: dict[str, Any]) -> str:
         term in text for term in ("凹陷", "填充", "饱满", "年轻", "衔接")
     ):
         return "midface_filling"
+    if "下巴" in text and any(term in text for term in ("不满意", "不好看", "骨感", "支撑", "空", "衔接", "翘度", "长度")):
+        return "chin_shape"
     if "下巴" in text and any(term in text for term in ("后缩", "偏短", "短", "下庭", "长度", "翘度", "玻尿酸", "支撑", "比例", "填充")):
         return "chin_shape"
     if any(term in text for term in ("下颌缘", "脸变小", "视觉瘦脸", "瘦脸", "轮廓更精致", "轮廓线条", "骨相感", "轻薄感")):
@@ -2394,18 +2560,15 @@ def _agent_demand_cluster(item: dict[str, Any]) -> str:
         return "eye_exposure"
     if any(term in text for term in ("提肌", "不对称", "体积对称", "双眼体积")):
         return "eye_symmetry"
-    if any(term in text for term in ("腰腹", "妈妈臀")):
-        return "waist_liposuction"
-    if any(term in text for term in ("背部", "后背", "背上")) and any(term in text for term in ("吸脂", "抽脂", "术后", "没抽")):
-        return "back_liposuction"
-    if "大腿" in text and "吸脂" in text:
-        return "thigh_liposuction"
-    if "手臂" in text and "吸脂" in text:
-        return "arm_liposuction"
+    body_lipo_cluster = _agent_body_liposuction_cluster_key(text)
+    if body_lipo_cluster:
+        return body_lipo_cluster
     if any(term in text for term in ("臀凹", "臀部凹陷")):
         return "hip_dip"
     if any(term in text for term in ("丰胸", "填胸", "隆胸")):
         return "breast_augmentation"
+    if "咬肌" in text and any(term in text for term in ("小", "缩小", "瘦", "瘦脸", "肉毒")):
+        return "masseter_slimming"
     if "太阳穴" in text:
         return "temple_filling"
     if "下巴" in text:
@@ -2612,6 +2775,18 @@ def _agent_plan_text(item: dict[str, Any]) -> str:
         _first_text(item, "brand", "material", "dosage", "price", "course_or_frequency", "implementation_notes"),
         item.get("treatment_steps"),
         item.get("evidence"),
+    )
+
+
+def _agent_plan_link_text(item: dict[str, Any]) -> str:
+    """Core plan text for demand-linking, excluding price/evidence side notes."""
+
+    return _agent_join_text(
+        _first_text(item, "content", "plan", "recommendation", "summary"),
+        _first_text(item, "body_part", "body_part_name"),
+        _first_text(item, "product_or_solution", "brand", "material", "dosage", "course_or_frequency"),
+        item.get("treatment_steps"),
+        _first_text(item, "implementation_notes", "notes"),
     )
 
 
@@ -3229,6 +3404,56 @@ def _agent_append_result_catalog_indication(result: dict[str, Any], *, name: str
     return True
 
 
+def _agent_prune_result_auxiliary_step_indications(result: dict[str, Any]) -> bool:
+    """Remove SAP indications that only describe a dependent step of another current plan."""
+
+    block = result.get("standardized_indications")
+    if not isinstance(block, dict):
+        return False
+    items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    if not items:
+        return False
+    kept: list[dict[str, Any]] = []
+    changed = False
+    current_goal_context = _agent_join_text(
+        _as_dict(result.get("customer_primary_demands")).get("items"),
+        _as_dict(result.get("staff_recommendations")).get("items"),
+    )
+    face_fill_terms = ("面颊", "脸颊", "苹果肌", "太阳穴", "额颞", "颞区", "鼻基底", "法令", "全脸", "整脸", "中面部", "面中")
+    eye_only_terms = ("眼窝", "上眼窝", "下眼窝", "眼袋", "泪沟", "双眼皮", "眶隔")
+    auxiliary_terms = ("辅助", "配合", "联合", "必要时", "术中", "同期", "回填", "释放", "服务", "为了", "可选", "顺带")
+    for item in items:
+        name = _clean_text(item.get("indication_name") or item.get("name"))
+        body = _clean_text(item.get("body_part_name") or item.get("body_part"))
+        text = _agent_join_text(item)
+        current_has_independent_target = bool(
+            (name and name in current_goal_context)
+            or (body and body in current_goal_context)
+            or any(term in current_goal_context for term in _agent_result_demand_body_terms({"demand": name, "body_part": body}))
+        )
+        if any(term in text for term in auxiliary_terms) and not current_has_independent_target:
+            changed = True
+            continue
+        if (
+            name == "面部填充"
+            and body == "面部"
+            and any(term in text for term in eye_only_terms)
+            and not any(term in _agent_join_text(text, current_goal_context) for term in face_fill_terms)
+        ):
+            changed = True
+            continue
+        kept.append(item)
+    if not changed:
+        return False
+    block["items"] = kept
+    block["summary"] = "；".join(
+        f"{_clean_text(item.get('indication_name'))}（{_clean_text(item.get('body_part_name'))}）"
+        for item in kept
+        if _clean_text(item.get("indication_name"))
+    )
+    return True
+
+
 def _agent_profile_budget_tag_is_prior_spend_only(category: str, value: str, evidence: str) -> bool:
     normalized_category = _AGENT_PROFILE_CATEGORY_ALIASES.get(category, category)
     if normalized_category not in {"本次消费预算", "价格敏感度"}:
@@ -3421,6 +3646,9 @@ def _agent_append_profile_tag_if_missing(
         return False
     for item in tags:
         if _compact_key_text(_clean_text(item.get("category"))) == category_key and _compact_key_text(_clean_text(item.get("value"))) == value_key:
+            if evidence and not _clean_text(item.get("evidence")):
+                item["evidence"] = evidence
+                return True
             return False
     tags.append({"category": category, "value": value, "evidence": evidence})
     return True
@@ -3453,6 +3681,359 @@ def _agent_backfill_recent_treatment_history_from_context(result: dict[str, Any]
         ) or changed
     if changed:
         profile["tags"] = tags
+    return changed
+
+
+def _agent_dialogue_role_text_lines(context: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for raw_line in _clean_text(context).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^(?:L\d{4}:\s*)?\[[^\]]+\]\s*([^:：\n]+)[:：]\s*(.*)$", line)
+        if not match:
+            continue
+        rows.append((match.group(1).strip(), match.group(2).strip()))
+    return rows
+
+
+def _agent_price_decision_evidence_from_context(context: str) -> str:
+    customer_lines: list[str] = []
+    price_lines: list[str] = []
+    dose_lines: list[str] = []
+    for role, text in _agent_dialogue_role_text_lines(context):
+        if not any(term in role for term in ("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员")):
+            continue
+        compact = _clean_text(text)
+        if not compact:
+            continue
+        customer_lines.append(compact)
+        if any(term in compact for term in ("价格", "报价", "费用", "多少钱", "贵", "预算", "优惠")):
+            price_lines.append(compact)
+        if any(term in compact for term in ("加几只", "加几支", "几只", "几支", "一支", "一只", "两支", "两只")):
+            dose_lines.append(compact)
+    if not price_lines:
+        return ""
+    strong_price = [
+        line
+        for line in price_lines
+        if any(term in line for term in ("看价格", "讲价格", "再讲价格", "价格待会", "待会再讲价格", "看完价格", "待会"))
+    ]
+    evidence_parts = strong_price[:1] or price_lines[:1]
+    if dose_lines:
+        evidence_parts.extend(line for line in dose_lines[:2] if line not in evidence_parts)
+    evidence = "；".join(evidence_parts)
+    if not evidence:
+        return ""
+    if any(term in evidence for term in ("讲价格", "看价格", "价格待会", "多少钱", "加几只", "加几支", "几只", "几支")):
+        return evidence[:240]
+    return ""
+
+
+def _agent_backfill_price_sensitivity_from_context(result: dict[str, Any], *, context: str) -> bool:
+    evidence = _agent_price_decision_evidence_from_context(context)
+    if not evidence:
+        return False
+    changed = False
+    profile = result.setdefault("customer_profile", {})
+    if not isinstance(profile, dict):
+        profile = {"tags": []}
+        result["customer_profile"] = profile
+        changed = True
+    tags = [dict(item) for item in _as_list(profile.get("tags")) if isinstance(item, dict)]
+    changed = _agent_append_profile_tag_if_missing(
+        tags,
+        category="价格敏感度",
+        value="中",
+        evidence=evidence,
+    ) or changed
+    if changed:
+        profile["tags"] = tags
+
+    block = result.setdefault("consumption_intent", {})
+    if not isinstance(block, dict):
+        block = {"budget": None, "decision_factors": [], "evidence": []}
+        result["consumption_intent"] = block
+        changed = True
+    factor = "对方案支数和价格较关注，需看价格后决策"
+    decision_factors = [_clean_text(item) for item in _as_list(block.get("decision_factors")) if _clean_text(item)]
+    if not any(_compact_key_text(factor) == _compact_key_text(item) for item in decision_factors):
+        decision_factors.append(factor)
+        block["decision_factors"] = decision_factors
+        changed = True
+    evidence_items = [_clean_text(item) for item in _as_list(block.get("evidence")) if _clean_text(item)]
+    if evidence and not any(_compact_key_text(evidence) == _compact_key_text(item) for item in evidence_items):
+        evidence_items.append(evidence)
+        block["evidence"] = evidence_items
+        changed = True
+    return changed
+
+
+def _agent_context_has_role_line(
+    context: str,
+    *,
+    role_terms: tuple[str, ...],
+    any_terms: tuple[str, ...],
+    all_terms: tuple[str, ...] = (),
+) -> bool:
+    for role, text in _agent_dialogue_role_text_lines(context):
+        if not any(term in role for term in role_terms):
+            continue
+        compact = _clean_text(text)
+        if any_terms and not any(term in compact for term in any_terms):
+            continue
+        if all_terms and not all(term in compact for term in all_terms):
+            continue
+        return True
+    return False
+
+
+def _agent_role_evidence_for_terms(
+    context: str,
+    *,
+    role_terms: tuple[str, ...],
+    text_terms: tuple[str, ...],
+) -> str:
+    for role, text in _agent_dialogue_role_text_lines(context):
+        if not any(term in role for term in role_terms):
+            continue
+        compact = _clean_text(text)
+        if compact and any(term in compact for term in text_terms):
+            return compact[:240]
+    return ""
+
+
+def _agent_has_explicit_chin_filler_context(context: str) -> bool:
+    """Detect explicit chin filler intent without mistaking double-chin liposuction for chin shaping."""
+
+    customer_roles = ("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员")
+    staff_roles = ("医生", "咨询师", "工牌本人", "专家", "助理", "员工")
+    has_chin_demand = _agent_context_has_role_line(
+        context,
+        role_terms=customer_roles,
+        all_terms=("下巴",),
+        any_terms=("两边", "两侧", "中间", "衔接", "翘度", "加几只", "加几支", "长度", "后缩", "偏短", "短一点"),
+    )
+    has_chin_plan = _agent_context_has_role_line(
+        context,
+        role_terms=staff_roles,
+        all_terms=("下巴",),
+        any_terms=("硬", "硬质", "玻尿酸", "两只", "两支", "支撑", "海薇", "海派", "衔接", "翘度"),
+    )
+    return has_chin_demand and has_chin_plan
+
+
+def _agent_result_has_demand_text(result: dict[str, Any], *terms: str) -> bool:
+    text = _agent_join_text(_as_dict(result.get("customer_primary_demands")).get("items"))
+    return bool(text and all(term in text for term in terms))
+
+
+def _agent_result_has_recommendation_text(result: dict[str, Any], *terms: str) -> bool:
+    text = _agent_join_text(_as_dict(result.get("staff_recommendations")).get("items"))
+    return bool(text and all(term in text for term in terms))
+
+
+def _agent_append_result_demand(
+    result: dict[str, Any],
+    *,
+    demand: str,
+    body_part: str,
+    evidence: str,
+) -> bool:
+    block = result.setdefault("customer_primary_demands", {})
+    if not isinstance(block, dict):
+        block = {"inference_note": None, "summary": "", "items": []}
+        result["customer_primary_demands"] = block
+    items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    candidate = {"demand": demand, "body_part": body_part, "evidence": evidence}
+    if _agent_demand_is_duplicate({"content": demand, "body_part": body_part}, [{"content": _first_text(item, "demand", "content"), "body_part": _first_text(item, "body_part")} for item in items]):
+        return False
+    items.append(candidate)
+    for index, item in enumerate(items, start=1):
+        item["priority"] = index
+    block["items"] = items
+    block["summary"] = "；".join(_first_text(item, "demand", "content", "text", "summary") for item in items if _first_text(item, "demand", "content", "text", "summary"))
+    return True
+
+
+def _agent_append_result_recommendation(
+    result: dict[str, Any],
+    item: dict[str, Any],
+) -> bool:
+    block = result.setdefault("staff_recommendations", {})
+    if not isinstance(block, dict):
+        block = {"summary": "", "items": []}
+        result["staff_recommendations"] = block
+    items = [dict(value) for value in _as_list(block.get("items")) if isinstance(value, dict)]
+    signature = _agent_plan_semantic_signature(item)
+    for existing in items:
+        if signature and signature == _agent_plan_semantic_signature(existing):
+            return False
+    items.append(item)
+    block["items"] = items
+    _agent_recompute_result_recommendation_summary(result)
+    return True
+
+
+def _agent_backfill_injection_demands_and_plans_from_context(result: dict[str, Any], *, context: str) -> bool:
+    changed = False
+    customer_roles = ("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员")
+    staff_roles = ("医生", "咨询师", "工牌本人", "专家", "助理", "员工")
+
+    if _agent_has_explicit_chin_filler_context(context):
+        if not _agent_result_has_demand_text(result, "下巴"):
+            evidence = _agent_context_evidence_for_terms(context, ("下巴", "衔接", "翘度", "加几只", "加几支"))
+            changed = _agent_append_result_demand(
+                result,
+                demand="改善下巴两侧衔接及中间翘度/长度",
+                body_part="下巴",
+                evidence=evidence or "客户提出下巴两侧衔接及中间量/翘度诉求，医生建议两支硬质玻尿酸塑形。",
+            ) or changed
+        if not _agent_result_has_recommendation_text(result, "下巴", "玻尿酸"):
+            changed = _agent_append_result_recommendation(
+                result,
+                {
+                    "recommendation": "下巴两支硬质玻尿酸做两侧衔接和中间翘度/长度塑形",
+                    "product_or_solution": None,
+                    "body_part": "下巴",
+                    "brand": None,
+                    "material": "硬质玻尿酸",
+                    "dosage": "两支",
+                    "price": None,
+                    "course_or_frequency": "单次注射",
+                    "treatment_steps": ["一支用于两侧衔接", "一支用于中间支撑并增加翘度/长度"],
+                    "implementation_notes": "医生强调硬质材料支撑力更适合，单支效果有限且容易不协调。",
+                    "demand_priority": [],
+                    "evidence": _agent_context_evidence_for_terms(context, ("硬", "玻尿酸", "两只", "两支", "衔接", "翘度")),
+                    "customer_response": "客户询问需要加几支，并表示价格稍后再讨论。",
+                },
+            ) or changed
+
+    has_masseter_demand = "咬肌" in context and _agent_context_has_role_line(
+        context,
+        role_terms=customer_roles,
+        any_terms=("小一点", "变小", "瘦", "能消多少", "加几只", "加几支"),
+    )
+    has_masseter_plan = _agent_context_has_role_line(
+        context,
+        role_terms=staff_roles,
+        any_terms=("咬肌", "颈阔肌", "肉毒", "瘦脸针"),
+    )
+    if has_masseter_demand and has_masseter_plan:
+        if not _agent_result_has_demand_text(result, "咬肌"):
+            changed = _agent_append_result_demand(
+                result,
+                demand="希望咬肌缩小一些",
+                body_part="咬肌",
+                evidence=_agent_role_evidence_for_terms(
+                    context,
+                    role_terms=customer_roles,
+                    text_terms=("小一点", "能消多少", "咬肌", "瘦"),
+                )
+                or _agent_context_evidence_for_terms(context, ("咬肌", "小一点", "能消多少"))
+                or "客户确认希望咬肌比现在小一点。",
+            ) or changed
+        if not _agent_result_has_recommendation_text(result, "咬肌", "肉毒"):
+            changed = _agent_append_result_recommendation(
+                result,
+                {
+                    "recommendation": "咬肌及颈阔肌联合注射一只肉毒",
+                    "product_or_solution": None,
+                    "body_part": "咬肌/颈阔肌",
+                    "brand": None,
+                    "material": "肉毒",
+                    "dosage": "一只，咬肌和颈阔肌分配使用",
+                    "price": None,
+                    "course_or_frequency": "先打一只观察效果",
+                    "treatment_steps": ["咬肌注射", "颈阔肌注射"],
+                    "implementation_notes": "不全部用在咬肌上，先看一只肉毒的效果表现。",
+                    "demand_priority": [],
+                    "evidence": _agent_context_evidence_for_terms(context, ("咬肌", "颈阔肌", "肉毒", "小一点")),
+                    "customer_response": "客户认为会比现在小一点点。",
+                },
+            ) or changed
+
+    if changed:
+        _agent_repair_result_recommendation_links(result)
+        _agent_sync_final_display_sections(result)
+    return changed
+
+
+def _agent_backfill_explicit_customer_demands_from_context(result: dict[str, Any], *, context: str) -> bool:
+    """Recover explicit customer-stated demands lost by an over-compressed final audit."""
+
+    if not context:
+        return False
+    changed = False
+    customer_roles = ("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员")
+    candidates: list[dict[str, str]] = []
+    seen_terms: set[str] = set()
+    for role, text in _agent_dialogue_role_text_lines(context):
+        if not any(term in role for term in customer_roles):
+            continue
+        compact = _clean_text(text)
+        if not compact:
+            continue
+        for term in _AGENT_DEMAND_KEY_TERMS:
+            if term in seen_terms or term not in compact:
+                continue
+            if term in (
+                "不对称",
+                "自然",
+                "显大",
+                "无神",
+                "柔和",
+                "显凶",
+                "幼态",
+                "少女感",
+                "年轻",
+                "年轻化",
+                "显年轻",
+                "减龄",
+                "修复",
+            ):
+                continue
+            if not _agent_text_has_demand_intent_for_terms(compact, (term,)):
+                continue
+            if term in ("鼻部", "鼻子", "鼻") and any(
+                cue in compact for cue in ("不考虑在长沙", "想去外省", "不要做手术", "不建议", "暂时不动", "不要动")
+            ):
+                continue
+            if term == "胶原" and any(cue in compact for cue in ("融", "溶解", "溶酶", "一坨", "少女针")):
+                continue
+            demand_text = f"希望改善{term}问题"
+            if any(cue in compact for cue in ("想做", "想先做", "要做", "咨询", "了解")):
+                demand_text = f"想做{term}相关项目"
+            candidates.append({"term": term, "demand": demand_text, "evidence": compact[:240]})
+            seen_terms.add(term)
+
+    if not candidates:
+        return False
+
+    block = result.setdefault("customer_primary_demands", {})
+    if not isinstance(block, dict):
+        block = {"inference_note": None, "summary": "", "items": []}
+        result["customer_primary_demands"] = block
+    existing_items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    existing_families = {_agent_result_demand_family_key(item) for item in existing_items}
+    for candidate in candidates:
+        family = _agent_result_demand_family_key(
+            {"demand": candidate["demand"], "body_part": candidate["term"], "evidence": candidate["evidence"]}
+        )
+        if family in existing_families:
+            continue
+        if _agent_append_result_demand(
+            result,
+            demand=candidate["demand"],
+            body_part=candidate["term"],
+            evidence=candidate["evidence"],
+        ):
+            existing_families.add(family)
+            changed = True
+
+    if changed:
+        _agent_repair_result_recommendation_links(result)
+        _agent_sync_final_display_sections(result)
     return changed
 
 
@@ -3660,6 +4241,54 @@ def _agent_result_demand_key(item: dict[str, Any]) -> str:
         _first_text(item, "body_part", "body_part_name", "area"),
         item.get("evidence"),
     )
+    demand_body_text = _agent_join_text(
+        _first_text(item, "demand", "content", "text", "summary"),
+        _first_text(item, "body_part", "body_part_name", "area"),
+    )
+    if _agent_is_skin_current_abnormality_text(text):
+        return "skin_current_abnormality"
+    if _agent_is_mole_pit_repair_text(text):
+        return "mole_pit_repair"
+    if _agent_is_eye_tail_shape_text(text):
+        return "eye_tail_shape_lift"
+    if _agent_is_face_overall_improvement_text(demand_body_text):
+        return "face_overall_improvement"
+    if any(term in demand_body_text for term in ("疲惫", "疲态", "精神", "憔悴")) and any(
+        term in demand_body_text for term in ("眼", "眼周", "眼下", "泪沟", "眼袋", "面部", "脸")
+    ):
+        return "eye_fatigue"
+    if any(term in demand_body_text for term in ("压睫毛", "睫毛压", "睫毛被压")):
+        return "eyelash_pressure"
+    if "中庭" in demand_body_text and any(term in demand_body_text for term in ("偏长", "变窄", "缩短", "改善", "调整")):
+        return "midface_length_visual"
+    if any(term in demand_body_text for term in ("下颌线", "下颌缘")) and any(term in demand_body_text for term in ("不清晰", "清晰", "轮廓", "线条")):
+        return "jawline_definition"
+    if any(term in demand_body_text for term in ("不对称", "有点歪", "歪斜", "两边")) and any(
+        term in demand_body_text for term in ("面部", "脸", "鼻翼", "五官", "整体")
+    ):
+        return "face_asymmetry_overall"
+    if any(term in demand_body_text for term in ("下半张脸", "下半脸", "下面部", "口周", "嘴部", "嘴角", "唇突", "嘴凸", "笑起来")) and any(
+        term in demand_body_text for term in ("钝感", "动感", "精致", "自然", "不好看", "突出", "明显", "轻松", "下巴", "轮廓")
+    ):
+        return "lower_face_mouth_contour"
+    if any(term in demand_body_text for term in ("眼睛", "眼皮", "上睑", "瞳孔", "睁不开")) and any(
+        term in demand_body_text for term in ("变大", "大一点", "有神", "上提", "下垂", "小一点", "对称", "肌无力", "暴露")
+    ):
+        return "eye_opening_lift"
+    if any(term in demand_body_text for term in ("大小眼", "不对称", "一侧眼睛", "高低差")) and any(
+        term in demand_body_text for term in ("眼", "瞳孔", "上睑", "下睑")
+    ):
+        return "eye_asymmetry_size"
+    if any(term in text for term in ("断层", "不对称", "脸型", "外轮廓", "轮廓线")) and any(
+        term in text for term in ("面", "脸", "面颊", "颊", "外轮廓", "注射")
+    ):
+        return "face_injection_contour_asymmetry"
+    if any(term in text for term in ("融", "溶解", "溶解酶")) and any(
+        term in text for term in ("一坨", "鼓", "材料", "注射", "少女针", "玻尿酸", "胶原")
+    ):
+        return "filler_dissolve_lump"
+    if "下巴" in demand_body_text and any(term in demand_body_text for term in ("不满意", "不好看", "骨感", "支撑", "空", "衔接", "翘度", "长度")):
+        return "chin_shape"
     if any(term in text for term in ("鼻头", "鼻尖")) and any(
         term in text for term in ("很大", "偏大", "圆钝", "钝", "缩小", "精致")
     ):
@@ -3704,9 +4333,110 @@ def _agent_result_demand_key(item: dict[str, Any]) -> str:
         term in text for term in ("面部", "脸", "皮肤", "补水", "水光", "娃娃针")
     ):
         return "skin_hydration_repair"
+    body_lipo_cluster = _agent_body_liposuction_cluster_key(text)
+    if body_lipo_cluster:
+        return body_lipo_cluster
     return _agent_demand_cluster(
         {"content": text, "body_part": _first_text(item, "body_part", "body_part_name", "area")}
     ) or _compact_key_text(text)
+
+
+def _agent_result_demand_family_key(item: dict[str, Any]) -> str:
+    """Coarser family key used to merge style/preference fragments into one demand."""
+
+    key = _agent_result_demand_key(item)
+    text = _agent_result_item_text(item)
+    body_lipo_family = _agent_body_liposuction_family_key(text)
+    if body_lipo_family:
+        return body_lipo_family
+    family_groups = {
+        "eye.double_eyelid": {
+            "double_eyelid_style",
+            "double_eyelid_laxity",
+            "double_eyelid",
+            "eye_style",
+            "upper_eyelid_puffy",
+            "eye_exposure",
+            "eye_expression",
+        },
+        "eye.eye_bag": {"eye_bag"},
+        "eye.tear_trough": {"tear_trough"},
+        "eye.dark_circle": {"dark_circle"},
+        "eye.socket_hollow": {"eye_socket_hollow"},
+        "eye.tail": {"eye_tail_shape_lift"},
+        "eye.exposure": {"eye_opening_lift", "eye_asymmetry_size", "eye_exposure", "eye_downward", "eyelash_pressure"},
+        "eye.fatigue": {"eye_fatigue"},
+        "face.chin": {"chin_shape"},
+        "face.jawline": {"jawline_slimming", "masseter_slimming", "jawline_definition"},
+        "face.lower_mouth_contour": {"lower_face_mouth_contour", "lip_shape"},
+        "face.cheek": {"cheek_hollow", "cheek_hollow_filling"},
+        "face.midface": {"midface_filling", "nose_base_retrusion"},
+        "face.contour": {"face_profile_contour", "forehead_contour", "orbital_tail_support"},
+        "face.contour_asymmetry": {"face_asymmetry_overall", "face_injection_contour_asymmetry"},
+        "face.overall": {"face_overall_improvement"},
+        "face.midface_length": {"midface_length_visual"},
+        "eye.opening_lift": {"eye_opening_lift", "upper_eyelid_lift", "eye_exposure", "eye_symmetry"},
+        "skin.pigment": {"pigmentation", "mole_removal", "mole_pit_repair"},
+        "skin.hydration": {"skin_hydration", "skin_hydration_repair", "makeup_caking_texture"},
+        "skin.current_abnormality": {"skin_current_abnormality", "skin_redness", "acne_texture"},
+        "skin.anti_aging": {"face_anti_aging", "dynamic_wrinkle"},
+        "body.breast": {"breast_augmentation_capacity"},
+        "body.liposuction.waist_abdomen": {"body_liposuction_waist_abdomen", "waist_liposuction", "waist_abdomen_liposuction"},
+        "body.liposuction.arm": {"body_liposuction_arm", "arm_liposuction"},
+        "body.liposuction.thigh": {"body_liposuction_thigh", "thigh_liposuction"},
+        "body.liposuction.back": {"body_liposuction_back", "back_liposuction"},
+        "body.liposuction.double_chin": {"body_liposuction_double_chin", "double_chin_liposuction"},
+        "body.liposuction.rich_neck": {"body_liposuction_rich_neck", "rich_neck_liposuction"},
+    }
+    for family, members in family_groups.items():
+        if key in members:
+            return family
+    for term, family in (
+        ("双眼皮", "eye.double_eyelid"),
+        ("重睑", "eye.double_eyelid"),
+        ("埋线", "eye.double_eyelid"),
+        ("全切", "eye.double_eyelid"),
+        ("眼袋", "eye.eye_bag"),
+        ("泪沟", "eye.tear_trough"),
+        ("黑眼圈", "eye.dark_circle"),
+        ("眼窝", "eye.socket_hollow"),
+        ("眼尾", "eye.tail"),
+        ("压睫毛", "eye.exposure"),
+        ("中庭", "face.midface_length"),
+        ("下巴", "face.chin"),
+        ("咬肌", "face.jawline"),
+        ("下颌缘", "face.jawline"),
+        ("面颊", "face.cheek"),
+        ("颊区", "face.cheek"),
+        ("鼻基底", "face.midface"),
+        ("中面部", "face.midface"),
+        ("太阳穴", "face.contour"),
+        ("额颞", "face.contour"),
+        ("整体改善", "face.overall"),
+        ("整体调整", "face.overall"),
+        ("祛斑", "skin.pigment"),
+        ("色斑", "skin.pigment"),
+        ("点痣", "skin.pigment"),
+        ("痣坑", "skin.pigment"),
+        ("凹坑", "skin.pigment"),
+        ("水光", "skin.hydration"),
+        ("补水", "skin.hydration"),
+        ("疹子", "skin.current_abnormality"),
+        ("皮疹", "skin.current_abnormality"),
+        ("瘙痒", "skin.current_abnormality"),
+        ("渗出", "skin.current_abnormality"),
+        ("发红", "skin.current_abnormality"),
+        ("泛红", "skin.current_abnormality"),
+        ("抗衰", "skin.anti_aging"),
+        ("紧致", "skin.anti_aging"),
+        ("隆胸", "body.breast"),
+        ("副乳", "body.breast"),
+        ("富贵包", "body.liposuction.rich_neck"),
+        ("双下巴", "body.liposuction.double_chin"),
+    ):
+        if term in text:
+            return family
+    return key
 
 
 def _agent_result_demand_score(item: dict[str, Any]) -> int:
@@ -3715,8 +4445,13 @@ def _agent_result_demand_score(item: dict[str, Any]) -> int:
     score = min(len(content), 100)
     if evidence:
         score += 5
+        body_terms = tuple(term for term in _agent_result_demand_body_terms(item) if len(term) >= 2)
+        if body_terms and not any(term in evidence for term in body_terms):
+            score -= 55
     if "改善" in content:
         score += 30
+    if any(term in content for term in ("胶原问题", "玻尿酸问题", "材料问题")):
+        score -= 80
     if any(term in content for term in ("关注", "是否", "考虑是否")):
         score -= 40
     if _first_text(item, "body_part", "body_part_name", "area"):
@@ -3753,6 +4488,122 @@ def _agent_dedupe_result_demands(result: dict[str, Any]) -> bool:
         for item in deduped
         if _first_text(item, "demand", "content", "text", "summary")
     )
+    return True
+
+
+def _agent_result_demand_is_supporting_fragment(item: dict[str, Any]) -> bool:
+    text = _agent_result_item_text(item)
+    if not text:
+        return False
+    supporting_cues = ("自然", "不要太", "不太", "别太", "不要过", "不要很", "效果", "风格", "款", "形态", "担心", "顾虑")
+    treatment_cues = ("双眼皮", "眼袋", "泪沟", "下巴", "鼻", "面颊", "太阳穴", "祛斑", "点痣", "水光", "隆胸", "吸脂", "富贵包")
+    action_cues = ("改善", "解决", "处理", "去掉", "去除", "填充", "支撑", "塑形", "手术", "注射", "治疗")
+    return any(term in text for term in supporting_cues) and not (
+        any(term in text for term in treatment_cues) and any(term in text for term in action_cues)
+    )
+
+
+def _agent_result_demand_is_minimal_duplicate(item: dict[str, Any]) -> bool:
+    text = _first_text(item, "demand", "content", "text", "summary")
+    compact = _compact_key_text(text)
+    if len(compact) > 28:
+        return False
+    return bool(re.search(r"^(想|希望|关注|考虑|咨询|了解)?做?.{1,12}(手术|项目|问题)?$", compact))
+
+
+def _agent_normalize_result_demands_semantically(result: dict[str, Any], *, context: str = "") -> bool:
+    block = result.get("customer_primary_demands")
+    if not isinstance(block, dict):
+        return False
+    items = [dict(item) for item in _as_list(block.get("items")) if isinstance(item, dict)]
+    if not items:
+        return False
+
+    family_counts: dict[str, int] = {}
+    family_best_score: dict[str, int] = {}
+    family_best_index: dict[str, int] = {}
+    for index, item in enumerate(items):
+        family = _agent_result_demand_family_key(item)
+        if not family:
+            continue
+        score = _agent_result_demand_score(item)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        if score > family_best_score.get(family, -999):
+            family_best_score[family] = score
+            family_best_index[family] = index
+
+    normalized: list[dict[str, Any]] = []
+    changed = False
+    strict_single_item_families = {
+        "eye.exposure",
+        "eye.tail",
+        "eye.opening_lift",
+        "face.overall",
+        "face.contour_asymmetry",
+        "face.midface_length",
+        "skin.current_abnormality",
+        "skin.pigment",
+        "face.jawline",
+    }
+    for index, item in enumerate(items):
+        family = _agent_result_demand_family_key(item)
+        text = _agent_result_item_text(item)
+        if family and family_counts.get(family, 0) > 1:
+            is_family_representative = family_best_index.get(family) == index
+            is_weaker_than_family_best = _agent_result_demand_score(item) + 20 < family_best_score.get(family, 0)
+            if family in strict_single_item_families and not is_family_representative:
+                changed = True
+                continue
+            if (
+                not is_family_representative
+                and (
+                    _agent_result_demand_is_supporting_fragment(item)
+                    or _agent_result_demand_is_minimal_duplicate(item)
+                    or is_weaker_than_family_best
+                )
+            ):
+                changed = True
+                continue
+
+        # A demand item that bundles several treatment targets often comes from
+        # summary compression.  When one target has explicit customer evidence,
+        # keep the explicit target instead of a broad mixed phrase.
+        if "及" in text or "和" in text or "/" in text:
+            evidence_text = _clean_text(item.get("evidence"))
+            mentioned_terms = [term for term in _AGENT_DEMAND_KEY_TERMS if term in text]
+            evidence_terms = [term for term in mentioned_terms if term in evidence_text]
+            if len(mentioned_terms) >= 2 and len(evidence_terms) == 1:
+                term = evidence_terms[0]
+                item["demand"] = f"关注{term}问题" if "关注" in text else f"希望改善{term}问题"
+                item["body_part"] = term
+                changed = True
+            explicit_terms = []
+            for term in _AGENT_DEMAND_KEY_TERMS:
+                if term in text and _agent_context_has_customer_demand_intent_for_terms(context, (term,)):
+                    explicit_terms.append(term)
+            if len(explicit_terms) == 1:
+                term = explicit_terms[0]
+                evidence = _agent_role_evidence_for_terms(
+                    context,
+                    role_terms=("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员"),
+                    text_terms=(term,),
+                ) or _agent_context_evidence_for_terms(context, (term,))
+                if evidence:
+                    item["demand"] = f"希望改善{term}问题" if not text.startswith(("想做", "想先做")) else f"想做{term}相关项目"
+                    item["body_part"] = term
+                    item["evidence"] = evidence
+                    changed = True
+
+        if "不想" in text and not any(term in text for term in ("改善", "解决", "处理", "去掉", "去除", "调整", "变宽", "变小", "变好", "修复", "塑形")):
+            changed = True
+            continue
+        normalized.append(item)
+
+    if not changed:
+        return False
+    block["items"] = normalized
+    _agent_dedupe_result_demands(result)
+    _agent_repair_result_recommendation_links(result)
     return True
 
 
@@ -3909,14 +4760,120 @@ def _agent_result_item_text(item: dict[str, Any]) -> str:
     )
 
 
+def _agent_is_skin_current_abnormality_text(text: str) -> bool:
+    text = _clean_text(text)
+    if not text:
+        return False
+    skin_terms = ("面部", "脸", "皮肤", "皮", "局部")
+    symptom_terms = (
+        "疹子",
+        "皮疹",
+        "丘疹",
+        "红疹",
+        "爆痘",
+        "痘痘",
+        "发红",
+        "泛红",
+        "红肿",
+        "渗出",
+        "渗液",
+        "黄水",
+        "结痂",
+        "瘙痒",
+        "痒",
+        "刺痛",
+        "过敏",
+        "敏感",
+        "炎症",
+        "红血丝",
+        "问题肌",
+    )
+    return any(term in text for term in symptom_terms) and (
+        any(term in text for term in skin_terms)
+        or any(term in text for term in ("水光", "中胚层", "冷喷", "湿敷", "修复", "舒缓"))
+    )
+
+
+def _agent_is_eye_tail_shape_text(text: str) -> bool:
+    text = _clean_text(text)
+    if not text or "眼尾" not in text:
+        return False
+    return any(
+        term in text
+        for term in (
+            "下垂",
+            "上扬",
+            "上翘",
+            "翘",
+            "收",
+            "外翻",
+            "掉出来",
+            "去皮",
+            "皮肤堆积",
+            "多皮",
+            "松弛",
+            "提升",
+            "改善",
+            "类似效果",
+        )
+    )
+
+
+def _agent_is_face_overall_improvement_text(text: str) -> bool:
+    text = _clean_text(text)
+    if not text:
+        return False
+    if any(term in text for term in ("不对称", "断层", "脸型不一样", "两边脸型")):
+        return False
+    return any(term in text for term in ("整体", "面部整体", "整脸", "全脸", "整体调整", "整体改善")) and any(
+        term in text for term in ("面部", "脸", "比例", "精致", "立体", "效果", "好看", "协调")
+    ) and any(term in text for term in ("改善", "调整", "提升", "变得", "更", "好看", "精致"))
+
+
+def _agent_is_mole_pit_repair_text(text: str) -> bool:
+    text = _clean_text(text)
+    if not text:
+        return False
+    has_pit = any(term in text for term in ("点痣坑", "痣坑", "凹坑", "坑", "洞", "凹陷", "增生"))
+    has_repair = any(term in text for term in ("点痣", "祛痣", "磨削", "真皮填充", "修复", "磨平", "棱角", "过渡", "变平整"))
+    has_area = any(term in text for term in ("鼻", "面部", "脸", "局部", "皮肤"))
+    return has_pit and has_repair and has_area
+
+
 def _agent_result_demand_body_terms(item: dict[str, Any]) -> tuple[str, ...]:
     text = _agent_result_item_text(item)
+    if _agent_is_skin_current_abnormality_text(text):
+        return ("疹子", "皮疹", "发红", "泛红", "红肿", "渗出", "渗液", "瘙痒", "痒", "炎症", "敏感", "问题肌", "皮肤", "面部", "脸")
+    if _agent_is_eye_tail_shape_text(text):
+        return ("眼尾", "眼部", "外侧", "去皮", "皮肤", "下垂", "上翘")
+    if _agent_is_mole_pit_repair_text(text):
+        return ("点痣", "凹坑", "痣坑", "坑", "洞", "磨削", "真皮填充", "修复", "鼻", "面部")
+    if _agent_is_face_overall_improvement_text(text):
+        return ("整体", "面部", "脸", "轮廓", "比例", "精致", "立体", "幼态", "年轻", "协调", "下巴")
+    if any(term in text for term in ("疲惫", "疲态", "精神", "憔悴")) and any(term in text for term in ("眼", "眼周", "眼下", "泪沟", "眼袋", "面部", "脸")):
+        return ("疲惫", "疲态", "精神", "眼周", "眼下", "泪沟", "眼袋", "面部")
+    if any(term in text for term in ("下半张脸", "下半脸", "下面部", "口周", "嘴部", "嘴角", "唇突", "嘴凸", "笑起来")):
+        return ("下半张脸", "下半脸", "下面部", "口周", "嘴部", "嘴角", "唇突", "嘴凸", "笑")
+    if any(term in text for term in ("出油", "油皮", "泛红", "发红", "红血丝")):
+        return ("出油", "油皮", "泛红", "发红", "红血丝")
+    if any(term in text for term in ("耳位", "耳前", "耳后", "耳朵")):
+        return ("耳位", "耳前", "耳后", "耳朵")
     if any(term in text for term in ("上眼皮", "上睑", "眼皮肿", "眼皮有点肿")):
         return ("上眼皮", "上睑", "眼皮")
+    if any(term in text for term in ("断层", "不对称", "脸型", "外轮廓")) and any(term in text for term in ("面", "脸", "面颊", "颊")):
+        return ("脸型", "面颊", "外轮廓", "断层", "不对称")
+    if any(term in text for term in ("融", "溶解", "溶解酶")) and any(term in text for term in ("一坨", "材料", "注射", "少女针", "玻尿酸", "胶原")):
+        return ("融", "溶解", "溶解酶", "一坨", "材料")
     if "印第安纹" in text:
-        return ("印第安纹",)
+        return ("印第安纹", "中面部", "两条")
     if any(term in text for term in ("苹果肌", "面中", "中面部")):
         return ("苹果肌", "面中", "中面部")
+    if "下巴" in text:
+        return ("下巴", "衔接", "翘度", "长度", "中间", "两边", "两侧")
+    if any(term in text for term in ("咬肌", "瘦脸")):
+        return ("咬肌", "瘦脸", "小一点", "缩小")
+    if any(term in text for term in ("太阳穴", "颞区")):
+        return ("太阳穴", "颞区")
     if "眼袋" in text:
         return ("眼袋",)
     if "泪沟" in text:
@@ -3951,12 +4908,12 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any], *, context: st
             {
                 "plan": _first_text(item, "recommendation", "content", "plan", "summary"),
                 "body_part": _first_text(item, "body_part", "body_part_name", "area"),
-                "evidence": _clean_text(item.get("evidence")),
             }
             for item in recommendation_items
         ]
     )
     full_context = _agent_join_text(context, result, recommendation_context)
+    all_demand_context = _agent_join_text(items)
     for item in items:
         text = _agent_result_item_text(item)
         evidence = _clean_text(item.get("evidence"))
@@ -3970,8 +4927,59 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any], *, context: st
         history_only_evidence = (
             any(term in evidence for term in ("之前打", "以前打", "外面打", "打过", "已吸收", "吸收了", "没了吸收"))
             and not any(term in evidence for term in ("想", "希望", "想要", "要做", "想做", "改善", "关注", "考虑", "担心", "怕"))
+            and not any(term in text for term in ("想", "希望", "想要", "要做", "想做", "改善", "解决", "处理", "关注", "考虑"))
         )
         if history_only_evidence:
+            changed = True
+            continue
+        vague_original_project_interest = (
+            any(term in text for term in ("原本想做", "本来想做", "一开始想做", "之前想做"))
+            and any(term in text for term in ("光电", "项目", "皮肤", "仪器"))
+            and not any(term in text for term in ("祛斑", "色斑", "痘", "毛孔", "泛红", "发红", "出油", "暗沉", "美白", "提亮", "紧致"))
+        )
+        if vague_original_project_interest:
+            changed = True
+            continue
+        generic_material_problem = (
+            any(term in text for term in ("胶原问题", "玻尿酸问题", "材料问题"))
+            and any(term in text for term in ("融", "溶解", "溶解酶", "一坨", "少女针"))
+        )
+        if generic_material_problem:
+            changed = True
+            continue
+        vague_repair_problem = (
+            any(term in text for term in ("修复问题", "修复这方面", "修复方面"))
+            and any(term in text for term in ("眼睛", "眼部", "双眼皮", "眼修复", "修复"))
+            and any(term in all_demand_context for term in ("眼尾", "大小眼", "不对称", "眼袋", "双眼皮", "遮瞳", "皮肤堆积", "下垂"))
+        )
+        if vague_repair_problem:
+            changed = True
+            continue
+        case_preference_only = any(term in text for term in ("喜欢当前示例", "喜欢示例", "喜欢案例", "类似效果", "案例效果")) and not any(
+            term in text for term in ("改善", "解决", "处理", "去掉", "去除", "调整", "变宽", "变小", "修复", "塑形")
+        )
+        if case_preference_only:
+            changed = _agent_append_result_concern(
+                result,
+                content=_first_text(item, "demand", "content", "text", "summary") or text[:80],
+                evidence=evidence or text[:160],
+            ) or changed
+            changed = True
+            continue
+        evidence_supports_chin_filler = (
+            "下巴" in evidence
+            and any(term in evidence for term in ("衔接", "翘度", "长度", "玻尿酸", "两支", "两只", "支撑"))
+            and "双下巴" not in evidence
+        )
+        generated_chin_filler_artifact = (
+            "下巴" in text
+            and any(term in text for term in ("衔接", "翘度", "长度"))
+            and any(term in text for term in ("两侧", "两边", "中间"))
+            and context
+            and not _agent_has_explicit_chin_filler_context(context)
+            and not evidence_supports_chin_filler
+        )
+        if generated_chin_filler_artifact:
             changed = True
             continue
         weak_observation = any(term in text for term in ("有点", "一点点", "一丢丢", "轻度", "自觉", "稍微")) and not any(
@@ -3995,8 +5003,70 @@ def _agent_demote_non_demand_result_items(result: dict[str, Any], *, context: st
         )
         body_terms = _agent_result_demand_body_terms(item)
         linked_to_current_plan = bool(body_terms) and any(term in recommendation_link_context for term in body_terms)
-        goal_source = evidence or text
+        demand_content = _first_text(item, "demand", "content", "text", "summary")
+        content_has_current_goal = any(term in demand_content for term in ("想", "希望", "想要", "改善", "解决", "处理", "调整", "变", "更"))
+        content_mentions_body = bool(body_terms) and any(term in demand_content for term in body_terms)
+        evidence_body_mismatch = (
+            bool(body_terms)
+            and bool(evidence)
+            and not any(term in evidence for term in body_terms)
+            and not linked_to_current_plan
+            and not (content_has_current_goal and content_mentions_body)
+            and len(_compact_key_text(evidence)) >= 12
+        )
+        if evidence_body_mismatch:
+            changed = True
+            continue
+        goal_source = _agent_join_text(evidence, text)
         explicit_goal = any(term in goal_source for term in ("想", "想要", "希望", "改善", "解决", "处理", "要做", "想做"))
+        out_of_scope_nose = "鼻" in text and any(
+            term in text for term in ("不考虑在长沙", "想去外省", "不要做手术", "不建议", "暂时不动", "不要动")
+        )
+        if out_of_scope_nose and not linked_to_current_plan:
+            changed = True
+            continue
+        history_reaction_only = (
+            any(term in text for term in ("既往", "之前", "以前", "后面填", "打过", "填过", "做过"))
+            and any(term in text for term in ("不自然", "不好看", "不满意", "失败", "留疤", "凹陷既往问题"))
+            and not any(term in text for term in ("现在最想解决", "这次想", "今天想", "本次想", "想要改善", "希望改善", "想做", "要做"))
+        )
+        if history_reaction_only and not linked_to_current_plan:
+            changed = True
+            continue
+        overfill_preference_only = any(
+            term in text
+            for term in (
+                "不过度填充",
+                "不要过度填充",
+                "不想再填",
+                "不要再填",
+                "注射偏多",
+                "填充偏多",
+                "打多了",
+                "太满",
+                "太抛",
+                "膨出来",
+            )
+        )
+        if overfill_preference_only and not any(term in text for term in ("想融", "溶解", "改善断层", "改善脸型", "改善不对称")):
+            changed = _agent_append_result_concern(
+                result,
+                content=_first_text(item, "demand", "content", "text", "summary") or text[:80],
+                evidence=evidence or text[:160],
+            ) or changed
+            changed = True
+            continue
+        negative_preference_only = "不想" in text and not any(
+            term in text for term in ("改善", "解决", "处理", "去掉", "去除", "调整", "变宽", "变小", "变好", "修复", "塑形")
+        )
+        if negative_preference_only:
+            changed = _agent_append_result_concern(
+                result,
+                content=_first_text(item, "demand", "content", "text", "summary") or text[:80],
+                evidence=_clean_text(item.get("evidence")) or text[:160],
+            ) or changed
+            changed = True
+            continue
         if weak_observation and not explicit_goal and not linked_to_current_plan:
             changed = True
             continue
@@ -4035,6 +5105,34 @@ def _agent_context_has_demand_intent_for_terms(context: str, terms: tuple[str, .
     for term in terms:
         escaped = re.escape(term)
         if re.search(rf"({intent_cues}).{{0,18}}{escaped}|{escaped}.{{0,18}}({intent_cues})", context):
+            return True
+    return False
+
+
+def _agent_text_has_demand_intent_for_terms(text: str, terms: tuple[str, ...]) -> bool:
+    text = _clean_text(text)
+    if not text:
+        return False
+    intent_cues = "想|想要|希望|要做|想做|咨询|了解|改善|解决|处理|去掉|去除|祛|调整|怎么办"
+    for term in terms:
+        escaped = re.escape(term)
+        if re.search(rf"({intent_cues}).{{0,22}}{escaped}|{escaped}.{{0,22}}({intent_cues})", text):
+            return True
+    return False
+
+
+def _agent_context_has_customer_demand_intent_for_terms(context: str, terms: tuple[str, ...]) -> bool:
+    if not context:
+        return False
+    customer_roles = ("客户", "主客户", "主咨询客户", "同行客户", "访客", "陪同人员")
+    intent_cues = "想|想要|希望|要做|想做|咨询|了解|改善|解决|处理|去掉|去除|祛|调整|怎么办"
+    for role, text in _agent_dialogue_role_text_lines(context):
+        if not any(term in role for term in customer_roles):
+            continue
+        compact = _clean_text(text)
+        if not compact:
+            continue
+        if _agent_text_has_demand_intent_for_terms(compact, terms):
             return True
     return False
 
@@ -4097,7 +5195,7 @@ def _agent_backfill_result_demands_from_recommendations(result: dict[str, Any], 
         "泪沟" in recommendation_context
         and any(term in recommendation_context for term in ("填充", "回填", "脂肪"))
         and not any(term in demand_context for term in ("泪沟", "苹果肌", "面中", "中面部"))
-        and _agent_context_has_demand_intent_for_terms(context, ("泪沟",))
+        and _agent_context_has_customer_demand_intent_for_terms(context, ("泪沟",))
     ):
         append_demand(
             "泪沟凹陷，希望改善",
@@ -4116,9 +5214,15 @@ def _agent_backfill_result_demands_from_recommendations(result: dict[str, Any], 
 
 
 def _agent_match_recommendation_to_demand_priority(item: dict[str, Any], demands: list[dict[str, Any]]) -> list[int]:
-    text = _agent_plan_text(item)
+    text = _agent_plan_link_text(item)
     if not text:
         return []
+    plan_cluster = _agent_demand_cluster(
+        {
+            "content": text,
+            "body_part": _first_text(item, "body_part", "body_part_name", "area"),
+        }
+    )
     scored: list[tuple[int, int]] = []
     for demand in demands:
         try:
@@ -4129,7 +5233,10 @@ def _agent_match_recommendation_to_demand_priority(item: dict[str, Any], demands
             continue
         demand_text = _agent_result_item_text(demand)
         score = 0
-        for term in ("鼻", "眼", "泪沟", "面颊", "颊", "下巴", "下颌", "嘴", "唇", "咬肌", "额", "颞", "太阳穴", "胸", "副乳", "富贵包", "皮肤", "痣", "斑"):
+        demand_cluster = _agent_result_demand_key(demand)
+        if plan_cluster and demand_cluster and plan_cluster == demand_cluster:
+            score += 8
+        for term in ("眼袋", "双眼皮", "重睑", "泪沟", "眼窝", "黑眼圈", "鼻基底", "鼻头", "鼻尖", "山根", "鼻背", "面颊", "颊", "下巴", "下颌", "嘴", "唇", "咬肌", "额颞", "颞", "太阳穴", "胸", "副乳", "富贵包", "皮肤", "痣", "斑"):
             if term in text and term in demand_text:
                 score += 2
         for term in ("凹陷", "填充", "支撑", "提升", "祛", "瘦", "塑形", "修复", "美白", "淡化", "紧致"):
@@ -4159,8 +5266,9 @@ def _agent_repair_result_recommendation_links(result: dict[str, Any]) -> bool:
                 continue
             if parsed in valid and parsed not in kept:
                 kept.append(parsed)
-        if not kept:
-            kept = _agent_match_recommendation_to_demand_priority(item, demands)
+        matched = _agent_match_recommendation_to_demand_priority(item, demands)
+        if matched:
+            kept = matched
         if kept != _as_list(item.get("demand_priority")):
             item["demand_priority"] = kept
             changed = True
@@ -4191,6 +5299,116 @@ def _agent_demote_unlinked_chin_recommendations(result: dict[str, Any]) -> bool:
     block["items"] = kept
     _agent_recompute_result_recommendation_summary(result)
     return True
+
+
+def _agent_demote_unmatched_current_recommendations(result: dict[str, Any]) -> bool:
+    demands = [
+        dict(item)
+        for item in _as_list(_as_dict(result.get("customer_primary_demands")).get("items"))
+        if isinstance(item, dict)
+    ]
+    block = result.get("staff_recommendations")
+    if not demands or not isinstance(block, dict):
+        return False
+
+    body_specific_terms = (
+        "眼袋",
+        "泪沟",
+        "黑眼圈",
+        "眼窝",
+        "双眼皮",
+        "鼻",
+        "下巴",
+        "咬肌",
+        "面颊",
+        "颊区",
+        "太阳穴",
+        "额颞",
+        "腰腹",
+        "腹部",
+        "肚子",
+        "妈妈臀",
+        "手臂",
+        "大腿",
+        "背部",
+        "富贵包",
+        "胸",
+        "副乳",
+        "祛斑",
+        "点痣",
+        "毛孔",
+        "痘",
+    )
+    kept: list[dict[str, Any]] = []
+    changed = False
+    for item in [dict(value) for value in _as_list(block.get("items")) if isinstance(value, dict)]:
+        matched = _agent_match_recommendation_to_demand_priority(item, demands)
+        if matched:
+            if matched != _as_list(item.get("demand_priority")):
+                item["demand_priority"] = matched
+                changed = True
+            kept.append(item)
+            continue
+
+        plan_text = _agent_plan_link_text(item)
+        plan_cluster = _agent_demand_cluster(
+            {
+                "content": plan_text,
+                "body_part": _first_text(item, "body_part", "body_part_name", "area"),
+            }
+        )
+        has_specific_body = bool(plan_cluster) or any(term in plan_text for term in body_specific_terms)
+        if has_specific_body:
+            item["demand_priority"] = []
+            changed = _agent_append_result_seed_recommendation(result, item) or changed
+            changed = True
+            continue
+
+        kept.append(item)
+
+    if not changed:
+        return False
+    block["items"] = kept
+    _agent_recompute_result_recommendation_summary(result)
+    _agent_recompute_result_seed_summary(result)
+    return True
+
+
+def _agent_remove_generated_chin_filler_plan_artifacts(result: dict[str, Any], *, context: str = "") -> bool:
+    if not context or _agent_has_explicit_chin_filler_context(context):
+        return False
+    changed = False
+    for block_name in ("staff_recommendations", "staff_seed_recommendations"):
+        block = result.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        kept: list[dict[str, Any]] = []
+        for item in [dict(value) for value in _as_list(block.get("items")) if isinstance(value, dict)]:
+            text = _agent_plan_text(item)
+            evidence = _clean_text(item.get("evidence"))
+            evidence_supports_chin_filler = (
+                "下巴" in evidence
+                and any(term in evidence for term in ("衔接", "翘度", "长度", "玻尿酸", "两支", "两只", "支撑"))
+                and "双下巴" not in evidence
+            )
+            generated_artifact = (
+                "下巴" in text
+                and any(term in text for term in ("两侧", "两边", "中间"))
+                and any(term in text for term in ("衔接", "翘度", "长度"))
+                and any(term in text for term in ("玻尿酸", "硬质", "两支", "两只", "支撑"))
+                and not evidence_supports_chin_filler
+            )
+            if generated_artifact:
+                changed = True
+                continue
+            kept.append(item)
+        if len(kept) != len(_as_list(block.get("items"))):
+            block["items"] = kept
+            if block_name == "staff_recommendations":
+                _agent_recompute_result_recommendation_summary(result)
+            else:
+                _agent_recompute_result_seed_summary(result)
+    return changed
 
 
 _AGENT_RECOMMENDATION_EVIDENCE_ANCHORS = (
@@ -4453,6 +5671,65 @@ def _agent_append_result_seed_recommendation(result: dict[str, Any], item: dict[
     return True
 
 
+def _agent_promote_seed_recommendations_for_current_demands(result: dict[str, Any]) -> bool:
+    """Move seed plans back to current recommendations when they directly solve a current demand."""
+
+    demands = [
+        dict(item)
+        for item in _as_list(_as_dict(result.get("customer_primary_demands")).get("items"))
+        if isinstance(item, dict)
+    ]
+    seed_block = result.get("staff_seed_recommendations")
+    if not demands or not isinstance(seed_block, dict):
+        return False
+
+    demand_clusters = {
+        _agent_result_demand_key(item)
+        for item in demands
+        if _agent_result_demand_key(item)
+    }
+    if not demand_clusters:
+        return False
+
+    current_block = result.setdefault("staff_recommendations", {})
+    if not isinstance(current_block, dict):
+        current_block = {"summary": "", "items": []}
+        result["staff_recommendations"] = current_block
+    current_items = [dict(item) for item in _as_list(current_block.get("items")) if isinstance(item, dict)]
+    seed_items = [dict(item) for item in _as_list(seed_block.get("items")) if isinstance(item, dict)]
+    kept_seeds: list[dict[str, Any]] = []
+    changed = False
+    deferred_terms = ("以后", "后续", "下次", "下一次", "维养", "维护", "转科", "暂缓", "先不", "可选", "种草")
+    existing_signatures = {_agent_plan_semantic_signature(item) for item in current_items if _agent_plan_semantic_signature(item)}
+
+    for item in seed_items:
+        text = _agent_plan_text(item)
+        cluster = _agent_demand_cluster(
+            {
+                "content": text,
+                "body_part": _first_text(item, "body_part", "body_part_name", "area"),
+            }
+        )
+        signature = _agent_plan_semantic_signature(item)
+        if cluster in demand_clusters and not any(term in text for term in deferred_terms):
+            if not signature or signature not in existing_signatures:
+                current_items.append(item)
+                if signature:
+                    existing_signatures.add(signature)
+            changed = True
+            continue
+        kept_seeds.append(item)
+
+    if not changed:
+        return False
+    current_block["items"] = current_items
+    seed_block["items"] = kept_seeds
+    _agent_repair_result_recommendation_links(result)
+    _agent_recompute_result_recommendation_summary(result)
+    _agent_recompute_result_seed_summary(result)
+    return True
+
+
 def _agent_sync_final_display_sections(result: dict[str, Any]) -> bool:
     """Keep legacy nested display sections aligned with the audited top-level result."""
     changed = False
@@ -4608,6 +5885,56 @@ def _agent_restore_sparse_top_level_from_primary_participant(result: dict[str, A
     return changed
 
 
+def _agent_run_structural_consistency_audit(result: dict[str, Any], *, context: str = "") -> bool:
+    """Final deterministic audit for the Agent result structure.
+
+    LLM steps are responsible for understanding the dialogue.  This pass only
+    enforces structural invariants that should be true regardless of specialty:
+    primary demands are non-duplicated, plans link to the right demand, seed
+    plans do not hide current-demand plans, and SAP indications do not come
+    from dependent/auxiliary steps alone.
+    """
+
+    changed = False
+    audit_steps: list[str] = []
+
+    def apply_step(name: str, value: bool) -> None:
+        nonlocal changed
+        if value:
+            changed = True
+            audit_steps.append(name)
+
+    # Run in two passes because backfills/promotions can create items that need
+    # another normalization/linking pass.
+    for _ in range(2):
+        apply_step("demote_non_demands", _agent_demote_non_demand_result_items(result, context=context))
+        apply_step("dedupe_demands", _agent_dedupe_result_demands(result))
+        apply_step("semantic_demand_normalization", _agent_normalize_result_demands_semantically(result, context=context))
+        apply_step("explicit_customer_demand_recovery", _agent_backfill_explicit_customer_demands_from_context(result, context=context))
+        apply_step("recommendation_link_repair", _agent_repair_result_recommendation_links(result))
+        apply_step("generated_chin_plan_artifact_remove", _agent_remove_generated_chin_filler_plan_artifacts(result, context=context))
+        apply_step("unmatched_current_recommendation_demote", _agent_demote_unmatched_current_recommendations(result))
+        apply_step("seed_to_current_promotion", _agent_promote_seed_recommendations_for_current_demands(result))
+        apply_step("recommendation_link_repair_after_seed", _agent_repair_result_recommendation_links(result))
+        apply_step("auxiliary_step_indication_prune", _agent_prune_result_auxiliary_step_indications(result))
+        apply_step("recommendation_dedupe", _agent_dedupe_result_recommendation_block(result, "staff_recommendations"))
+        apply_step("seed_dedupe", _agent_dedupe_result_recommendation_block(result, "staff_seed_recommendations"))
+
+    # Explicit recovery runs after demotion inside each pass.  Finish with one
+    # demotion/dedupe pass so out-of-scope or history-only items recovered from
+    # generic intent phrases do not leak back into the display layer.
+    apply_step("final_demote_non_demands", _agent_demote_non_demand_result_items(result, context=context))
+    apply_step("final_dedupe_demands", _agent_dedupe_result_demands(result))
+    apply_step("final_recommendation_link_repair", _agent_repair_result_recommendation_links(result))
+
+    if changed:
+        debug = result.setdefault("staged_pipeline_debug", {})
+        if isinstance(debug, dict):
+            previous = _as_list(debug.get("agent_structural_consistency_audit_steps"))
+            debug["agent_structural_consistency_audit_steps"] = [*previous, *audit_steps]
+    return changed
+
+
 def _agent_finalize_analysis_result(
     result: dict[str, Any],
     *,
@@ -4625,12 +5952,15 @@ def _agent_finalize_analysis_result(
     changed = _agent_backfill_result_demands_from_recommendations(updated, context=context) or changed
     changed = _agent_remove_executor_only_result_recommendations(updated) or changed
     changed = _agent_repair_result_recommendation_links(updated) or changed
+    changed = _agent_remove_generated_chin_filler_plan_artifacts(updated, context=context) or changed
+    changed = _agent_demote_unmatched_current_recommendations(updated) or changed
     changed = _agent_demote_unlinked_chin_recommendations(updated) or changed
     changed = _agent_repair_result_recommendation_evidence(updated, context=context) or changed
     changed = _agent_repair_budget_raw_quote(updated, context=context) or changed
     changed = _agent_repair_overinferred_budget(updated, context=context) or changed
     changed = _agent_prune_budget_evidence_noise(updated) or changed
     changed = _agent_dedupe_result_demands(updated) or changed
+    changed = _agent_normalize_result_demands_semantically(updated, context=context) or changed
     recommendation_context = _agent_join_text(_as_dict(updated.get("staff_recommendations")).get("items"))
     if allow_indication_backfill:
         if any(term in recommendation_context for term in ("唇部", "嘴唇", "嘴巴", "唇峰", "唇珠", "口周")) and any(
@@ -4700,10 +6030,17 @@ def _agent_finalize_analysis_result(
         ) or changed
 
     changed = _agent_backfill_recent_treatment_history_from_context(updated, context=context) or changed
+    changed = _agent_backfill_price_sensitivity_from_context(updated, context=context) or changed
+    changed = _agent_backfill_injection_demands_and_plans_from_context(updated, context=context) or changed
+    changed = _agent_backfill_explicit_customer_demands_from_context(updated, context=context) or changed
+    changed = _agent_promote_seed_recommendations_for_current_demands(updated) or changed
+    changed = _agent_normalize_result_demands_semantically(updated, context=context) or changed
+    changed = _agent_prune_result_auxiliary_step_indications(updated) or changed
     changed = _agent_prune_result_profile_tags(updated) or changed
     changed = _agent_dedupe_result_recommendation_block(updated, "staff_recommendations") or changed
     changed = _agent_dedupe_result_recommendation_block(updated, "staff_seed_recommendations") or changed
     changed = _agent_restore_sparse_top_level_from_primary_participant(updated) or changed
+    changed = _agent_run_structural_consistency_audit(updated, context=context) or changed
     changed = _agent_sync_final_display_sections(updated) or changed
     if changed:
         debug = updated.setdefault("staged_pipeline_debug", {})
@@ -8030,6 +9367,79 @@ _CORRECTION_CUSTOMER_SIDE_STAFF_CUES = (
     "那我们去看看",
     "带您去看",
     "带你去看",
+    "我会跟你讲",
+    "我给你讲",
+    "老师会跟你讲",
+    "我已经说完",
+    "后期我会跟你讲",
+    "先得把额头",
+    "有没有必要",
+    "能消多少看",
+    "交给腾讯",
+)
+_CORRECTION_DOCTOR_EXPLANATION_CUES = (
+    "首先",
+    "建议你",
+    "我建议",
+    "你这个",
+    "你的情况",
+    "解决",
+    "改善",
+    "需要",
+    "可以通过",
+    "不建议",
+    "风险",
+    "恢复",
+    "层次",
+    "点位",
+    "材料",
+    "用量",
+    "支撑",
+    "衔接",
+    "比例",
+    "效果",
+    "不协调",
+    "移位",
+    "硬质",
+    "软材料",
+    "骨头表面",
+    "颞区",
+    "太阳穴",
+    "额颞",
+    "内轮廓线",
+    "外C线",
+    "外轮廓线",
+    "耳前韧带",
+    "翘度",
+    "幼态",
+    "发育",
+    "底层逻辑",
+    "受不了",
+    "剂量",
+    "先打一只",
+    "一只肉毒",
+    "每边",
+    "两支",
+    "两只",
+    "一支",
+    "一只",
+    "注射",
+    "填充",
+    "玻尿酸",
+    "胶原",
+    "瑞德喜",
+    "脂肪",
+    "自体脂肪",
+    "双眼皮",
+    "眼袋",
+    "泪沟",
+    "苹果肌",
+    "眼窝",
+    "凹陷",
+    "下垂",
+    "皮肤",
+    "手术方式",
+    "治疗路径",
 )
 _CORRECTION_TERM_CUES = (
     "一字光波",
@@ -8067,6 +9477,34 @@ def _role_looks_staff(role: str) -> bool:
     return any(term in role for term in ("咨询师", "医生", "助理", "员工", "前台", "工牌本人"))
 
 
+def _line_has_professional_explanation_context(role: str, compact_text: str) -> bool:
+    if not compact_text or not (_role_looks_customer(role) or _role_looks_staff(role)):
+        return False
+    hit_count = sum(1 for cue in _CORRECTION_DOCTOR_EXPLANATION_CUES if cue in compact_text)
+    if hit_count >= 3 and len(compact_text) >= 24:
+        return True
+    technical_anchors = (
+        "颞区",
+        "太阳穴",
+        "外C线",
+        "外轮廓线",
+        "内轮廓线",
+        "耳前韧带",
+        "玻尿酸",
+        "肉毒",
+        "剂量",
+        "骨头表面",
+        "材料",
+        "支撑",
+        "衔接",
+        "翘度",
+        "幼态",
+    )
+    if hit_count >= 2 and len(compact_text) >= 18 and any(anchor in compact_text for anchor in technical_anchors):
+        return True
+    return hit_count >= 2 and any(anchor in compact_text for anchor in ("建议你", "我建议", "首先", "你这个", "你的情况", "不建议"))
+
+
 def _line_needs_correction_context(line: str, metadata: dict[str, str]) -> bool:
     role, text = _line_role_and_text(line)
     compact_text = re.sub(r"\s+", "", text)
@@ -8079,6 +9517,8 @@ def _line_needs_correction_context(line: str, metadata: dict[str, str]) -> bool:
     if _role_looks_customer(role) and any(cue in compact_text for cue in _CORRECTION_PRE_RECEPTION_CUES):
         return True
     if _role_looks_customer(role) and any(cue in compact_text for cue in _CORRECTION_CUSTOMER_SIDE_STAFF_CUES):
+        return True
+    if _line_has_professional_explanation_context(role, compact_text):
         return True
     if any(cue in compact_text for cue in _CORRECTION_TERM_CUES):
         return True

@@ -35,6 +35,7 @@ type TenantFormValues = {
   sap_summary_template?: string
   sap_summary_prompt?: string
   sap_summary_enabled: boolean
+  sap_auto_update_existing_consultation: boolean
   is_default: boolean
   is_active: boolean
 }
@@ -124,6 +125,7 @@ function compactPayload(values: TenantFormValues, editing: boolean): WecomTenant
     sap_summary_template: values.sap_summary_template?.trim() || null,
     sap_summary_prompt: values.sap_summary_prompt?.trim() || null,
     sap_summary_enabled: values.sap_summary_enabled !== false,
+    sap_auto_update_existing_consultation: values.sap_auto_update_existing_consultation === true,
     is_default: values.is_default,
     is_active: values.is_active,
   }
@@ -256,6 +258,7 @@ export function InstitutionsPage() {
       sap_summary_template: tenant?.sap_summary_template ?? '',
       sap_summary_prompt: tenant?.sap_summary_prompt ?? '',
       sap_summary_enabled: tenant?.sap_summary_enabled ?? true,
+      sap_auto_update_existing_consultation: tenant?.sap_auto_update_existing_consultation ?? false,
       is_default: tenant?.is_default ?? false,
       is_active: tenant?.is_active ?? true,
     })
@@ -492,6 +495,21 @@ export function InstitutionsPage() {
               },
             },
             {
+              title: 'SAP已有咨询单',
+              width: 190,
+              render: (_value, row: WecomTenant) => {
+                const enabled = row.sap_auto_update_existing_consultation === true
+                return (
+                  <Space direction="vertical" size={2}>
+                    <Tag color={enabled ? 'orange' : 'green'}>{enabled ? '允许自动覆盖' : '不自动覆盖'}</Tag>
+                    <Text type="secondary" ellipsis>
+                      {enabled ? '已有咨询单时改为修改回传' : '已有咨询单时停止自动回传'}
+                    </Text>
+                  </Space>
+                )
+              },
+            },
+            {
               title: '科室助理',
               width: 180,
               render: (_value, row: WecomTenant) => {
@@ -610,6 +628,14 @@ export function InstitutionsPage() {
             extra="关闭后，SAP咨询备注不会生成“●总结信息”段，也不会向分析提示词追加本机构总结模板。"
           >
             <Switch checkedChildren="启用" unCheckedChildren="禁用" />
+          </Form.Item>
+          <Form.Item
+            name="sap_auto_update_existing_consultation"
+            label="已有SAP咨询单时自动覆盖"
+            valuePropName="checked"
+            extra="关闭时，自动回传只使用新建模式，若SAP返回已有咨询单则停止并显示“已有咨询单”。开启时，自动回传先新建，若SAP返回已有咨询单号，则改用修改模式覆盖该咨询单。"
+          >
+            <Switch checkedChildren="允许覆盖" unCheckedChildren="不覆盖" />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(prev, cur) => prev.sap_summary_enabled !== cur.sap_summary_enabled}>
             {({ getFieldValue }) => {

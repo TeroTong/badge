@@ -248,6 +248,7 @@ export type WecomTenant = {
   sap_summary_template: string | null
   sap_summary_prompt: string | null
   sap_summary_enabled: boolean
+  sap_auto_update_existing_consultation: boolean
   department_assistant_match_config: DepartmentAssistantMatchConfig | null
   is_default: boolean
   is_active: boolean
@@ -272,6 +273,7 @@ export type WecomTenantPayload = {
   sap_summary_template?: string | null
   sap_summary_prompt?: string | null
   sap_summary_enabled?: boolean
+  sap_auto_update_existing_consultation?: boolean
   department_assistant_match_config?: DepartmentAssistantMatchConfig | null
   is_default?: boolean
   is_active?: boolean

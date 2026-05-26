@@ -16,7 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smart_badge_api.core.config import get_settings
-from smart_badge_api.db.models import AnalysisTask, Recording, RecordingVisitAnalysis, SapConsultationReview, SapPushLog
+from smart_badge_api.db.models import (
+    AnalysisTask,
+    Recording,
+    RecordingVisitAnalysis,
+    SapConsultationReview,
+    SapPushLog,
+    WecomTenant,
+)
 from smart_badge_api.db.session import _session_factory
 from smart_badge_api.sap_consultation import generate_sap_consultation_payloads
 from smart_badge_api.sap_push_notifications import notify_sap_push_result
@@ -171,10 +178,17 @@ def _extract_existing_consultation_no(message: str | None) -> str | None:
     text = str(message or "").strip()
     if not text or "已有咨询单" not in text:
         return None
-    matches = re.findall(r"咨询单[【\\[]?([A-Za-z0-9]+)[】\\]]?", text)
-    if not matches:
-        return None
-    return str(matches[-1]).strip() or None
+    patterns = (
+        r"ZXDH\s*[:：=]?\s*([A-Za-z0-9_-]+)",
+        r"咨询单号\s*[:：=]?\s*([A-Za-z0-9_-]+)",
+        r"咨询单[【\[]\s*([A-Za-z0-9_-]+)\s*[】\]]",
+        r"已有咨询单[^\dA-Za-z]+([A-Za-z0-9_-]+)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        if matches:
+            return str(matches[-1]).strip() or None
+    return None
 
 
 def _is_automatic_trigger_mode(trigger_mode: str | None) -> bool:
@@ -207,6 +221,40 @@ def _build_update_retry_payload(payload: dict[str, Any], consultation_no: str) -
     zxxx["mode"] = "U"
     zxxx["zxdh"] = consultation_no
     return cloned
+
+
+def _extract_payload_hospital_code(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    zxxx = payload.get("zxxx")
+    if not isinstance(zxxx, dict):
+        return ""
+    return str(zxxx.get("JGBM") or zxxx.get("jgbm") or "").strip()
+
+
+async def _allow_auto_update_existing_consultation(
+    db: AsyncSession,
+    payload: dict[str, Any] | None,
+    cache: dict[str, bool],
+) -> bool:
+    hospital_code = _extract_payload_hospital_code(payload)
+    if not hospital_code:
+        return False
+    if hospital_code in cache:
+        return cache[hospital_code]
+    enabled = (
+        await db.execute(
+            select(WecomTenant.sap_auto_update_existing_consultation)
+            .where(
+                WecomTenant.default_hospital_code == hospital_code,
+                WecomTenant.is_active.is_(True),
+            )
+            .order_by(WecomTenant.is_default.desc(), WecomTenant.updated_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    cache[hospital_code] = bool(enabled)
+    return cache[hospital_code]
 
 
 def is_existing_consultation_manual_required_log(log: SapPushLog | dict[str, Any] | None) -> bool:
@@ -515,11 +563,13 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
             "traceId": trace_id,
         }
         response_items: list[dict[str, Any]] = []
+        auto_update_existing_policy_cache: dict[str, bool] = {}
 
         try:
             async with _new_sap_push_client() as client:
                 for index, body in enumerate(gateway_bodies, start=1):
-                    payload_mode = str((request_payloads[index - 1].get("zxxx") or {}).get("mode") or "").strip() or "C"
+                    request_payload = request_payloads[index - 1]
+                    payload_mode = str((request_payload.get("zxxx") or {}).get("mode") or "").strip() or "C"
                     response = await client.post(settings.sap_rfc_gateway_url, json=body, headers=headers)
                     try:
                         response_body: Any = response.json()
@@ -539,7 +589,17 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
                     )
                     if not existing_consultation_no:
                         continue
-                    if _is_automatic_trigger_mode(push_log.trigger_mode):
+                    is_automatic = _is_automatic_trigger_mode(push_log.trigger_mode)
+                    allow_automatic_update = (
+                        await _allow_auto_update_existing_consultation(
+                            db,
+                            request_payload,
+                            auto_update_existing_policy_cache,
+                        )
+                        if is_automatic
+                        else True
+                    )
+                    if is_automatic and not allow_automatic_update:
                         created_item["manual_required"] = True
                         created_item["existing_consultation_no"] = existing_consultation_no
                         created_item["retry_reason"] = (
@@ -547,7 +607,7 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
                         )
                         continue
 
-                    retry_payload = _build_update_retry_payload(request_payloads[index - 1], existing_consultation_no)
+                    retry_payload = _build_update_retry_payload(request_payload, existing_consultation_no)
                     retry_body = build_sap_gateway_request(retry_payload)
                     push_log.gateway_requests = list(push_log.gateway_requests or []) + [_mask_gateway_request_for_log(retry_body)]
                     await db.commit()
@@ -559,11 +619,19 @@ async def execute_sap_push_log(push_log_id: str) -> SapPushLog | None:
                         retry_response_body = {"raw_text": retry_response.text}
 
                     response_items[-1]["superseded_by_retry"] = True
-                    response_items[-1]["retry_reason"] = f"已有咨询单，改用咨询单号 {existing_consultation_no} 进行修改回传"
+                    response_items[-1]["retry_reason"] = (
+                        f"已有咨询单，该机构已开启自动覆盖，改用咨询单号 {existing_consultation_no} 进行修改回传"
+                        if is_automatic
+                        else f"已有咨询单，改用咨询单号 {existing_consultation_no} 进行修改回传"
+                    )
                     retry_item = _build_response_item(index, retry_response.status_code, retry_response_body)
                     retry_item["attempt"] = 2
                     retry_item["payload_mode"] = "U"
-                    retry_item["retry_reason"] = f"使用已有咨询单号 {existing_consultation_no} 改为修改模式回传"
+                    retry_item["retry_reason"] = (
+                        f"机构允许自动覆盖，使用已有咨询单号 {existing_consultation_no} 改为修改模式回传"
+                        if is_automatic
+                        else f"使用已有咨询单号 {existing_consultation_no} 改为修改模式回传"
+                    )
                     retry_item["superseded_by_retry"] = False
                     response_items.append(retry_item)
         except Exception as exc:
